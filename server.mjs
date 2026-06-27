@@ -10,7 +10,7 @@
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { ask, retrieve, chunks, refLink } from './rag.mjs';
+import { answer, retrieve, chunks, refLink } from './rag.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -38,7 +38,6 @@ function readJson(req) {
         req.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({}); } });
     });
 }
-async function collect(stream) { let s = ''; for await (const d of stream) s += d; return s; }
 const sources = (retrieved) => retrieved.map((c) => ({ title: c.title, source: c.source, score: c.score, link: refLink(c) }));
 
 const server = createServer(async (req, res) => {
@@ -74,23 +73,24 @@ const server = createServer(async (req, res) => {
             return json(200, { results });
         }
 
-        // One-shot answer (CLI / tchat).
+        // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
-            const { retrieved, links, stream } = await ask(question, history);
-            const answer = await collect(stream);
-            return json(200, { answer, links, sources: sources(retrieved) });
+            const { retrieved, links, text, corrected } = await answer(question, history);
+            return json(200, { answer: text, links, sources: sources(retrieved), corrected });
         }
 
-        // Streaming answer (widget).
+        // Widget. We verify the full answer before sending (draft is buffered for
+        // the fabrication check), so this isn't token-by-token from the model — the
+        // verified final text is delivered in one 'token' event after a ~1–2s wait.
         if (url.pathname === '/chat') {
             res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
-                const { retrieved, links, stream } = await ask(question, history);
+                const { retrieved, links, text, corrected } = await answer(question, history);
                 send('sources', sources(retrieved));
                 send('links', links);
-                for await (const delta of stream) send('token', delta);
-                send('done', {});
+                send('token', text);
+                send('done', { corrected });
             } catch (e) {
                 send('error', String((e && e.message) || e));
             }

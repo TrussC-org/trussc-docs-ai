@@ -1,7 +1,7 @@
 node_modules/
-# generated corpus (rebuild with `npm run build`, or scp to the server)
+# chunks.embedded.json IS committed (runtime artifact → clone-and-go on the server;
+# rebuilding it needs the source repos + Ollama, which the server may not have).
 chunks.jsonl
-chunks.embedded.json
 # dev/session artifacts
 eval-report.txt
 MORNING.md

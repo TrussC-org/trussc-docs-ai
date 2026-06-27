@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -80,9 +80,9 @@ export const SYSTEM = [
     'You are the TrussC documentation assistant for beginners.',
     'TrussC is a lightweight C++ creative-coding framework (openFrameworks-like, built on sokol).',
     'Answer ONLY from the provided context and the core conventions. If the context does not cover the question, say you are not sure instead of guessing.',
-    'Keep it SHORT — 1 to 3 sentences. Style: "there is X — see the reference/example for details". Name the relevant API(s) by exact name (e.g. drawRect, Color::fromOKLab) or the example name.',
-    'Include AT MOST one tiny code snippet (1–3 lines) and only when it truly helps; usually none. Do NOT paste full signatures or long examples.',
-    'Do NOT invent links, URLs, anchors, function names, or signatures that are not in the context.',
+    'Keep it short (1–3 sentences). Name the relevant API(s) by their exact name (e.g. drawRect, Color::fromOKLab) and point to the reference or an example.',
+    'A short code example is welcome when it helps. BUT every function, method, type, enum value, and parameter you mention — in prose OR code — MUST appear in the provided context. Never introduce or guess an API that is not shown; if you are not sure it exists, do not use it (describe it in words instead).',
+    'Do NOT invent links, URLs, or anchors.',
     "Reply in the user's language (a Japanese question gets a Japanese answer).",
 ].join(' ');
 
@@ -112,7 +112,7 @@ async function* streamLines(stream) {
 export async function* chatStream(messages) {
     const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: GEN_MODEL, think: false, stream: true, messages, options: { num_ctx: NUM_CTX } }),
+        body: JSON.stringify({ model: GEN_MODEL, think: THINK, stream: true, messages, options: { num_ctx: NUM_CTX } }),
     });
     if (!r.ok) throw new Error(`chat ${r.status}: ${await r.text()}`);
     for await (const line of streamLines(r.body)) {
@@ -122,13 +122,72 @@ export async function* chatStream(messages) {
     }
 }
 
-// Retrieve + answer, with optional conversation history for follow-up chains.
-// Retrieval uses the last couple of user turns + the new question, so a terse
-// follow-up ("…by a specific device name?") still pulls the right topic (serial).
-// Returns { retrieved, links, stream }.
-export async function ask(question, history = [], k = TOP_K) {
+async function collect(stream) { let s = ''; for await (const d of stream) s += d; return s; }
+
+// --- Deterministic ground-truth check ---------------------------------------
+// The real symbol set, derived from the corpus itself (no extra file needed on
+// the server). `types` = names usable before '::' (types + enums); `qualified` =
+// known Owner::member (method/static chunk titles + enum values parsed from text).
+let _api = null;
+function apiIndex() {
+    if (_api) return _api;
+    const types = new Set(), qualified = new Set();
+    for (const c of chunks()) {
+        if (c.source !== 'reference') continue;
+        const k = c.meta && c.meta.kind;
+        if (k === 'type' || k === 'enum') types.add(c.title);
+        if (c.title.includes('::')) qualified.add(c.title);
+        if (k === 'enum') for (const m of c.text.matchAll(/\b[A-Z][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b/g)) qualified.add(m[0]);
+    }
+    _api = { types, qualified };
+    return _api;
+}
+
+// Find fabricated APIs: a `Known::member` where the type is real but the member is
+// not. High precision — user placeholders (MyClass::foo) are ignored because
+// MyClass isn't a known type. Returns Map<owner, Set<badMember>> ({} = clean).
+function findFabrications(text) {
+    const { types, qualified } = apiIndex();
+    const bad = new Map();
+    for (const m of text.matchAll(/\b([A-Z][A-Za-z0-9_]*)::([A-Za-z_][A-Za-z0-9_]*)/g)) {
+        const owner = m[1], member = m[2];
+        if (types.has(owner) && !qualified.has(`${owner}::${member}`)) {
+            if (!bad.has(owner)) bad.set(owner, new Set());
+            bad.get(owner).add(member);
+        }
+    }
+    return bad;
+}
+function validMembersOf(owner) {
+    const pre = owner + '::';
+    return [...apiIndex().qualified].filter((q) => q.startsWith(pre)).map((q) => q.slice(pre.length));
+}
+
+// Retrieve → draft (think:false, ~1s) → deterministic check → corrective pass ONLY
+// when a fabricated API is detected (verifier is ground-truth membership, not an
+// LLM, so the common clean case stays single-pass). History enables follow-ups.
+// Returns { retrieved, links, text, corrected }.
+export async function answer(question, history = [], k = TOP_K) {
     const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
-    const query = [...recentUser, question].join('\n');
-    const retrieved = await retrieve(query, k);
-    return { retrieved, links: buildLinks(retrieved), stream: chatStream(buildMessages(question, retrieved, history)) };
+    const retrieved = await retrieve([...recentUser, question].join('\n'), k);
+    const links = buildLinks(retrieved);
+    const messages = buildMessages(question, retrieved, history);
+
+    let text = await collect(chatStream(messages));
+    let corrected = false;
+    const bad = findFabrications(text);
+    if (bad.size) {
+        corrected = true;
+        const notes = [...bad.entries()].map(([owner, members]) => {
+            const wrong = [...members].map((m) => `${owner}::${m}`).join(', ');
+            const valid = validMembersOf(owner);
+            return valid.length ? `- ${wrong} do not exist. Real ${owner} members: ${valid.join(', ')}.`
+                                : `- ${wrong} do not exist (${owner} has no such member).`;
+        }).join('\n');
+        const fix = [...messages,
+            { role: 'assistant', content: text },
+            { role: 'user', content: `Your previous answer used APIs that do NOT exist in TrussC:\n${notes}\nRewrite it using only real APIs from the context — remove or replace the invalid references. Keep it short and in the same language.` }];
+        text = await collect(chatStream(fix));
+    }
+    return { retrieved, links, text, corrected };
 }

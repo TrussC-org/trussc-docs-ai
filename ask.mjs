@@ -1,20 +1,20 @@
 // CLI: ask a question against the embedded corpus.
 //   node ask.mjs "how do I draw a curve?"
 //   node ask.mjs "Nodeでシーングラフを作るメリットは？"
-// Retrieved chunk titles + scores go to stderr; the streamed answer to stdout.
-import { ask } from './rag.mjs';
+// Retrieval + (corrected?) note go to stderr; the answer + links to stdout.
+import { answer } from './rag.mjs';
 
 const question = process.argv.slice(2).join(' ').trim();
 if (!question) { console.error('usage: node ask.mjs "<question>"'); process.exit(1); }
 
-const { retrieved, links, stream } = await ask(question);
+const { retrieved, links, text, corrected } = await answer(question);
 
 console.error('— retrieved —');
 for (const c of retrieved) console.error(`  ${c.score.toFixed(3)}  [${c.source}] ${c.title}`);
+if (corrected) console.error('  (verify: fabricated API detected → corrective pass ran)');
 console.error('—\n');
 
-for await (const delta of stream) process.stdout.write(delta);
-process.stdout.write('\n');
+process.stdout.write(text + '\n');
 
 if (links.length) {
     console.log('\n詳しくは:');

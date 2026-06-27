@@ -14,10 +14,11 @@ WorkingDirectory=/opt/trussc-docs-ai
 ExecStart=/usr/bin/node server.mjs
 Environment=PORT=8788
 Environment=OLLAMA_URL=http://127.0.0.1:11434
-Environment=GEN_MODEL=qwen3:8b
+Environment=GEN_MODEL=qwen3.5:4b
 Environment=EMBED_MODEL=bge-m3
-Environment=NUM_CTX=8192
-Environment=EMBED_ON_CPU=1
+Environment=NUM_CTX=24000
+# 4B (~3.6GB) + bge-m3 (~0.7GB) both fit the 8GB A1000 on GPU with headroom, so
+# embeddings stay on GPU (fast). Set EMBED_ON_CPU=1 only if VRAM gets tight.
 Environment=REF_BASE=https://trussc.org
 Environment=ALLOW_ORIGIN=https://trussc.org
 Restart=always

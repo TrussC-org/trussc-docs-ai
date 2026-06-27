@@ -1,7 +1,12 @@
-# systemd unit for the TrussC trussc-docs-ai API.
+# systemd unit for the TrussC trussc-docs-ai API. This is a TEMPLATE — adjust:
+#   User=             the service user
+#   WorkingDirectory= where you installed the project
+#   ExecStart=        path to node (/usr/bin/node for a system install; for nvm use
+#                     the absolute path, e.g. /home/<user>/.nvm/versions/node/<ver>/bin/node)
+#   STATS_SALT=       add a real secret in prod so hashed IPs can't be correlated
+#                     (e.g. `openssl rand -hex 16`). Omitted here on purpose.
 # Install: sudo cp deploy/trussc-docs-ai.service /etc/systemd/system/
 #          sudo systemctl daemon-reload && sudo systemctl enable --now trussc-docs-ai
-# Adjust User= and WorkingDirectory= to match where you put the project.
 [Unit]
 Description=TrussC trussc-docs-ai RAG API
 After=network-online.target ollama.service

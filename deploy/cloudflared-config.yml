@@ -2,7 +2,7 @@
 # Replace <TUNNEL_ID> and the credentials path with the values printed by
 # `cloudflared tunnel create trussc-docs-chat`.
 tunnel: <TUNNEL_ID>
-credentials-file: /home/trussc/.cloudflared/<TUNNEL_ID>.json
+credentials-file: /home/<user>/.cloudflared/<TUNNEL_ID>.json
 
 ingress:
   - hostname: api.trussc.org

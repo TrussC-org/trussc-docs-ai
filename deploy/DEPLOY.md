@@ -24,20 +24,30 @@ ollama pull bge-m3
 ```
 
 ### 2. App + corpus
+Pick an install dir and a service user (examples below use `/opt/trussc-docs-ai`
+and a `trussc` user — adjust both to taste, e.g. your own user + home dir).
 ```bash
-sudo mkdir -p /opt/trussc-docs-ai && sudo chown trussc:trussc /opt/trussc-docs-ai
-# copy the project (config/build/embed/rag/server/ask/eval .mjs, demo.html, package.json)
-rsync -a --exclude node_modules ~/Nextcloud/Make/TrussC/trussc-docs-ai/ trussc@SERVER:/opt/trussc-docs-ai/
+DEST=/opt/trussc-docs-ai          # where the app will live
+SVCUSER=trussc                    # the user the service runs as
+sudo mkdir -p "$DEST" && sudo chown "$SVCUSER:$SVCUSER" "$DEST"
+# copy the project from your clone (run from the repo root, or git clone on the box)
+git clone https://github.com/TrussC-org/trussc-docs-ai "$DEST"   # OR: rsync -a --exclude node_modules ./ user@SERVER:"$DEST"/
 ```
-The corpus (`chunks.embedded.json`) is needed at runtime. Either copy it over (same
-`bge-m3` model → embeddings are valid) **or** rebuild on the box:
+No machine-specific paths are baked in — `config.mjs` resolves everything from env
+vars with sensible defaults, so the running server needs no edits. It serves the
+committed `chunks.embedded.json`; nothing else is required to run.
+
+**Rebuilding the corpus (optional).** Only needed if the docs changed and you want
+to regenerate `chunks.embedded.json`. It reads the TrussC core + trussc.org site
+repos. By default `config.mjs` expects them as siblings of this repo
+(`../TrussC`, `../trussc.org`); otherwise point `TRUSSC_REPO` / `SITE_REPO` at them
+(or override the individual `FOR_AI` / `TRUSSC_API` / … vars):
 ```bash
-cd /opt/trussc-docs-ai && node build-chunks.mjs && node embed.mjs   # needs the TrussC + trussc.org repos present, see config.mjs paths
+cd "$DEST"
+TRUSSC_REPO=/path/to/TrussC SITE_REPO=/path/to/trussc.org node build-chunks.mjs && node embed.mjs
 ```
-> Note: `config.mjs` points at local repo paths for the SOURCES (FOR_AI, trussc-api.js,
-> of-mapping.json, examples). For build-on-server, clone those repos and adjust the paths,
-> or just copy `chunks.embedded.json` from your Mac and skip building on the server
-> (recommended — same `bge-m3` → embeddings are valid).
+> Easiest path: just copy `chunks.embedded.json` over (it's committed) and skip the
+> rebuild — same `bge-m3` model → the embeddings are valid anywhere.
 
 ### 3. Smoke test on the box
 ```bash

@@ -21,6 +21,9 @@ Environment=NUM_CTX=24000
 # embeddings stay on GPU (fast). Set EMBED_ON_CPU=1 only if VRAM gets tight.
 Environment=REF_BASE=https://trussc.org
 Environment=ALLOW_ORIGIN=https://trussc.org
+# Per-IP rate limit (behind the tunnel the real IP is in cf-connecting-ip).
+Environment=RATE_MAX=15
+Environment=RATE_WIN=60000
 Restart=always
 RestartSec=3
 

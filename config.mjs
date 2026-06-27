@@ -41,3 +41,11 @@ export const WIDGET_FILE = '/Users/toru/Nextcloud/Make/TrussC/trussc.org/chat-wi
 
 export const CHUNKS = new URL('./chunks.jsonl', import.meta.url).pathname;
 export const EMBEDDED = new URL('./chunks.embedded.json', import.meta.url).pathname;
+
+// --- Usage stats ------------------------------------------------------------
+// One JSON line per request appended to STATS_LOG (no DB, no deps). Analyze with
+// jq later. STATS_SALT keys the per-IP hash — set a real secret in prod so IPs
+// can't be reversed/correlated. Set STATS=0 to disable logging entirely.
+export const STATS = process.env.STATS !== '0';
+export const STATS_LOG = process.env.STATS_LOG || new URL('./stats.jsonl', import.meta.url).pathname;
+export const STATS_SALT = process.env.STATS_SALT || 'trussc-docs-ai-dev';

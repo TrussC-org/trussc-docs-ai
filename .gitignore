@@ -6,3 +6,5 @@ chunks.jsonl
 eval-report.txt
 MORNING.md
 *.log
+# usage logs (privacy: contains questions + hashed IPs — never commit)
+stats.jsonl

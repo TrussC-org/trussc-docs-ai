@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { answer, retrieve, chunks, refLink } from './rag.mjs';
 import { WIDGET_FILE } from './config.mjs';
+import { logStat, hashIp, suggested } from './stats.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -74,17 +75,30 @@ const server = createServer(async (req, res) => {
         const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
         if (!question) return json(400, { error: 'no question' });
 
+        // Per-request stats context (pseudonymized IP + client hints + timer).
+        const t0 = Date.now();
+        const stat = {
+            ip: hashIp(ip),
+            ua: (req.headers['user-agent'] || '').slice(0, 200) || null,
+            ref: (req.headers['referer'] || req.headers['origin'] || null),
+            turns: history.length / 2 | 0,
+            qlen: question.length,
+        };
+
         // Agents: raw retrieval, no generation (fast; let the caller reason).
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
-            const results = (await retrieve(question, k)).map((c) =>
+            const retrieved = await retrieve(question, k);
+            const results = retrieved.map((c) =>
                 ({ id: c.id, title: c.title, source: c.source, score: c.score, link: refLink(c), text: c.text }));
+            logStat({ ep: 'search', ms: Date.now() - t0, ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             return json(200, { results });
         }
 
         // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
             const { retrieved, links, text, corrected } = await answer(question, history);
+            logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             return json(200, { answer: text, links, sources: sources(retrieved), corrected });
         }
 
@@ -100,8 +114,10 @@ const server = createServer(async (req, res) => {
                 send('links', links);
                 send('token', text);
                 send('done', { corrected });
+                logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             } catch (e) {
                 send('error', String((e && e.message) || e));
+                logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e) });
             }
             return res.end();
         }

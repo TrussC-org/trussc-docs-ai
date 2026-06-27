@@ -23,7 +23,11 @@ export const EMBED_ON_CPU = process.env.EMBED_ON_CPU === '1'; // keep bge-m3 off
 // How long Ollama keeps a model resident in VRAM after a request. '-1' = forever
 // (no cold-start re-load; holds ~5.4GB for both models), '30m'/'8h' = unload after
 // idle. Passed per-request so no ollama.service change is needed.
-export const KEEP_ALIVE = process.env.KEEP_ALIVE || '30m';
+// NOTE: Ollama wants a NUMBER for second-counts / -1 (a bare "-1" string fails to
+// parse as a Go duration), but a duration STRING like "30m"/"8h". So coerce a
+// purely-numeric value to a Number and leave duration strings as-is.
+const _ka = process.env.KEEP_ALIVE || '30m';
+export const KEEP_ALIVE = /^-?\d+$/.test(_ka) ? Number(_ka) : _ka;
 // Thinking mode OFF by default: it's accurate but ~40–80s/answer (verbose at every
 // level) — too slow for chat. We get accuracy instead from the deterministic
 // fabrication check in rag.mjs (draft is ~1s). Set THINK=1 to force it on.

@@ -86,6 +86,9 @@ const server = createServer(async (req, res) => {
             qlen: question.length,
         };
 
+        // /search + /ask are awaited inline — wrap so an Ollama/LLM error returns
+        // 500 instead of an unhandled rejection that would kill the whole daemon.
+        try {
         // Agents: raw retrieval, no generation (fast; let the caller reason).
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
@@ -102,10 +105,13 @@ const server = createServer(async (req, res) => {
             logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             return json(200, { answer: text, links, sources: sources(retrieved), corrected });
         }
+        } catch (e) {
+            logStat({ ep: url.pathname.slice(1), ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e) });
+            return json(500, { error: String((e && e.message) || e) });
+        }
 
-        // Widget. We verify the full answer before sending (draft is buffered for
-        // the fabrication check), so this isn't token-by-token from the model — the
-        // verified final text is delivered in one 'token' event after a ~1–2s wait.
+        // Widget (streaming): tokens stream live as 'token' deltas; on the rare
+        // verify-pass correction, a 'replace' event carries the whole corrected text.
         if (url.pathname === '/chat') {
             res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);

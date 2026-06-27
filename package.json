@@ -1,0 +1,15 @@
+{
+  "name": "trussc-docs-ai",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "RAG doc-chat prototype for trussc.org — local LLM (Ollama) + retrieval over the TrussC docs.",
+  "scripts": {
+    "build": "node build-chunks.mjs && node embed.mjs",
+    "chunks": "node build-chunks.mjs",
+    "embed": "node embed.mjs",
+    "ask": "node ask.mjs",
+    "eval": "node eval.mjs",
+    "serve": "node server.mjs"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+# generated corpus (rebuild with `npm run build`, or scp to the server)
+chunks.jsonl
+chunks.embedded.json
+# dev/session artifacts
+eval-report.txt
+MORNING.md
+*.log

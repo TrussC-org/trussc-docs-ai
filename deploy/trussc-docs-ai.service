@@ -1,0 +1,27 @@
+# systemd unit for the TrussC trussc-docs-ai API.
+# Install: sudo cp deploy/trussc-docs-ai.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now trussc-docs-ai
+# Adjust User= and WorkingDirectory= to match where you put the project.
+[Unit]
+Description=TrussC trussc-docs-ai RAG API
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trussc
+WorkingDirectory=/opt/trussc-docs-ai
+ExecStart=/usr/bin/node server.mjs
+Environment=PORT=8788
+Environment=OLLAMA_URL=http://127.0.0.1:11434
+Environment=GEN_MODEL=qwen3:8b
+Environment=EMBED_MODEL=bge-m3
+Environment=NUM_CTX=8192
+Environment=EMBED_ON_CPU=1
+Environment=REF_BASE=https://trussc.org
+Environment=ALLOW_ORIGIN=https://trussc.org
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

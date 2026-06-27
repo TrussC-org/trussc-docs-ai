@@ -10,7 +10,7 @@
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { answer, retrieve, chunks, refLink } from './rag.mjs';
+import { answer, answerStream, retrieve, chunks, refLink } from './rag.mjs';
 import { WIDGET_FILE } from './config.mjs';
 import { logStat, hashIp, suggested } from './stats.mjs';
 
@@ -110,11 +110,21 @@ const server = createServer(async (req, res) => {
             res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
-                const { retrieved, links, text, corrected } = await answer(question, history);
-                send('sources', sources(retrieved));
-                send('links', links);
-                send('token', text);
-                send('done', { corrected });
+                let retrieved = [], links = [], corrected = false;
+                for await (const ev of answerStream(question, history)) {
+                    if (ev.type === 'meta') {
+                        retrieved = ev.retrieved; links = ev.links;
+                        send('sources', sources(retrieved));
+                        send('links', links);
+                    } else if (ev.type === 'delta') {
+                        send('token', ev.text);            // append on the client
+                    } else if (ev.type === 'replace') {
+                        send('replace', ev.text);          // verify pass rewrote it → swap whole bubble
+                    } else if (ev.type === 'final') {
+                        corrected = ev.corrected;
+                        send('done', { corrected });
+                    }
+                }
                 logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             } catch (e) {
                 send('error', String((e && e.message) || e));

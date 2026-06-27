@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -12,7 +12,7 @@ export function chunks() {
 export async function embed(text) {
     const r = await fetch(`${OLLAMA}/api/embed`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: EMBED_MODEL, input: text, ...(EMBED_ON_CPU ? { options: { num_gpu: 0 } } : {}) }),
+        body: JSON.stringify({ model: EMBED_MODEL, input: text, keep_alive: KEEP_ALIVE, ...(EMBED_ON_CPU ? { options: { num_gpu: 0 } } : {}) }),
     });
     if (!r.ok) throw new Error(`embed ${r.status}: ${await r.text()}`);
     return (await r.json()).embeddings[0];
@@ -112,7 +112,7 @@ async function* streamLines(stream) {
 export async function* chatStream(messages) {
     const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: GEN_MODEL, think: THINK, stream: true, messages, options: { num_ctx: NUM_CTX } }),
+        body: JSON.stringify({ model: GEN_MODEL, think: THINK, stream: true, messages, keep_alive: KEEP_ALIVE, options: { num_ctx: NUM_CTX } }),
     });
     if (!r.ok) throw new Error(`chat ${r.status}: ${await r.text()}`);
     for await (const line of streamLines(r.body)) {
@@ -163,31 +163,62 @@ function validMembersOf(owner) {
     return [...apiIndex().qualified].filter((q) => q.startsWith(pre)).map((q) => q.slice(pre.length));
 }
 
+// Retrieve with conversational memory (last 2 user turns sharpen the query), then
+// assemble the prompt. Shared by answer() and answerStream().
+async function prep(question, history, k) {
+    const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
+    const retrieved = await retrieve([...recentUser, question].join('\n'), k);
+    return { retrieved, links: buildLinks(retrieved), messages: buildMessages(question, retrieved, history) };
+}
+
+// Build the corrective follow-up turn from the ground-truth check result.
+function correctionMessages(messages, draft, bad) {
+    const notes = [...bad.entries()].map(([owner, members]) => {
+        const wrong = [...members].map((m) => `${owner}::${m}`).join(', ');
+        const valid = validMembersOf(owner);
+        return valid.length ? `- ${wrong} do not exist. Real ${owner} members: ${valid.join(', ')}.`
+                            : `- ${wrong} do not exist (${owner} has no such member).`;
+    }).join('\n');
+    return [...messages,
+        { role: 'assistant', content: draft },
+        { role: 'user', content: `Your previous answer used APIs that do NOT exist in TrussC:\n${notes}\nRewrite it using only real APIs from the context — remove or replace the invalid references. Keep it short and in the same language.` }];
+}
+
 // Retrieve → draft (think:false, ~1s) → deterministic check → corrective pass ONLY
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
-// Returns { retrieved, links, text, corrected }.
+// Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
 export async function answer(question, history = [], k = TOP_K) {
-    const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
-    const retrieved = await retrieve([...recentUser, question].join('\n'), k);
-    const links = buildLinks(retrieved);
-    const messages = buildMessages(question, retrieved, history);
-
+    const { retrieved, links, messages } = await prep(question, history, k);
     let text = await collect(chatStream(messages));
     let corrected = false;
     const bad = findFabrications(text);
     if (bad.size) {
         corrected = true;
-        const notes = [...bad.entries()].map(([owner, members]) => {
-            const wrong = [...members].map((m) => `${owner}::${m}`).join(', ');
-            const valid = validMembersOf(owner);
-            return valid.length ? `- ${wrong} do not exist. Real ${owner} members: ${valid.join(', ')}.`
-                                : `- ${wrong} do not exist (${owner} has no such member).`;
-        }).join('\n');
-        const fix = [...messages,
-            { role: 'assistant', content: text },
-            { role: 'user', content: `Your previous answer used APIs that do NOT exist in TrussC:\n${notes}\nRewrite it using only real APIs from the context — remove or replace the invalid references. Keep it short and in the same language.` }];
-        text = await collect(chatStream(fix));
+        text = await collect(chatStream(correctionMessages(messages, text, bad)));
     }
     return { retrieved, links, text, corrected };
+}
+
+// Streaming variant for the widget. Yields events:
+//   { type:'meta', retrieved, links }   once, up front
+//   { type:'delta', text }              per token chunk (append on the client)
+//   { type:'replace', text }            ONLY if the check caught a fabrication →
+//                                       the client swaps the whole bubble for the fix
+//   { type:'final', text, corrected }   once, at the end (for logging)
+// The draft streams live; the (rare) correction can't stream because the check needs
+// the full draft first — so it's delivered as a single whole-text replace.
+export async function* answerStream(question, history = [], k = TOP_K) {
+    const { retrieved, links, messages } = await prep(question, history, k);
+    yield { type: 'meta', retrieved, links };
+
+    let text = '';
+    for await (const d of chatStream(messages)) { text += d; yield { type: 'delta', text: d }; }
+
+    const bad = findFabrications(text);
+    if (bad.size) {
+        text = await collect(chatStream(correctionMessages(messages, text, bad)));
+        yield { type: 'replace', text };
+    }
+    yield { type: 'final', text, corrected: bad.size > 0 };
 }

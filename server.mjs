@@ -9,8 +9,9 @@
 // POST bodies: { question, history?:[{role,content}], k? }.
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { answer, retrieve, chunks, refLink } from './rag.mjs';
+import { WIDGET_FILE } from './config.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -54,6 +55,14 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/demo.html')) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         return res.end(readFileSync(DEMO));
+    }
+
+    // Dev convenience: serve the canonical widget (a trussc.org asset) for the demo.
+    // Optional — the deployed API box may not have the site repo checked out.
+    if (req.method === 'GET' && url.pathname === '/chat-widget.js') {
+        if (!existsSync(WIDGET_FILE)) return json(404, { error: 'widget not found (site repo absent)' });
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' });
+        return res.end(readFileSync(WIDGET_FILE));
     }
 
     if (req.method === 'POST') {

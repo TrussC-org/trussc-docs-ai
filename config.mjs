@@ -34,5 +34,10 @@ export const OF_MAPPING = '/Users/toru/Nextcloud/Make/TrussC/trussc.org/generate
 export const EXAMPLES_JSON = '/Users/toru/Nextcloud/Make/TrussC/trussc.org/examples/examples.json';
 export const EXAMPLES_SRC = '/Users/toru/Nextcloud/Make/TrussC/TrussC/examples';
 
+// The chat widget is a trussc.org site asset (served same-origin by GitHub Pages
+// in prod). The dev server serves this same file so there's one source of truth;
+// it's optional (guarded) since the deployed API box may not have the site repo.
+export const WIDGET_FILE = '/Users/toru/Nextcloud/Make/TrussC/trussc.org/chat-widget.js';
+
 export const CHUNKS = new URL('./chunks.jsonl', import.meta.url).pathname;
 export const EMBEDDED = new URL('./chunks.embedded.json', import.meta.url).pathname;

@@ -78,6 +78,7 @@ const server = createServer(async (req, res) => {
         // Per-request stats context (pseudonymized IP + client hints + timer).
         const t0 = Date.now();
         const stat = {
+            cid: (typeof body.convId === 'string' ? body.convId.slice(0, 64) : null), // groups rows into a thread
             ip: hashIp(ip),
             ua: (req.headers['user-agent'] || '').slice(0, 200) || null,
             ref: (req.headers['referer'] || req.headers['origin'] || null),

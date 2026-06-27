@@ -30,6 +30,14 @@ console.log(bar(count(rows, (r) => r.ep)));
 const visitors = new Set(rows.map((r) => r.ip).filter(Boolean));
 console.log(`\ndistinct visitors (hashed IP): ${visitors.size}`);
 
+const convs = new Map();
+for (const r of rows) if (r.cid) convs.set(r.cid, (convs.get(r.cid) || 0) + 1);
+if (convs.size) {
+  const sizes = [...convs.values()];
+  const avg = (sizes.reduce((a, b) => a + b, 0) / convs.size).toFixed(1);
+  console.log(`conversations: ${convs.size}  (avg ${avg} msgs/conv, max ${Math.max(...sizes)})`);
+}
+
 const lat = rows.map((r) => r.ms).filter((x) => x != null).sort((a, b) => a - b);
 if (lat.length) console.log(`latency ms: p50=${pct(lat, 0.5)}  p95=${pct(lat, 0.95)}  max=${lat[lat.length - 1]}`);
 

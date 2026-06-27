@@ -17,9 +17,9 @@ dials out.
 ```bash
 # Node (v18+; nvm or distro package)
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
-# Ollama
+# Ollama (needs a recent version; qwen3.5:4b requires Ollama ≥ 0.30)
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:8b
+ollama pull qwen3.5:4b   # GEN_MODEL in the systemd unit — must match
 ollama pull bge-m3
 ```
 
@@ -34,9 +34,10 @@ The corpus (`chunks.embedded.json`) is needed at runtime. Either copy it over (s
 ```bash
 cd /opt/trussc-docs-ai && node build-chunks.mjs && node embed.mjs   # needs the TrussC + trussc.org repos present, see config.mjs paths
 ```
-> Note: `config.mjs` points at local repo paths for the SOURCES (FOR_AI, reference-data.json,
-> examples). For build-on-server, clone those repos and adjust the paths, or just copy
-> `chunks.embedded.json` from your Mac and skip building on the server.
+> Note: `config.mjs` points at local repo paths for the SOURCES (FOR_AI, trussc-api.js,
+> of-mapping.json, examples). For build-on-server, clone those repos and adjust the paths,
+> or just copy `chunks.embedded.json` from your Mac and skip building on the server
+> (recommended — same `bge-m3` → embeddings are valid).
 
 ### 3. Smoke test on the box
 ```bash

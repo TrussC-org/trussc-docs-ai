@@ -33,6 +33,16 @@ export const KEEP_ALIVE = /^-?\d+$/.test(_ka) ? Number(_ka) : _ka;
 // fabrication check in rag.mjs (draft is ~1s). Set THINK=1 to force it on.
 export const THINK = process.env.THINK === '1';
 
+// --- Generation backend -----------------------------------------------------
+// 'ollama' (default; local qwen on the box) or 'anthropic' (hosted Claude Haiku —
+// lower hallucination, faster, better JA fluency; A/B against the 4B). Only the
+// GENERATION call switches; embeddings always stay on Ollama/bge-m3 (the corpus is
+// embedded with it). When 'anthropic', set ANTHROPIC_API_KEY in the env; the model
+// defaults to Haiku 4.5 (override with ANTHROPIC_MODEL).
+export const GEN_BACKEND = process.env.GEN_BACKEND || 'ollama';
+export const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
+export const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+
 // Base URL for "see also" reference links. '' = site-relative (once embedded in
 // trussc.org). Default to the live site so the standalone demo's links are clickable.
 export const REF_BASE = process.env.REF_BASE ?? 'https://trussc.org';

@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -28,6 +28,26 @@ export async function retrieve(question, k = TOP_K) {
     const qv = await embed(question);
     return chunks()
         .map((c) => ({ ...c, score: cosine(qv, c.vector) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, k);
+}
+
+// Multi-query retrieval: embed several query variants and score each chunk by its
+// BEST similarity across them (max-pool). A chunk that matches ANY variant surfaces,
+// so a casual query + a keyword-expanded query together find the right chunks.
+// The original query is always one of the variants (anchor + best for already-good
+// queries). Diagnosis: "おとをならすには？" alone retrieves Node noise; adding the
+// expansion "音を鳴らす sound play beep" pulls in the real Sound API.
+export async function retrieveMulti(queries, k = TOP_K) {
+    const qs = [...new Set(queries.map((q) => (q || '').trim()).filter(Boolean))];
+    if (qs.length <= 1) return retrieve(qs[0] || '', k);
+    const vecs = await Promise.all(qs.map((q) => embed(q)));
+    return chunks()
+        .map((c) => {
+            let best = -1;
+            for (const v of vecs) { const s = cosine(v, c.vector); if (s > best) best = s; }
+            return { ...c, score: best };
+        })
         .sort((a, b) => b.score - a.score)
         .slice(0, k);
 }
@@ -85,7 +105,14 @@ export const SYSTEM = [
     'Answer ONLY from the provided context and the core conventions. If the context does not cover the question, say you are not sure instead of guessing.',
     'Keep it short (1–3 sentences). Name the relevant API(s) by their exact name (e.g. drawRect, Color::fromOKLab) and point to the reference or an example.',
     'A short code example is welcome when it helps. BUT every function, method, type, enum value, and parameter you mention — in prose OR code — MUST appear in the provided context. Never introduce or guess an API that is not shown; if you are not sure it exists, do not use it (describe it in words instead).',
-    'Do NOT invent links, URLs, or anchors.',
+    'When a task needs several APIs working together (e.g. a shape that follows the mouse, or animating a value over time), briefly SKETCH how they fit together — just the few essential lines (e.g. inside draw()), NOT a full runnable program. Name the APIs and show the key calls; keep it short. Use only APIs present in the context.',
+    'Format your answer in Markdown: inline code in `backticks`, code in ```cpp fenced blocks```. Do not write HTML tags (no <code>, <kbd>, <br>, etc.).',
+    // Links: the model only marks intent with a tag; we resolve it to the real URL.
+    'To link to an API, wrap its EXACT name in double brackets like [[drawCircle]] — we turn it into the correct link for you. NEVER write a raw URL or a normal markdown link [..](..): any URL you write is wrong (you cannot know the real paths).',
+    // Keep technical terms in their real (English/Latin) form — also stops multilingual bleed.
+    "Write technical terms, API names, parameters, and code identifiers in their original English (Latin) form — do NOT transliterate them into katakana or other scripts (write `alpha`, not `アルファ`). Only the surrounding explanation is in the user's language; do not let other languages bleed in.",
+    // Graduated confidence: answer outright when sure; offer one line / ask back when not.
+    'Confidence: when you are clearly sure (~70%+), answer with the single best API and add no alternatives. When two valid approaches are roughly balanced (~60/40), answer with the best one and add ONE short final line offering the other (e.g. "there is also a simpler beep() if you do not want a sound file"). If the request is too vague or hard to answer well, do NOT guess — ask one short clarifying question instead. If it asks for a very advanced feature, first ask whether a simpler approach is acceptable. If there are many possible implementations, ask what they specifically want to do first.',
     "Reply in the user's language (a Japanese question gets a Japanese answer).",
 ].join(' ');
 
@@ -125,8 +152,32 @@ async function* streamLines(stream) {
     if (buf) yield buf;
 }
 
+// Hosted Claude (Anthropic Messages API) streaming. Same text-delta contract as the
+// Ollama path. Anthropic takes the system prompt top-level (not as a message role),
+// so split it out of our messages array. Embeddings are unaffected (still bge-m3).
+async function* anthropicStream(messages, maxTokens = 1024) {
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const msgs = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system, messages: msgs, stream: true }),
+    });
+    if (!r.ok) throw new Error(`anthropic ${r.status}: ${await r.text()}`);
+    for await (const line of streamLines(r.body)) {
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const data = s.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.type === 'content_block_delta' && j.delta?.text) yield j.delta.text;
+    }
+}
+
 // Stream the assistant's answer token-by-token (async generator of text deltas).
+// Dispatches to the configured backend; the rest of the pipeline is identical.
 export async function* chatStream(messages) {
+    if (GEN_BACKEND === 'anthropic') { yield* anthropicStream(messages); return; }
     const r = await fetch(`${OLLAMA}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: GEN_MODEL, think: THINK, stream: true, messages, keep_alive: KEEP_ALIVE, options: { num_ctx: NUM_CTX } }),
@@ -140,6 +191,30 @@ export async function* chatStream(messages) {
 }
 
 async function collect(stream) { let s = ''; for await (const d of stream) s += d; return s; }
+
+// One-shot, non-streaming generation with thinking off — for tiny fast side-calls
+// (query expansion). Small num_ctx + capped num_predict keep it ~0.3–0.6s.
+async function genQuick(messages, numPredict = 64) {
+    if (GEN_BACKEND === 'anthropic') return collect(anthropicStream(messages, numPredict));
+    const r = await fetch(`${OLLAMA}/api/chat`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: GEN_MODEL, think: false, stream: false, messages, keep_alive: KEEP_ALIVE, options: { num_ctx: 2048, num_predict: numPredict } }),
+    });
+    if (!r.ok) throw new Error(`gen ${r.status}: ${await r.text()}`);
+    return (await r.json()).message?.content || '';
+}
+
+// Rewrite a casual/short/hiragana question into a keyword-rich search query so it
+// matches the (English) reference chunks. Output is one short line; the original
+// language words are kept, plus likely English API/domain terms. Best-effort — on
+// any error returns '' and the caller falls back to the original query alone.
+const EXPAND_SYS = 'You turn a beginner question about the TrussC C++ creative-coding framework (an openFrameworks-like library) into a short search query for a documentation index. Output ONE line of space-separated keywords only — no explanation. Include the likely ENGLISH API names and domain terms (e.g. sound play audio beep; mouse position drawCircle; gradient color lerp), and also keep the key words from the original question. Guess the relevant English terms even if the question is vague.';
+export async function expandQuery(question) {
+    try {
+        const out = await genQuick([{ role: 'system', content: EXPAND_SYS }, { role: 'user', content: question }]);
+        return out.replace(/\s+/g, ' ').trim().slice(0, 200);
+    } catch { return ''; }
+}
 
 // --- Deterministic ground-truth check ---------------------------------------
 // The real symbol set, derived from the corpus itself (no extra file needed on
@@ -184,7 +259,9 @@ function validMembersOf(owner) {
 // assemble the prompt. Shared by answer() and answerStream().
 async function prep(question, history, k, page) {
     const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
-    const retrieved = await retrieve([...recentUser, question].join('\n'), k);
+    const base = [...recentUser, question].join('\n');
+    const expanded = await expandQuery(question);   // keyword-rich variant (English API terms)
+    const retrieved = await retrieveMulti([base, expanded], k);
     // Force-include the chunk for the page the user is viewing (so "explain this"
     // has the actual symbol), unless retrieval already surfaced it.
     const pc = pageChunk(page);
@@ -205,15 +282,35 @@ function correctionMessages(messages, draft, bad) {
         { role: 'user', content: `Your previous answer used APIs that do NOT exist in TrussC:\n${notes}\nRewrite it using only real APIs from the context — remove or replace the invalid references. Keep it short and in the same language.` }];
 }
 
-// The model must NOT author links — the real "see also" links are generated
-// deterministically (buildLinks) and shown separately. Any inline URL/markdown link
-// the model writes is untrustworthy (it guesses URLs), so strip them and keep only
-// the visible label. Cheap deterministic guard, same spirit as the fabrication check.
-export function stripLinks(text) {
-    return String(text)
+// The model must NOT author URLs — it guesses them (e.g. a fake openframeworks.cc
+// path). Instead it marks inline links as [[Name]] (wiki-style); we resolve each one
+// deterministically: a known reference symbol → its real deep-link as markdown; an
+// unknown name → plain text (so a wrong name degrades to text, never a broken link).
+// Same spirit as the fabrication check. Name → deep-link index built once (lazy).
+let _nameLink = null;
+function nameLink(name) {
+    if (!_nameLink) {
+        _nameLink = new Map();
+        for (const c of chunks()) {
+            if (c.source !== 'reference') continue;
+            const url = refLink(c);
+            if (url && !_nameLink.has(c.title)) _nameLink.set(c.title, url);
+        }
+    }
+    return _nameLink.get(name) || null;
+}
+export function resolveLinks(text) {
+    // 1) strip the model's own (untrustworthy) links/URLs first, keeping visible labels
+    let t = String(text)
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')     // [label](url) → label
-        .replace(/<?https?:\/\/[^\s>)]+>?/g, '')      // <http://…> or bare URL → drop
-        .replace(/[ \t]{2,}/g, ' ');                  // tidy gaps left behind
+        .replace(/<?https?:\/\/[^\s>)]+>?/g, '');     // <http://…> or bare URL → drop
+    // 2) resolve our [[Name]] wiki-links into real deep-links (strip optional quotes)
+    t = t.replace(/\[\[\s*["“”']?([^\]]+?)["“”']?\s*\]\]/g, (_, name) => {
+        const n = name.trim();
+        const url = nameLink(n);
+        return url ? `[${n}](${url})` : n;            // known → markdown link, unknown → plain
+    });
+    return t.replace(/[ \t]{2,}/g, ' ');             // tidy gaps left behind
 }
 
 // Retrieve → draft (think:false, ~1s) → deterministic check → corrective pass ONLY
@@ -229,7 +326,7 @@ export async function answer(question, history = [], page = null, k = TOP_K) {
         corrected = true;
         text = await collect(chatStream(correctionMessages(messages, text, bad)));
     }
-    return { retrieved, links, text: stripLinks(text), corrected };
+    return { retrieved, links, text: resolveLinks(text), corrected };
 }
 
 // Streaming variant for the widget. Yields events:
@@ -249,11 +346,11 @@ export async function* answerStream(question, history = [], page = null, k = TOP
 
     const bad = findFabrications(text);
     if (bad.size) {
-        text = stripLinks(await collect(chatStream(correctionMessages(messages, text, bad))));
-        yield { type: 'replace', text };   // fabrication fix (also link-stripped)
+        text = resolveLinks(await collect(chatStream(correctionMessages(messages, text, bad))));
+        yield { type: 'replace', text };   // fabrication fix (also link-resolved)
     } else {
-        const stripped = stripLinks(text);
-        if (stripped !== text) { text = stripped; yield { type: 'replace', text }; }  // had inline links → swap to clean
+        const resolved = resolveLinks(text);
+        if (resolved !== text) { text = resolved; yield { type: 'replace', text }; }  // had tags/URLs → swap to resolved
     }
     yield { type: 'final', text, corrected: bad.size > 0 };
 }

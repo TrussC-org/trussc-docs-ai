@@ -73,6 +73,7 @@ const server = createServer(async (req, res) => {
         const body = await readJson(req);
         const question = (body.question || '').trim();
         const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
+        const page = typeof body.page === 'string' ? body.page.slice(0, 64) : null;  // symbol the user is viewing
         if (!question) return json(400, { error: 'no question' });
 
         // Per-request stats context (pseudonymized IP + client hints + timer).
@@ -101,7 +102,7 @@ const server = createServer(async (req, res) => {
 
         // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
-            const { retrieved, links, text, corrected } = await answer(question, history);
+            const { retrieved, links, text, corrected } = await answer(question, history, page);
             logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             return json(200, { answer: text, links, sources: sources(retrieved), corrected });
         }
@@ -117,7 +118,7 @@ const server = createServer(async (req, res) => {
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
                 let retrieved = [], links = [], corrected = false;
-                for await (const ev of answerStream(question, history)) {
+                for await (const ev of answerStream(question, history, page)) {
                     if (ev.type === 'meta') {
                         retrieved = ev.retrieved; links = ev.links;
                         send('sources', sources(retrieved));

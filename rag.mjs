@@ -90,11 +90,25 @@ export const SYSTEM = [
 // primer; prior turns (plain Q/A text) give conversational memory so follow-ups
 // like "then how do I connect by device name?" resolve; only the CURRENT turn
 // carries the freshly-retrieved context (keeps history compact).
-export function buildMessages(question, retrieved, history = []) {
+export function buildMessages(question, retrieved, history = [], pageName = null) {
     const context = retrieved.map((c) => c.text).join('\n\n---\n\n');
     const sys = `${SYSTEM}\n\n${PRIMER}`;
-    const user = `Context:\n\n${context}\n\n---\n\nQuestion: ${question}`;
+    // Page context: the symbol the user is currently looking at. Only use it when the
+    // question is referential ("this" / "explain this") — otherwise ignore it.
+    const note = pageName
+        ? `The user is currently viewing the reference page for \`${pageName}\`. If their question is referential ("this", "it", "explain this", "これ", "それ") without naming a specific API, assume it refers to ${pageName}. If the question names or is about something else, ignore this note. Answer directly — do not mention this note or that the question was "referential".\n\n`
+        : '';
+    const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}`;
     return [{ role: 'system', content: sys }, ...history, { role: 'user', content: user }];
+}
+
+// The corpus chunk for the symbol the user is viewing (a "kind:name" page hint,
+// e.g. "type:Node"). Used to force-include it in the context — no new corpus chunk.
+function pageChunk(page) {
+    if (!page || typeof page !== 'string') return null;
+    const name = page.includes(':') ? page.slice(page.indexOf(':') + 1) : page;
+    if (!name) return null;
+    return chunks().find((c) => c.source === 'reference' && c.title === name) || null;
 }
 
 async function* streamLines(stream) {
@@ -165,10 +179,14 @@ function validMembersOf(owner) {
 
 // Retrieve with conversational memory (last 2 user turns sharpen the query), then
 // assemble the prompt. Shared by answer() and answerStream().
-async function prep(question, history, k) {
+async function prep(question, history, k, page) {
     const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
     const retrieved = await retrieve([...recentUser, question].join('\n'), k);
-    return { retrieved, links: buildLinks(retrieved), messages: buildMessages(question, retrieved, history) };
+    // Force-include the chunk for the page the user is viewing (so "explain this"
+    // has the actual symbol), unless retrieval already surfaced it.
+    const pc = pageChunk(page);
+    if (pc && !retrieved.some((c) => c.id === pc.id)) retrieved.unshift({ ...pc, score: 1 });
+    return { retrieved, links: buildLinks(retrieved), messages: buildMessages(question, retrieved, history, pc ? pc.title : null) };
 }
 
 // Build the corrective follow-up turn from the ground-truth check result.
@@ -188,8 +206,8 @@ function correctionMessages(messages, draft, bad) {
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
 // Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
-export async function answer(question, history = [], k = TOP_K) {
-    const { retrieved, links, messages } = await prep(question, history, k);
+export async function answer(question, history = [], page = null, k = TOP_K) {
+    const { retrieved, links, messages } = await prep(question, history, k, page);
     let text = await collect(chatStream(messages));
     let corrected = false;
     const bad = findFabrications(text);
@@ -208,8 +226,8 @@ export async function answer(question, history = [], k = TOP_K) {
 //   { type:'final', text, corrected }   once, at the end (for logging)
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
-export async function* answerStream(question, history = [], k = TOP_K) {
-    const { retrieved, links, messages } = await prep(question, history, k);
+export async function* answerStream(question, history = [], page = null, k = TOP_K) {
+    const { retrieved, links, messages } = await prep(question, history, k, page);
     yield { type: 'meta', retrieved, links };
 
     let text = '';

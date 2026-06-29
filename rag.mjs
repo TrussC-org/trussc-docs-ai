@@ -36,7 +36,10 @@ export async function retrieve(question, k = TOP_K) {
 // model — it would mangle/hallucinate URLs). Maps each symbol's kind to the
 // reference deep-link contract (#function:/#type:/#enum:/#macro:/#constant:),
 // routes methods to their owner-type page, and examples to the player.
-const HASH_KIND = { func: 'function', type: 'type', enum: 'enum', macro: 'macro', var: 'constant' };
+// meta.kind from build-chunks is 'function'/'type'/'enum'/'macro'/'var' — map each
+// to its reference deep-link prefix. (Both 'function' and legacy 'func' / 'var' and
+// 'constant' are accepted so a key mismatch never silently drops links.)
+const HASH_KIND = { function: 'function', func: 'function', type: 'type', enum: 'enum', macro: 'macro', var: 'constant', constant: 'constant' };
 export function refLink(c) {
     if (c.source === 'example') {
         const name = c.id.replace(/^example:/, '');
@@ -202,6 +205,17 @@ function correctionMessages(messages, draft, bad) {
         { role: 'user', content: `Your previous answer used APIs that do NOT exist in TrussC:\n${notes}\nRewrite it using only real APIs from the context — remove or replace the invalid references. Keep it short and in the same language.` }];
 }
 
+// The model must NOT author links — the real "see also" links are generated
+// deterministically (buildLinks) and shown separately. Any inline URL/markdown link
+// the model writes is untrustworthy (it guesses URLs), so strip them and keep only
+// the visible label. Cheap deterministic guard, same spirit as the fabrication check.
+export function stripLinks(text) {
+    return String(text)
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')     // [label](url) → label
+        .replace(/<?https?:\/\/[^\s>)]+>?/g, '')      // <http://…> or bare URL → drop
+        .replace(/[ \t]{2,}/g, ' ');                  // tidy gaps left behind
+}
+
 // Retrieve → draft (think:false, ~1s) → deterministic check → corrective pass ONLY
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
@@ -215,7 +229,7 @@ export async function answer(question, history = [], page = null, k = TOP_K) {
         corrected = true;
         text = await collect(chatStream(correctionMessages(messages, text, bad)));
     }
-    return { retrieved, links, text, corrected };
+    return { retrieved, links, text: stripLinks(text), corrected };
 }
 
 // Streaming variant for the widget. Yields events:
@@ -235,8 +249,11 @@ export async function* answerStream(question, history = [], page = null, k = TOP
 
     const bad = findFabrications(text);
     if (bad.size) {
-        text = await collect(chatStream(correctionMessages(messages, text, bad)));
-        yield { type: 'replace', text };
+        text = stripLinks(await collect(chatStream(correctionMessages(messages, text, bad))));
+        yield { type: 'replace', text };   // fabrication fix (also link-stripped)
+    } else {
+        const stripped = stripLinks(text);
+        if (stripped !== text) { text = stripped; yield { type: 'replace', text }; }  // had inline links → swap to clean
     }
     yield { type: 'final', text, corrected: bad.size > 0 };
 }

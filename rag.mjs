@@ -90,14 +90,40 @@ export function buildLinks(retrieved, max = 3) {
 // of retrieval. Cheap and high-value — stops the model from suggesting PI / 0-255
 // colors / std:: even when the relevant chunk didn't surface ("memorize the core,
 // look up the details").
-export const PRIMER = [
-    'TrussC core conventions (always apply):',
-    '- Namespace tc (alias of trussc) and tcx. User code does `using namespace std; using namespace tc;`, so omit tc:: and std:: prefixes.',
-    '- Angles are in radians; use TAU (= 2*PI) for a full turn, not PI.',
-    '- Colors are 0.0–1.0 floats, not 0–255.',
-    '- An app is 3 files (main.cpp, tcApp.h, tcApp.cpp): subclass the app and override setup() / update() / draw() and input callbacks (mousePressed, keyPressed, …).',
-    '- Include the framework with <TrussC.h>.',
-].join('\n');
+export const PRIMER = `TrussC core conventions (always apply):
+- Namespace tc (alias trussc) and tcx; user code does \`using namespace std; using namespace tc;\` — omit tc:: / std::.
+- Angles in radians; use TAU (=2*PI) for a full turn, not PI.
+- Colors are 0.0–1.0 floats, not 0–255.
+- An app is 3 files (main.cpp, tcApp.h, tcApp.cpp): subclass App, override setup()/update()/draw() and input callbacks.
+- Include with <TrussC.h>.
+
+Common how-to — compose these primitives; if there is no direct API for something, BUILD it from these rather than inventing a function:
+- Draw in draw(); clear(0.1f) wipes the frame; setColor(r,g,b) (0–1) or colors::name before a shape.
+- Shapes: drawRect(x,y,w,h), drawCircle(x,y,r), drawEllipse, drawArc(x,y,r,angBegin,angEnd), drawTriangle. Thin 1px line: drawLine; thick: drawStroke (setStrokeWeight). Free-form filled polygon: beginShape()/vertex()/endShape(true). Thick path: beginStroke()/vertex()/endStroke(). Concave/holed fills or glyph outlines: Path + Path::drawFill().
+- fill()/noFill() affect beginShape, NOT beginStroke (a stroke has no fill).
+- Color: Color::fromHex/fromBytes/fromHSB/fromOKLCH; c1.lerp(c2,t) is perceptual (OKLab). For a gradient, lerp colors across position/time — there is no single "gradient fill" call.
+- Transforms: pushMatrix(); translate(x,y); rotate(TAU*0.25); scale(2); ...; popMatrix().
+- Text: drawBitmapString("hi",x,y) (built-in, UTF-8) or Font f; f.load("font.ttf",24); f.drawString(...). Default align is left/baseline — call setTextAlign(Direction::Center, Direction::Center) before drawing to center (bitmap & Font).
+- Images: Image img; img.load("file.png") (from bin/data/); img.draw(x,y) or img.draw(x,y,w,h).
+- Input: override App mousePressed(Vec2,int)/mouseDragged/keyPressed(int), or the rich form onMousePress(const MouseEventArgs& e) -> e.pos / e.globalPos / e.button. Poll with getMousePos()/getMouseX()/getMouseY().
+- Scene graph: App is the root; make_shared<RectNode>(), setSize/setPos, enableEvents() (required for mouse), addChild(). In a Node subclass override onMousePress(Vec2 local,int){ return true; } to consume. Remove with destroy() (deferred, safe during iteration).
+- Time/animation: animate in update() via getElapsedTime() (seconds). Delay/repeat: callAfter(sec,fn) / callEvery(sec,fn).
+- 3D: the space is 3D perspective by default. EasyCam cam; cam.begin(); drawBox(size)/drawSphere(r); cam.end(). 2D drawn after 3D can hide behind it (z=0, depth-tested); for pure 2D use setupScreenOrtho().
+- Which API: sound -> beep() or Sound; video -> VideoPlayer; webcam -> VideoGrabber; random/noise -> random()/noise(); save image -> Image::save(); screenshot -> saveScreenshot(); JSON -> loadJson()/saveJson(); quit -> requestExitApp() (cancellable) / exitApp(); window -> setWindowTitle()/setFullscreen().
+
+Major classes (use the right one; if a name is not here or in the context, do not assume it exists):
+- App & scene graph: App, Node, RectNode, RectNodeButton, ScrollContainer, Mod, Tween / TweenMod
+- Math: Vec2, Vec3, Vec4, Mat4, Quaternion, Rect, Ray
+- Color: Color, ColorHSB, ColorOKLCH, ColorOKLab
+- Drawing & text: Path, Font, Pixels
+- GPU: Image, Texture, Fbo, Shader, Mesh, Material, Light
+- 3D camera: EasyCam
+- Sound: Sound, SoundBuffer, AudioEngine, MicInput
+- Video: VideoPlayer, VideoGrabber, VideoWriter
+- Events: Event<T> / EventListener (+ per-kind args: MouseEventArgs, MouseMoveEventArgs, KeyEventArgs, ...)
+- Data & IO: Xml, Serial, FileReader, FileWriter (JSON via loadJson/saveJson)
+- Network: TcpClient, TcpServer, UdpSocket (OSC via the tcxOsc addon)
+- Threading: Thread, ThreadChannel`;
 
 export const SYSTEM = [
     'You are the TrussC documentation assistant for beginners.',

@@ -2,6 +2,7 @@
 //   node report.mjs                 # all-time
 //   node report.mjs 7              # last 7 days
 //   STATS_LOG=/path node report.mjs
+//   EXCLUDE_IP=hash1,hash2 node report.mjs   # drop your own hashed IP(s) to see real users
 import { readFileSync, existsSync } from 'node:fs';
 import { STATS_LOG } from './config.mjs';
 
@@ -12,6 +13,13 @@ let rows = readFileSync(STATS_LOG, 'utf8').split('\n').filter(Boolean).map((l) =
 if (days > 0) {
   const cutoff = Date.now() - days * 86400000;
   rows = rows.filter((r) => Date.parse(r.ts) >= cutoff);
+}
+// Exclude given hashed IPs (e.g. your own) so the stats reflect other users only.
+const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map((s) => s.trim()).filter(Boolean));
+if (exclude.size) {
+  const before = rows.length;
+  rows = rows.filter((r) => !exclude.has(r.ip));
+  console.log(`(excluded ${before - rows.length} rows from ${exclude.size} hashed IP(s))`);
 }
 
 const n = rows.length;

@@ -13,7 +13,10 @@ export const OLLAMA = process.env.OLLAMA_URL || 'http://localhost:11434';
 
 export const GEN_MODEL = process.env.GEN_MODEL || 'qwen3.5:4b';  // chosen: fits 8GB w/ headroom + long ctx; accuracy via the verify pass
 export const EMBED_MODEL = process.env.EMBED_MODEL || 'bge-m3'; // multilingual ja/ko/en
-export const TOP_K = Number(process.env.TOP_K || 8);           // chunks fed to the model per question
+export const TOP_K = Number(process.env.TOP_K || 8);           // non-example chunks fed to the model per question
+export const EXAMPLE_K = Number(process.env.EXAMPLE_K || 3);   // example chunks (full multi-file sets) allowed on top of TOP_K
+export const PIN_K = Number(process.env.PIN_K || 6);           // carried-over "important" chunks from earlier turns (LLM-curated)
+export const ADDON_K = Number(process.env.ADDON_K || 3);       // official-addon README chunks (own quota so they don't crowd concept)
 
 // Generation context window. Bigger = more room for history + rich chunks, but more
 // KV-cache VRAM. ~24k is generous for several turns; tune once we measure how many
@@ -69,6 +72,15 @@ export const OF_MAPPING = process.env.OF_MAPPING || join(SITE_REPO, 'generated/o
 // examples: site manifest + on-disk sources (src/tcApp.cpp).
 export const EXAMPLES_JSON = process.env.EXAMPLES_JSON || join(SITE_REPO, 'examples/examples.json');
 export const EXAMPLES_SRC = process.env.EXAMPLES_SRC || join(TRUSSC_REPO, 'examples');
+
+// docs: hand-written TrussC prose (how-to / design). Curated set — vendored library
+// docs and internal design memos are excluded. FOR_AI is handled separately above.
+export const DOCS_DIR = process.env.DOCS_DIR || join(TRUSSC_REPO, 'docs');
+// addons: official addon READMEs. The registry (same one trussc.org renders) defines
+// "official"; a local cached copy keeps the build deterministic/offline. Refresh with:
+//   curl -s https://raw.githubusercontent.com/TrussC-org/trussc-addons/gh-pages/registry.json -o addon-registry.json
+export const ADDON_REGISTRY = process.env.ADDON_REGISTRY || new URL('./addon-registry.json', import.meta.url).pathname;
+export const ADDONS_DIR = process.env.ADDONS_DIR || join(TRUSSC_REPO, 'addons');
 
 // The chat widget is a trussc.org site asset (served same-origin by GitHub Pages
 // in prod). The dev server serves this same file so there's one source of truth;

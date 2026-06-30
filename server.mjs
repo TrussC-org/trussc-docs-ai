@@ -74,6 +74,9 @@ const server = createServer(async (req, res) => {
         const question = (body.question || '').trim();
         const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
         const page = typeof body.page === 'string' ? body.page.slice(0, 64) : null;  // symbol the user is viewing
+        // Carried-over "important" chunk ids the model curated on earlier turns
+        // (recent-first). Bounded so a malicious client can't blow up the prompt.
+        const pinned = Array.isArray(body.pinned) ? body.pinned.filter((x) => typeof x === 'string').slice(0, 40) : [];
         if (!question) return json(400, { error: 'no question' });
 
         // Per-request stats context (pseudonymized IP + client hints + timer).
@@ -102,9 +105,9 @@ const server = createServer(async (req, res) => {
 
         // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
-            const { retrieved, links, text, corrected } = await answer(question, history, page);
+            const { retrieved, links, text, corrected, usedIds } = await answer(question, history, page, pinned);
             logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
-            return json(200, { answer: text, links, sources: sources(retrieved), corrected });
+            return json(200, { answer: text, links, sources: sources(retrieved), corrected, usedIds });
         }
         } catch (e) {
             logStat({ ep: url.pathname.slice(1), ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e) });
@@ -118,7 +121,7 @@ const server = createServer(async (req, res) => {
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
                 let retrieved = [], links = [], corrected = false;
-                for await (const ev of answerStream(question, history, page)) {
+                for await (const ev of answerStream(question, history, page, pinned)) {
                     if (ev.type === 'meta') {
                         retrieved = ev.retrieved; links = ev.links;
                         send('sources', sources(retrieved));
@@ -129,7 +132,7 @@ const server = createServer(async (req, res) => {
                         send('replace', ev.text);          // verify pass rewrote it → swap whole bubble
                     } else if (ev.type === 'final') {
                         corrected = ev.corrected;
-                        send('done', { corrected });
+                        send('done', { corrected, usedIds: ev.usedIds || [] });   // client folds usedIds into its pin ledger
                     }
                 }
                 logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });

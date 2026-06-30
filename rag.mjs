@@ -1,12 +1,19 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, EXAMPLE_K, ADDON_K, PIN_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
     if (!_chunks) _chunks = JSON.parse(readFileSync(EMBEDDED, 'utf8'));
     return _chunks;
+}
+
+// id → chunk lookup (lazy), for resolving carried-over "pinned" ids into context.
+let _byId = null;
+function chunkById(id) {
+    if (!_byId) { _byId = new Map(); for (const c of chunks()) _byId.set(c.id, c); }
+    return _byId.get(id) || null;
 }
 
 export async function embed(text) {
@@ -24,32 +31,51 @@ function cosine(a, b) {
     return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
 }
 
+// A chunk owns a BUNDLE of vectors (combined text + per-file slices for examples).
+// Its score = best cosine across (every query variant × every chunk vector): the
+// chunk surfaces if ANY of its vectors matches ANY query. (Legacy single-vector
+// chunks are tolerated via the c.vector fallback.)
+function bundleScore(qvecs, c) {
+    let best = -1;
+    const vs = c.vectors || (c.vector ? [c.vector] : []);
+    for (const qv of qvecs) for (const cv of vs) { const s = cosine(qv, cv); if (s > best) best = s; }
+    return best;
+}
+
+// Per-source quota fill. examples (multi-file, one chunk = a whole example) and addon
+// READMEs each get their own small cap so they can't crowd out the hand-written
+// concept/reference chunks on a generic query; everything else shares otherK. Within
+// each bucket, by score. Input must be score-sorted desc.
+function fillQuota(sorted, otherK, exampleK, addonK) {
+    const out = [];
+    let ex = 0, ad = 0, other = 0;
+    for (const c of sorted) {
+        if (c.source === 'example') { if (ex >= exampleK) continue; ex++; }
+        else if (c.source === 'addon') { if (ad >= addonK) continue; ad++; }
+        else { if (other >= otherK) continue; other++; }
+        out.push(c);
+        if (ex >= exampleK && ad >= addonK && other >= otherK) break;
+    }
+    return out;
+}
+
 export async function retrieve(question, k = TOP_K) {
-    const qv = await embed(question);
-    return chunks()
-        .map((c) => ({ ...c, score: cosine(qv, c.vector) }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, k);
+    return retrieveMulti([question], k);
 }
 
 // Multi-query retrieval: embed several query variants and score each chunk by its
-// BEST similarity across them (max-pool). A chunk that matches ANY variant surfaces,
-// so a casual query + a keyword-expanded query together find the right chunks.
-// The original query is always one of the variants (anchor + best for already-good
-// queries). Diagnosis: "おとをならすには？" alone retrieves Node noise; adding the
-// expansion "音を鳴らす sound play beep" pulls in the real Sound API.
+// BEST similarity across them (max-pool over variants AND the chunk's own vector
+// bundle). A chunk that matches ANY variant surfaces, so a casual query + a
+// keyword-expanded query together find the right chunks. Diagnosis: "おとをならすには？"
+// alone retrieves Node noise; adding "音を鳴らす sound play beep" pulls in the real
+// Sound API. Result is then quota-filled (otherK non-example + exampleK examples).
 export async function retrieveMulti(queries, k = TOP_K) {
     const qs = [...new Set(queries.map((q) => (q || '').trim()).filter(Boolean))];
-    if (qs.length <= 1) return retrieve(qs[0] || '', k);
-    const vecs = await Promise.all(qs.map((q) => embed(q)));
-    return chunks()
-        .map((c) => {
-            let best = -1;
-            for (const v of vecs) { const s = cosine(v, c.vector); if (s > best) best = s; }
-            return { ...c, score: best };
-        })
-        .sort((a, b) => b.score - a.score)
-        .slice(0, k);
+    const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
+    const sorted = chunks()
+        .map((c) => ({ ...c, score: bundleScore(vecs, c) }))
+        .sort((a, b) => b.score - a.score);
+    return fillQuota(sorted, k, EXAMPLE_K, ADDON_K);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the
@@ -66,7 +92,8 @@ export function refLink(c) {
         const group = c.meta?.group || '';
         return `${REF_BASE}/examples/player.html?type=examples&group=${encodeURIComponent(group)}&name=${encodeURIComponent(name)}`;
     }
-    if (c.source !== 'reference') return null;       // concept chunks have no symbol page
+    if (c.source === 'addon') return c.meta?.url || `${REF_BASE}/addons/`;   // addon repo, else the catalog
+    if (c.source !== 'reference') return null;       // concept/doc chunks have no symbol page
     const m = c.meta || {};
     if (m.owner) return `${REF_BASE}/reference/#type:${m.owner}`;   // any member (method/static/field) → its type page
     const hk = HASH_KIND[m.kind];
@@ -141,6 +168,10 @@ export const SYSTEM = [
     'Confidence: when you are clearly sure (~70%+), answer with the single best API and add no alternatives. When two valid approaches are roughly balanced (~60/40), answer with the best one and add ONE short final line offering the other (e.g. "there is also a simpler beep() if you do not want a sound file"). If the request is too vague or hard to answer well, do NOT guess — ask one short clarifying question instead. If it asks for a very advanced feature, first ask whether a simpler approach is acceptable. If there are many possible implementations, ask what they specifically want to do first.',
     "Reply in the user's language (a Japanese question gets a Japanese answer).",
     'Tone: warm, friendly and encouraging, but still polite — like a knowledgeable friend who is happy to help, not a stiff manual. In Japanese, keep the です/ます form but make it relaxed and approachable (never stiff or overly formal — and not plain/タメ口 either).',
+    // Importance trail: each context chunk is prefixed with an [#id] tag. After the
+    // answer, the model lists the chunks worth carrying into later turns. We strip
+    // this line before showing the answer; it only feeds multi-turn memory.
+    'IMPORTANT — after your whole answer, add ONE final line, on its own, in exactly this form: `@@USED: id1, id2, ...` listing the [#id] tags of the context chunks that were genuinely useful — especially any you might reference again later in this conversation (the current topic). Use the exact ids from the [#...] tags. If none were useful, write `@@USED:` with nothing after. This line is internal bookkeeping, never prose.',
 ].join(' ');
 
 // Assemble the chat messages. The system message carries the constant rules +
@@ -148,7 +179,9 @@ export const SYSTEM = [
 // like "then how do I connect by device name?" resolve; only the CURRENT turn
 // carries the freshly-retrieved context (keeps history compact).
 export function buildMessages(question, retrieved, history = [], pageName = null) {
-    const context = retrieved.map((c) => c.text).join('\n\n---\n\n');
+    // Tag each chunk with its [#id] so the model can cite which ones it used (the
+    // @@USED trail). The tag is stripped from the corpus text the user never sees.
+    const context = retrieved.map((c) => `[#${c.id}]\n${c.text}`).join('\n\n---\n\n');
     const sys = `${SYSTEM}\n\n${PRIMER}`;
     // Page context: the symbol the user is currently looking at. Only use it when the
     // question is referential ("this" / "explain this") — otherwise ignore it.
@@ -282,18 +315,70 @@ function validMembersOf(owner) {
     return [...apiIndex().qualified].filter((q) => q.startsWith(pre)).map((q) => q.slice(pre.length));
 }
 
-// Retrieve with conversational memory (last 2 user turns sharpen the query), then
+// Retrieve with conversational memory (last 2 user turns sharpen the query), merge
+// in the carried-over "pinned" chunks the model flagged on earlier turns, then
 // assemble the prompt. Shared by answer() and answerStream().
-async function prep(question, history, k, page) {
+async function prep(question, history, k, page, pinned = []) {
     const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
     const base = [...recentUser, question].join('\n');
     const expanded = await expandQuery(question);   // keyword-rich variant (English API terms)
-    const retrieved = await retrieveMulti([base, expanded], k);
-    // Force-include the chunk for the page the user is viewing (so "explain this"
-    // has the actual symbol), unless retrieval already surfaced it.
+    const fresh = await retrieveMulti([base, expanded], k);
+
+    // Carried-over importance: resolve the LLM-curated pinned ids (recent-first) to
+    // chunks, take the first PIN_K that still exist. They persist across turns so a
+    // pronoun follow-up ("can it also do X?") keeps its context even when fresh
+    // retrieval drifts to noise.
+    const pinnedChunks = [];
+    const pinSeen = new Set();
+    for (const id of pinned) {
+        if (pinnedChunks.length >= PIN_K) break;
+        if (pinSeen.has(id)) continue;
+        const c = chunkById(id);
+        if (c) { pinSeen.add(id); pinnedChunks.push({ ...c, score: 1 }); }
+    }
+
+    // The page the user is viewing is the densest, highest-priority context — always
+    // first. Then pinned (stable context). Then fresh LAST, so the current-turn hits
+    // sit nearest the question (recency) — best when the topic just changed. Fresh
+    // ids that duplicate a pinned/page id are dropped (pinned is authoritative; the
+    // overlap IS the important stuff, so a smaller total is fine).
     const pc = pageChunk(page);
-    if (pc && !retrieved.some((c) => c.id === pc.id)) retrieved.unshift({ ...pc, score: 1 });
-    return { retrieved, links: buildLinks(retrieved), messages: buildMessages(question, retrieved, history, pc ? pc.title : null) };
+    const used = new Set();
+    const ordered = [];
+    const add = (c, extra) => { if (c && !used.has(c.id)) { used.add(c.id); ordered.push(extra ? { ...c, ...extra } : c); } };
+    if (pc) add(pc, { score: 1 });
+    for (const c of pinnedChunks) add(c);
+    for (const c of fresh) add(c);
+
+    // Links favor the freshly-retrieved (real scores) so "詳しくは" stays relevant to
+    // the current question, with page/pinned as fallbacks.
+    const links = buildLinks([...fresh, ...(pc ? [pc] : []), ...pinnedChunks]);
+    return { retrieved: ordered, links, messages: buildMessages(question, ordered, history, pc ? pc.title : null) };
+}
+
+// Parse the model's `@@USED:` trail off the end of its answer → { answer, reported }.
+const USED_RE = /\n+@@USED:[ \t]*([^\n]*)\s*$/;
+function splitUsed(text) {
+    const s = String(text);
+    const m = s.match(USED_RE);
+    if (!m) return { answer: s, reported: [] };
+    const reported = m[1].split(',').map((x) => x.trim().replace(/^\[#|\]$/g, '')).filter(Boolean);
+    return { answer: s.slice(0, m.index).replace(/\s+$/, ''), reported };
+}
+
+// Final carried-forward id set = the model's report ∪ ids whose symbol the answer
+// [[linked]] (the user may click/view those), intersected with the ids we actually
+// provided this turn (drops fabricated or stale ids).
+function usedIdsOf(reported, answer, retrieved) {
+    const provided = new Set(retrieved.map((c) => c.id));
+    const out = new Set();
+    for (const id of reported) if (provided.has(id)) out.add(id);
+    const linked = new Set();
+    for (const m of String(answer).matchAll(/\[\[\s*["“”']?([^\]]+?)["“”']?\s*\]\]/g)) linked.add(m[1].trim());
+    if (linked.size) for (const c of retrieved) {
+        if (linked.has(c.title) || linked.has(c.title.replace(/ \(example\)$/, ''))) out.add(c.id);
+    }
+    return [...out];
 }
 
 // Build the corrective follow-up turn from the ground-truth check result.
@@ -344,16 +429,17 @@ export function resolveLinks(text) {
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
 // Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
-export async function answer(question, history = [], page = null, k = TOP_K) {
-    const { retrieved, links, messages } = await prep(question, history, k, page);
-    let text = await collect(chatStream(messages));
+export async function answer(question, history = [], page = null, pinned = [], k = TOP_K) {
+    const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
+    let { answer: text, reported } = splitUsed(await collect(chatStream(messages)));
     let corrected = false;
     const bad = findFabrications(text);
     if (bad.size) {
         corrected = true;
-        text = await collect(chatStream(correctionMessages(messages, text, bad)));
+        ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
     }
-    return { retrieved, links, text: resolveLinks(text), corrected };
+    const usedIds = usedIdsOf(reported, text, retrieved);
+    return { retrieved, links, text: resolveLinks(text), corrected, usedIds };
 }
 
 // Streaming variant for the widget. Yields events:
@@ -364,20 +450,41 @@ export async function answer(question, history = [], page = null, k = TOP_K) {
 //   { type:'final', text, corrected }   once, at the end (for logging)
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
-export async function* answerStream(question, history = [], page = null, k = TOP_K) {
-    const { retrieved, links, messages } = await prep(question, history, k, page);
+export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K) {
+    const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
     yield { type: 'meta', retrieved, links };
 
-    let text = '';
-    for await (const d of chatStream(messages)) { text += d; yield { type: 'delta', text: d }; }
+    // Stream tokens, but hold back the @@USED trail so it never reaches the user. A
+    // small tail (MARK.length) is withheld each step so a marker split across deltas
+    // is still caught before any of it is shown.
+    const MARK = '@@USED:';
+    let full = '', shown = '', emitted = 0, cut = -1;
+    for await (const d of chatStream(messages)) {
+        full += d;
+        if (cut >= 0) continue;                  // already past the marker — swallow the rest
+        const idx = full.indexOf(MARK);
+        if (idx >= 0) {
+            const piece = full.slice(emitted, idx).replace(/\s+$/, '');   // last answer bit, sans trailing ws before marker
+            if (piece) { shown += piece; yield { type: 'delta', text: piece }; }
+            emitted = full.length; cut = idx;
+        } else {
+            const safe = full.length - MARK.length;
+            if (safe > emitted) { const piece = full.slice(emitted, safe); emitted = safe; shown += piece; yield { type: 'delta', text: piece }; }
+        }
+    }
+    if (cut < 0 && emitted < full.length) { const piece = full.slice(emitted); shown += piece; yield { type: 'delta', text: piece }; }
 
+    let { answer: text, reported } = splitUsed(full);
     const bad = findFabrications(text);
     if (bad.size) {
-        text = resolveLinks(await collect(chatStream(correctionMessages(messages, text, bad))));
+        ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
+        text = resolveLinks(text);
         yield { type: 'replace', text };   // fabrication fix (also link-resolved)
     } else {
         const resolved = resolveLinks(text);
-        if (resolved !== text) { text = resolved; yield { type: 'replace', text }; }  // had tags/URLs → swap to resolved
+        if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }  // had tags/URLs/trail → swap to resolved
+        else text = resolved;
     }
-    yield { type: 'final', text, corrected: bad.size > 0 };
+    const usedIds = usedIdsOf(reported, text, retrieved);
+    yield { type: 'final', text, corrected: bad.size > 0, usedIds };
 }

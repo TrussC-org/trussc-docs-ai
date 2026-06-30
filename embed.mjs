@@ -17,13 +17,28 @@ async function embedBatch(texts) {
 }
 
 const chunks = readFileSync(CHUNKS, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-const out = [];
-for (let i = 0; i < chunks.length; i += BATCH) {
-    const slice = chunks.slice(i, i + BATCH);
-    const vecs = await embedBatch(slice.map((c) => c.text));
-    slice.forEach((c, j) => { c.vector = vecs[j]; out.push(c); });
-    process.stdout.write(`\rembedded ${out.length}/${chunks.length}`);
+
+// Each chunk owns a BUNDLE of vectors: its combined text + any extra embedTexts
+// (e.g. per-file slices of an example). Flatten every (chunk, text) into one list,
+// batch-embed, then regroup so chunk.vectors holds all its vectors in order.
+const flat = [];
+for (let ci = 0; ci < chunks.length; ci++) {
+    const texts = [chunks[ci].text, ...(chunks[ci].embedTexts || [])];
+    for (const text of texts) flat.push({ ci, text });
+}
+const vecs = new Array(flat.length);
+for (let i = 0; i < flat.length; i += BATCH) {
+    const slice = flat.slice(i, i + BATCH);
+    const v = await embedBatch(slice.map((f) => f.text));
+    slice.forEach((f, j) => { vecs[i + j] = v[j]; });
+    process.stdout.write(`\rembedded ${Math.min(i + BATCH, flat.length)}/${flat.length} vectors`);
 }
 process.stdout.write('\n');
-writeFileSync(EMBEDDED, JSON.stringify(out));
-console.log(`wrote ${out.length} embedded chunks (dim ${out[0]?.vector.length}) → ${EMBEDDED}`);
+
+for (const c of chunks) c.vectors = [];
+flat.forEach((f, idx) => chunks[f.ci].vectors.push(vecs[idx]));
+for (const c of chunks) delete c.embedTexts;
+
+writeFileSync(EMBEDDED, JSON.stringify(chunks));
+const totalVecs = chunks.reduce((n, c) => n + c.vectors.length, 0);
+console.log(`wrote ${chunks.length} chunks / ${totalVecs} vectors (dim ${chunks[0]?.vectors[0]?.length}) → ${EMBEDDED}`);

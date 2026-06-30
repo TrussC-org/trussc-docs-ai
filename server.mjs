@@ -6,11 +6,13 @@
 //   POST /chat     → SSE stream (events: sources, links, token, done, error)  (widget)
 //   POST /ask      → JSON { answer, links, sources }        (one-shot; CLI / tchat)
 //   POST /search   → JSON { results:[{id,title,source,score,link,text}] }     (agents: retrieval only)
+//   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; tool: trussc_search)  (remote MCP gateway)
 // POST bodies: { question, history?:[{role,content}], k? }.
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { answer, answerStream, retrieve, chunks, refLink } from './rag.mjs';
+import { dispatch as mcpDispatch } from './mcp-core.mjs';
 import { WIDGET_FILE } from './config.mjs';
 import { logStat, hashIp, suggested } from './stats.mjs';
 
@@ -42,6 +44,13 @@ function readJson(req) {
 }
 const sources = (retrieved) => retrieved.map((c) => ({ title: c.title, source: c.source, score: c.score, link: refLink(c) }));
 
+// Local retrieval for the MCP tool — same shape as /search results, but no HTTP
+// round-trip (the box already has the corpus + bge).
+async function mcpSearch(query, k) {
+    const retrieved = await retrieve(query, k);
+    return retrieved.map((c) => ({ id: c.id, title: c.title, source: c.source, score: c.score, link: refLink(c), text: c.text }));
+}
+
 const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
@@ -66,11 +75,24 @@ const server = createServer(async (req, res) => {
         return res.end(readFileSync(WIDGET_FILE));
     }
 
+    // Remote MCP clients may probe GET for a server→client SSE stream; we don't push,
+    // so tell them to POST (they fall back to request/response, which is all we need).
+    if (req.method === 'GET' && url.pathname === '/mcp') { res.writeHead(405, { allow: 'POST' }); return res.end(); }
+
     if (req.method === 'POST') {
         const ip = (req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').toString();
         if (rateLimited(ip)) return json(429, { error: 'rate limited' });
 
         const body = await readJson(req);
+
+        // Remote MCP gateway (Streamable HTTP, stateless): body is a JSON-RPC message.
+        // Retrieval runs locally (mcpSearch); notifications get a 202 with no body.
+        if (url.pathname === '/mcp') {
+            const resp = await mcpDispatch(body, mcpSearch);
+            if (!resp) { res.writeHead(202); return res.end(); }
+            return json(200, resp);
+        }
+
         const question = (body.question || '').trim();
         const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
         const page = typeof body.page === 'string' ? body.page.slice(0, 64) : null;  // symbol the user is viewing

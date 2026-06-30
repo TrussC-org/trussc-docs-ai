@@ -40,7 +40,7 @@ COUNT=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("chunks.embed
 echo "✔ corpus rebuilt: ${COUNT} chunks"
 
 # Runtime files shipped alongside the corpus (kept in lockstep with the format).
-RUNTIME_FILES="chunks.embedded.json rag.mjs server.mjs config.mjs"
+RUNTIME_FILES="chunks.embedded.json rag.mjs server.mjs config.mjs mcp-core.mjs mcp.mjs"
 
 if [ -z "$HOST" ]; then
   echo

@@ -12,7 +12,26 @@ query → bge-m3 embedding → cosine over the corpus → the most relevant chun
 answer/code with its own model. So sharing this widely costs only the box's bge
 compute, never hosted-generation tokens.
 
-## Add to Claude Code
+There are two ways to connect: **remote** (just a URL, nothing to install — the
+recommended way to share) or **stdio** (run `mcp.mjs` locally).
+
+## A) Remote — api.trussc.org as the gateway (no local file)
+
+The box serves the MCP protocol directly at `POST /mcp` (Streamable HTTP). Anyone
+can connect by URL; nothing to clone or run:
+
+```bash
+claude mcp add --transport http --scope user trussc-docs https://api.trussc.org/mcp
+```
+
+- Works from any machine, any project (`--scope user` = available everywhere).
+- Other MCP clients: point them at `https://api.trussc.org/mcp` (Streamable HTTP).
+- Non-MCP callers (e.g. Gemini function-calling): just `POST /search` directly.
+
+## B) Stdio — run mcp.mjs locally
+
+For offline/localhost use, or clients that prefer stdio. Retrieval still goes over
+HTTP to `/search`, so it needs network unless you run the box locally.
 
 ```bash
 claude mcp add trussc-docs -- node /Users/toru/Nextcloud/Make/TrussC/trussc-docs-ai/mcp.mjs

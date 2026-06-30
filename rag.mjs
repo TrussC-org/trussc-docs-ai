@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, EXAMPLE_K, ADDON_K, PIN_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, EXAMPLE_K, ADDON_K, PIN_K, HYBRID, RRF_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -42,6 +42,71 @@ function bundleScore(qvecs, c) {
     return best;
 }
 
+// --- Lexical (BM25) retrieval, fused with dense via RRF ---------------------
+// Dense (bge) alone ties lexically-distinct-but-semantically-close symbols (e.g.
+// drawCircle vs drawSphere for "draw a circle"). BM25 adds an exact-term signal so a
+// query word that literally appears lifts its chunk. Tokenizer splits camelCase so
+// "circle" matches "drawCircle". CJK isn't tokenized — dense + the English query
+// expansion already cover non-Latin queries (BM25 just adds Latin/identifier precision).
+function tokenize(s) {
+    const out = [];
+    for (const m of String(s).matchAll(/[A-Za-z][A-Za-z0-9]*|[0-9]{2,}/g)) {
+        const w = m[0], lw = w.toLowerCase();
+        if (lw.length >= 2) out.push(lw);
+        const parts = w.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])/);   // drawCircle -> draw, circle
+        if (parts.length > 1) for (const p of parts) { const lp = p.toLowerCase(); if (lp.length >= 2) out.push(lp); }
+    }
+    return out;
+}
+
+// BM25 indexes the TITLE (symbol name) + keywords, NOT the body. Body-text BM25
+// rewards chunks that merely MENTION a term (endShape's text cites beginShape;
+// Fbo::begin repeats "fbo") and buries the canonical entry. The name is the precise
+// lexical target: "circle" hits drawCircle's title but not drawSphere's; "beginShape"
+// hits only beginShape (endShape has no "begin" token). Dense still covers body/semantics.
+let _bm25 = null;
+function bm25Index() {
+    if (_bm25) return _bm25;
+    const cs = chunks();
+    const postings = new Map();            // term -> Map<docIdx, termFreq>
+    const dl = new Array(cs.length).fill(0);
+    for (let i = 0; i < cs.length; i++) {
+        const tf = new Map();
+        const kw = Array.isArray(cs[i].meta && cs[i].meta.keywords) ? cs[i].meta.keywords.join(' ') : '';
+        const toks = tokenize((cs[i].title || '') + ' ' + kw);
+        dl[i] = toks.length;
+        for (const t of toks) tf.set(t, (tf.get(t) || 0) + 1);
+        for (const [t, f] of tf) { let p = postings.get(t); if (!p) { p = new Map(); postings.set(t, p); } p.set(i, f); }
+    }
+    const avgdl = dl.reduce((a, b) => a + b, 0) / (cs.length || 1);
+    _bm25 = { N: cs.length, postings, dl, avgdl };
+    return _bm25;
+}
+
+// BM25 score per matching doc index for the query terms → Map<docIdx, score>.
+function bm25Scores(queryTerms) {
+    const { N, postings, dl, avgdl } = bm25Index();
+    const k1 = 1.2, b = 0.75;
+    const scores = new Map();
+    for (const t of new Set(queryTerms)) {
+        const p = postings.get(t);
+        if (!p) continue;
+        const idf = Math.log(1 + (N - p.size + 0.5) / (p.size + 0.5));
+        for (const [i, f] of p) {
+            const denom = f + k1 * (1 - b + b * dl[i] / avgdl);
+            scores.set(i, (scores.get(i) || 0) + idf * (f * (k1 + 1)) / denom);
+        }
+    }
+    return scores;
+}
+
+// Rank list (1-based) from a [key, score] iterable, sorted desc → Map<key, rank>.
+function ranks(entries) {
+    const m = new Map();
+    [...entries].sort((a, b) => b[1] - a[1]).forEach(([k], r) => m.set(k, r + 1));
+    return m;
+}
+
 // Per-source quota fill. examples (multi-file, one chunk = a whole example) and addon
 // READMEs each get their own small cap so they can't crowd out the hand-written
 // concept/reference chunks on a generic query; everything else shares otherK. Within
@@ -71,11 +136,27 @@ export async function retrieve(question, k = TOP_K) {
 // Sound API. Result is then quota-filled (otherK non-example + exampleK examples).
 export async function retrieveMulti(queries, k = TOP_K) {
     const qs = [...new Set(queries.map((q) => (q || '').trim()).filter(Boolean))];
+    const cs = chunks();
     const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
-    const sorted = chunks()
-        .map((c) => ({ ...c, score: bundleScore(vecs, c) }))
-        .sort((a, b) => b.score - a.score);
-    return fillQuota(sorted, k, EXAMPLE_K, ADDON_K);
+    const dense = cs.map((c, i) => [i, bundleScore(vecs, c)]);   // [docIdx, cosine] for every chunk
+
+    if (!HYBRID) {
+        const sorted = dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score }));
+        return fillQuota(sorted, k, EXAMPLE_K, ADDON_K);
+    }
+
+    // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
+    // BM25 only ranks lexical matches, so it ADDS a boost where a query term literally
+    // appears (drawCircle for "circle") without ever demoting a dense-only hit.
+    const denseScore = new Map(dense);
+    const denseRank = ranks(dense);
+    const lexRank = ranks(bm25Scores(qs.flatMap(tokenize)).entries());
+    const fused = cs.map((c, i) => {
+        let rrf = 1 / (RRF_K + denseRank.get(i));
+        if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
+        return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
+    }).sort((a, b) => b.rrf - a.rrf);
+    return fillQuota(fused, k, EXAMPLE_K, ADDON_K);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the

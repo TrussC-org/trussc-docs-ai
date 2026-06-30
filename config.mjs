@@ -16,6 +16,8 @@ export const EMBED_MODEL = process.env.EMBED_MODEL || 'bge-m3'; // multilingual 
 export const TOP_K = Number(process.env.TOP_K || 8);           // non-example chunks fed to the model per question
 export const EXAMPLE_K = Number(process.env.EXAMPLE_K || 3);   // example chunks (full multi-file sets) allowed on top of TOP_K
 export const PIN_K = Number(process.env.PIN_K || 6);           // carried-over "important" chunks from earlier turns (LLM-curated)
+export const HYBRID = process.env.HYBRID !== '0';             // fuse BM25 (lexical) with bge (dense) via RRF; HYBRID=0 to disable
+export const RRF_K = Number(process.env.RRF_K || 60);         // Reciprocal Rank Fusion constant (standard ~60)
 export const ADDON_K = Number(process.env.ADDON_K || 3);       // official-addon README chunks (own quota so they don't crowd concept)
 
 // Generation context window. Bigger = more room for history + rich chunks, but more

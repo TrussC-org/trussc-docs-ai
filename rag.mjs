@@ -167,7 +167,7 @@ export const SYSTEM = [
     // Graduated confidence: answer outright when sure; offer one line / ask back when not.
     'Confidence: when you are clearly sure (~70%+), answer with the single best API and add no alternatives. When two valid approaches are roughly balanced (~60/40), answer with the best one and add ONE short final line offering the other (e.g. "there is also a simpler beep() if you do not want a sound file"). If the request is too vague or hard to answer well, do NOT guess — ask one short clarifying question instead. If it asks for a very advanced feature, first ask whether a simpler approach is acceptable. If there are many possible implementations, ask what they specifically want to do first.',
     "Reply in the user's language (a Japanese question gets a Japanese answer).",
-    'Tone: warm, friendly and encouraging, but still polite — like a knowledgeable friend who is happy to help, not a stiff manual. In Japanese, keep the です/ます form but make it relaxed and approachable (never stiff or overly formal — and not plain/タメ口 either).',
+    'Tone: talk like a friendly coder buddy, not a manual. In Japanese use casual plain form (タメ口: 〜だよ／〜できる／〜してみて), warm and human. When it fits, open with a small reaction (「お、それなら簡単だよ」「いいね」). Avoid stiff textbook phrasing like 「〜に対応しています」「〜を使用します」; say 「〜できるよ」「〜を使えばOK」 instead. Still concise, and do not overdo it (no emoji spam, not over-familiar). For other languages, use the equivalent relaxed, friendly register.',
     // Importance trail: each context chunk is prefixed with an [#id] tag. After the
     // answer, the model lists the chunks worth carrying into later turns. We strip
     // this line before showing the answer; it only feeds multi-turn memory.
@@ -215,7 +215,7 @@ async function* streamLines(stream) {
 // Hosted Claude (Anthropic Messages API) streaming. Same text-delta contract as the
 // Ollama path. Anthropic takes the system prompt top-level (not as a message role),
 // so split it out of our messages array. Embeddings are unaffected (still bge-m3).
-async function* anthropicStream(messages, maxTokens = 1024) {
+async function* anthropicStream(messages, maxTokens = 1536) {   // headroom so the @@USED trail isn't truncated on long answers
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const msgs = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
     const r = await fetch('https://api.anthropic.com/v1/messages', {

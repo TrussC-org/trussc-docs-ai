@@ -168,11 +168,13 @@ export const SYSTEM = [
     'Confidence: when you are clearly sure (~70%+), answer with the single best API and add no alternatives. When two valid approaches are roughly balanced (~60/40), answer with the best one and add ONE short final line offering the other (e.g. "there is also a simpler beep() if you do not want a sound file"). If the request is too vague or hard to answer well, do NOT guess — ask one short clarifying question instead. If it asks for a very advanced feature, first ask whether a simpler approach is acceptable. If there are many possible implementations, ask what they specifically want to do first.',
     "Reply in the user's language (a Japanese question gets a Japanese answer).",
     'Tone: talk like a friendly coder buddy, not a manual. In Japanese use casual plain form (タメ口: 〜だよ／〜できる／〜してみて), warm and human. When it fits, open with a small reaction (「お、それなら簡単だよ」「いいね」). Avoid stiff textbook phrasing like 「〜に対応しています」「〜を使用します」; say 「〜できるよ」「〜を使えばOK」 instead. Still concise, and do not overdo it (no emoji spam, not over-familiar). For other languages, use the equivalent relaxed, friendly register.',
-    // Importance trail: each context chunk is prefixed with an [#id] tag. After the
-    // answer, the model lists the chunks worth carrying into later turns. We strip
-    // this line before showing the answer; it only feeds multi-turn memory.
-    'IMPORTANT — after your whole answer, add ONE final line, on its own, in exactly this form: `@@USED: id1, id2, ...` listing the [#id] tags of the context chunks that were genuinely useful — especially any you might reference again later in this conversation (the current topic). Use the exact ids from the [#...] tags. If none were useful, write `@@USED:` with nothing after. This line is internal bookkeeping, never prose.',
 ].join(' ');
+
+// Importance trail, appended to the END of the user message (most salient spot for
+// format compliance — Haiku was dropping it when it sat mid-system, before PRIMER).
+// Each context chunk is tagged [#id]; the model echoes the ids it relied on so the
+// client can carry them across turns. We strip this line before showing the answer.
+const USED_INSTRUCTION = 'After your whole answer, add ONE final line on its own, exactly: `@@USED: id1, id2, ...` — the [#id] tags of the context chunks you actually relied on, especially any worth keeping for later turns in this conversation. Use the exact ids from the [#...] tags; if none, write `@@USED:` alone. This line is internal bookkeeping, never prose, and must be the very last line.';
 
 // Assemble the chat messages. The system message carries the constant rules +
 // primer; prior turns (plain Q/A text) give conversational memory so follow-ups
@@ -188,7 +190,7 @@ export function buildMessages(question, retrieved, history = [], pageName = null
     const note = pageName
         ? `The user is currently viewing the reference page for \`${pageName}\`. If their question is referential ("this", "it", "explain this", "これ", "それ") without naming a specific API, assume it refers to ${pageName}. If the question names or is about something else, ignore this note. Answer directly — do not mention this note or that the question was "referential".\n\n`
         : '';
-    const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}`;
+    const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}\n\n---\n${USED_INSTRUCTION}`;
     return [{ role: 'system', content: sys }, ...history, { role: 'user', content: user }];
 }
 

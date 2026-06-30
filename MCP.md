@@ -64,7 +64,7 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 
 ## Tuning
 
-- `k` (tool arg, default 8): number of chunks returned (server clamps 1–20).
-- Each chunk is capped to ~2000 chars in the tool output (full-source example chunks
-  are trimmed to a head excerpt; the `link` points to the full source). Adjust `CAP`
-  in `mcp.mjs` if you want more/less.
+- `k` (tool arg, default 8): number of chunks returned (server clamps 1–20). Chunks
+  are returned in full (example chunks are whole multi-file sources) — lower `k` for a
+  leaner result. Note: per-source quota still applies (≤3 examples, ≤3 addons, rest
+  reference/doc), so a large `k` mostly adds reference/doc chunks.

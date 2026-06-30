@@ -29,17 +29,14 @@ export const TOOLS = [{
     },
 }];
 
-// Cap each chunk: reference/doc/addon fit; full-source example chunks are huge, so
-// trim to a head excerpt and point to the link. Keeps a k=8 result lean (~18KB).
-const CAP = 2000;
+// Full chunk text, never truncated — this is a grounding tool, and example chunks
+// are whole multi-file sources the caller needs intact to write correct code. The
+// result size is the CALLER's context budget (not the box's cost), so lower `k` for
+// a leaner result rather than cutting chunks here.
 export function formatResults(results, query) {
     if (!results || !results.length) return `No TrussC matches for "${query}".`;
-    const body = (c) => {
-        const t = c.text || '';
-        return t.length <= CAP ? t : t.slice(0, CAP) + `\n… (truncated${c.link ? `; full at ${c.link}` : ''})`;
-    };
     return results.map((c) =>
-        `### [${c.source}] ${c.title}${c.link ? `  ·  ${c.link}` : ''}  (score ${Number(c.score).toFixed(3)})\n${body(c)}`
+        `### [${c.source}] ${c.title}${c.link ? `  ·  ${c.link}` : ''}  (score ${Number(c.score).toFixed(3)})\n${c.text || ''}`
     ).join('\n\n---\n\n');
 }
 

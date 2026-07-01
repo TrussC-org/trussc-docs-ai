@@ -14,10 +14,14 @@ Docker (the box has no nvidia-container-toolkit) — a Python venv on the GPU.
 ```bash
 cd ~/trussc-docs-ai/rerank-server
 python3 -m venv .venv && source .venv/bin/activate
-# torch with CUDA (match the box's CUDA; cu121 shown — check `nvidia-smi`):
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install FlagEmbedding fastapi "uvicorn[standard]"
+pip install torch                 # default CUDA wheel; fine with recent drivers (580/CUDA13)
+pip install -r requirements.txt   # pins transformers==4.45.2 (see below)
 ```
+
+> **transformers is pinned to 4.45.2.** Newer transformers removed `prepare_for_model`
+> from the slow XLM-R tokenizer, which FlagEmbedding's reranker calls, giving
+> `AttributeError: XLMRobertaTokenizer has no attribute prepare_for_model`. If you hit
+> that, `pip install "transformers==4.45.2" sentencepiece` and restart.
 
 First run downloads the model (~2.3 GB) from HuggingFace into `~/.cache/huggingface`.
 

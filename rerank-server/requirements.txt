@@ -1,0 +1,10 @@
+# Install torch first with the right CUDA wheel (see README; default `pip install torch`
+# works with recent drivers). Then: pip install -r requirements.txt
+#
+# transformers is PINNED: newer versions removed `prepare_for_model` from the slow
+# XLM-R tokenizer, which FlagEmbedding's reranker calls → AttributeError. 4.45.2 works.
+transformers==4.45.2
+sentencepiece
+FlagEmbedding
+fastapi
+uvicorn[standard]

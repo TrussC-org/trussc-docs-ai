@@ -14,11 +14,11 @@ export const OLLAMA = process.env.OLLAMA_URL || 'http://localhost:11434';
 export const GEN_MODEL = process.env.GEN_MODEL || 'qwen3.5:4b';  // chosen: fits 8GB w/ headroom + long ctx; accuracy via the verify pass
 export const EMBED_MODEL = process.env.EMBED_MODEL || 'bge-m3'; // multilingual ja/ko/en
 export const TOP_K = Number(process.env.TOP_K || 8);           // non-example chunks fed to the model per question
-export const EXAMPLE_K = Number(process.env.EXAMPLE_K || 3);   // example chunks (full multi-file sets) allowed on top of TOP_K
 export const PIN_K = Number(process.env.PIN_K || 6);           // carried-over "important" chunks from earlier turns (LLM-curated)
 export const HYBRID = process.env.HYBRID !== '0';             // fuse BM25 (lexical) with bge (dense) via RRF; HYBRID=0 to disable
 export const RRF_K = Number(process.env.RRF_K || 60);         // Reciprocal Rank Fusion constant (standard ~60)
-export const ADDON_K = Number(process.env.ADDON_K || 3);       // official-addon README chunks (own quota so they don't crowd concept)
+// Supplementary sources (example/addon) are capped dynamically as floor((k-1)/2) —
+// k=4→1, k=8→3 — so they don't crowd a small result but grow with k (rag.retrieveMulti).
 
 // Generation context window. Bigger = more room for history + rich chunks, but more
 // KV-cache VRAM. ~24k is generous for several turns; tune once we measure how many

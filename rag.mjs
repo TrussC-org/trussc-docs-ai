@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, EXAMPLE_K, ADDON_K, PIN_K, HYBRID, RRF_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -163,9 +163,13 @@ export async function retrieveMulti(queries, k = TOP_K) {
     const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
     const dense = cs.map((c, i) => [i, bundleScore(vecs, c)]);   // [docIdx, cosine] for every chunk
 
+    // Supplementary sources scale with the result size: floor((k-1)/2) each → k=4→1,
+    // k=8→3. They never crowd a small result, but grow when the caller asks for more.
+    const supK = Math.max(0, Math.floor((k - 1) / 2));
+
     if (!HYBRID) {
         const sorted = dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score }));
-        return fillQuota(sorted, k, EXAMPLE_K, ADDON_K);
+        return fillQuota(sorted, k, supK, supK);
     }
 
     // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
@@ -179,7 +183,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return fillQuota(fused, k, EXAMPLE_K, ADDON_K);
+    return fillQuota(fused, k, supK, supK);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the

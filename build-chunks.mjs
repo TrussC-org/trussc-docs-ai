@@ -5,7 +5,7 @@
 //              rich cards (signatures, enum values, properties, operators, related,
 //              multilingual prose) whose NAMES match the reference page (links resolve)
 //   example  — examples.json + each example's src/tcApp.cpp (APIs used + excerpt)
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { FOR_AI, TRUSSC_API, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, CHUNKS } from './config.mjs';
@@ -86,10 +86,6 @@ function chunkAddons(registryPath, addonsDir) {
     const reg = JSON.parse(readFileSync(registryPath, 'utf8')).addons || [];
     const chunks = [];
     for (const a of reg) {
-        const readme = join(addonsDir, a.name, 'README.md');
-        if (!existsSync(readme)) continue;     // official ∩ bundled-locally ∩ has README
-        let body = readFileSync(readme, 'utf8').replace(/\r/g, '');
-        if (body.length > ADDON_README_CAP) body = body.slice(0, ADDON_README_CAP) + '\n\n… (README truncated)';
         const head = [
             `# ${a.name}  (official addon — ${a.category || 'addon'})`,
             a.description || null,
@@ -97,7 +93,14 @@ function chunkAddons(registryPath, addonsDir) {
             (a.keywords && a.keywords.length) ? `keywords: ${a.keywords.join(', ')}` : null,
             `Add to a project: \`trusscli addon add ${a.name}\``,
         ].filter(Boolean).join('\n');
-        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'en', title: `${a.name} (addon)`, text: `${head}\n\n${body}`, meta: { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name } });
+        // Prefer the README when the addon is bundled locally with one; otherwise fall
+        // back to a registry-metadata-only card so every official addon is at least
+        // findable (README-less ones like tcxBox2d were being dropped entirely before).
+        const readme = join(addonsDir, a.name, 'README.md');
+        let body = existsSync(readme) ? readFileSync(readme, 'utf8').replace(/\r/g, '') : '';
+        if (body.length > ADDON_README_CAP) body = body.slice(0, ADDON_README_CAP) + '\n\n… (README truncated)';
+        const text = body ? `${head}\n\n${body}` : head;
+        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'en', title: `${a.name} (addon)`, text, meta: { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name } });
     }
     return chunks;
 }
@@ -210,6 +213,54 @@ function exampleApis(src, nameSet) {
     }
     return [...used];
 }
+// Addon examples: each official addon ships example-*/ dirs whose src/ shows how to
+// actually USE the addon (the physics Mod pattern, joints, etc.) — content README
+// never covers. Ingest them through the SAME shape as core examples (source:'example',
+// per-file vectors, lean-trimmed on delivery) so they share the example quota and need
+// no mechanism change; id is namespaced `example:<addon>/<name>` and meta.addon is set
+// so we can split them out later if they prove noisy. Scoped by env ADDON_EXAMPLES
+// ('' = off, 'all', or a comma list of addon names) while we measure.
+const ADDON_EXAMPLES = (process.env.ADDON_EXAMPLES || '').trim();
+function chunkAddonExamples(registryPath, addonsDir, nameSet) {
+    if (!ADDON_EXAMPLES || !existsSync(registryPath)) return [];
+    const only = ADDON_EXAMPLES === 'all' ? null : new Set(ADDON_EXAMPLES.split(',').map((s) => s.trim()));
+    const reg = JSON.parse(readFileSync(registryPath, 'utf8')).addons || [];
+    const lang = (rel) => (rel.endsWith('.glsl') ? 'glsl' : 'cpp');
+    const chunks = [];
+    for (const a of reg) {
+        if (only && !only.has(a.name)) continue;
+        const addonDir = join(addonsDir, a.name);
+        if (!existsSync(addonDir)) continue;
+        let entries;
+        try { entries = readdirSync(addonDir, { withFileTypes: true }); } catch { continue; }
+        for (const e of entries) {
+            if (!e.isDirectory() || !e.name.startsWith('example-')) continue;
+            const srcDir = join(addonDir, e.name, 'src');           // ONLY src/ — never build dirs (Jolt/etc source)
+            if (!existsSync(srcDir)) continue;
+            let srcFiles;
+            try { srcFiles = readdirSync(srcDir); } catch { continue; }
+            // usage source only: tcApp.* first, then extra headers/impls; main.cpp is window boilerplate → skip
+            const want = srcFiles
+                .filter((f) => /\.(cpp|h|glsl)$/.test(f) && f !== 'main.cpp')
+                .sort((x, y) => (x.startsWith('tcApp') ? -1 : y.startsWith('tcApp') ? 1 : x.localeCompare(y)));
+            const files = [];
+            for (const rel of want) {
+                const p = join(srcDir, rel);
+                if (existsSync(p)) files.push({ rel, src: readFileSync(p, 'utf8').replace(/\r/g, '') });
+            }
+            if (!files.length) continue;
+            const name = e.name.replace(/^example-/, '');
+            const label = `${a.name}/${name}`;
+            const apis = exampleApis(files.map((f) => f.src).join('\n'), nameSet);
+            const head = [`# ${label}  (${a.name} addon example)`, `A usage example for the ${a.name} addon.`, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
+            const block = (f) => `// ===== ${f.rel} =====\n\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``;
+            const text = `${head}\n\n${files.map(block).join('\n\n')}`;
+            const embedTexts = files.map((f) => `${label} (${a.name} addon example) — ${f.rel}\n${f.src}`);
+            chunks.push({ id: 'example:' + label, source: 'example', lang: 'en', title: `${label} (addon example)`, text, embedTexts, meta: { group: `${a.name} addon`, addon: a.name, webSupported: false, apis, files: files.map((f) => f.rel) } });
+        }
+    }
+    return chunks;
+}
 function chunkExamples(jsonPath, srcRoot, nameSet) {
     const j = JSON.parse(readFileSync(jsonPath, 'utf8'));
     const chunks = [];
@@ -254,8 +305,9 @@ const concept = chunkForAi(FOR_AI);
 const docs = chunkDocs(DOCS_DIR);
 const symbols = chunkApi(api, ofIdx);
 const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
+const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
-const chunks = [...concept, ...docs, ...symbols, ...examples, ...addons];
+const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons];
 
 // Compact English-only repr for the cross-encoder reranker. The full chunk text is
 // multilingual (en/ja/ko desc) + code + of-mapping, which dilutes cross-encoder
@@ -263,6 +315,19 @@ const chunks = [...concept, ...docs, ...symbols, ...examples, ...addons];
 // (vectors unchanged) — only fed to the reranker at query time (rag.rerankCandidates).
 const CJK = /[぀-ヿ㐀-鿿가-힯]/;
 function rerankRepr(c) {
+    // Addons: the substance for reranking is the one-line pitch + the curated
+    // keywords, NOT the README boilerplate (author / install command / WIP badge /
+    // screenshots) that the generic line-scan below would otherwise grab. Build the
+    // repr from the description line and meta.keywords so terms like "collision"
+    // actually reach the cross-encoder.
+    if (c.source === 'addon') {
+        const lines = (c.text || '').split('\n').map((s) => s.trim());
+        const desc = lines.find((t) =>
+            t && !t.startsWith('#') && !/^(Author|Add to a project|keywords):/i.test(t) &&
+            !t.startsWith('![') && !t.startsWith('>') && !CJK.test(t)) || '';
+        const kw = ((c.meta && c.meta.keywords) || []).join(', ');
+        return `${c.title}\n${desc}\n${kw}`.slice(0, 500);
+    }
     const keep = [];
     for (const raw of (c.text || '').split('\n')) {
         const t = raw.trim();

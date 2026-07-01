@@ -16,6 +16,29 @@ function chunkById(id) {
     return _byId.get(id) || null;
 }
 
+// Lean view: example chunks are whole multi-file sources (heavy for LLM context and
+// for Haiku's bill), so trim them to a head excerpt (the header + APIs-used + start
+// of tcApp.cpp — enough to see how it's used) and point to the full via trussc_get.
+// Everything else (reference/doc/concept/addon) is already reasonably sized. The full
+// text stays in the corpus and is retrievable on demand (trussc_get / full:true).
+const LEAN_EXAMPLE_CAP = 1600;
+export function leanText(c) {
+    if (c.source !== 'example') return c.text || '';
+    const t = c.text || '';
+    if (t.length <= LEAN_EXAMPLE_CAP) return t;
+    return t.slice(0, LEAN_EXAMPLE_CAP) + `\n… (example truncated — full source via trussc_get "${c.id}"${c.link ? ` or ${c.link}` : ''})`;
+}
+
+// Fetch full chunks by id (for trussc_get) → result shape matching /search.
+export function getByIds(ids) {
+    const out = [];
+    for (const id of (ids || [])) {
+        const c = chunkById(id);
+        if (c) out.push({ id: c.id, title: c.title, source: c.source, score: null, rrf: null, link: refLink(c), text: c.text || '' });
+    }
+    return out;
+}
+
 export async function embed(text) {
     const r = await fetch(`${OLLAMA}/api/embed`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -263,8 +286,9 @@ const USED_INSTRUCTION = 'After your whole answer, add ONE final line on its own
 // carries the freshly-retrieved context (keeps history compact).
 export function buildMessages(question, retrieved, history = [], pageName = null) {
     // Tag each chunk with its [#id] so the model can cite which ones it used (the
-    // @@USED trail). The tag is stripped from the corpus text the user never sees.
-    const context = retrieved.map((c) => `[#${c.id}]\n${c.text}`).join('\n\n---\n\n');
+    // @@USED trail). Use the lean view — examples are trimmed to a head excerpt so a
+    // single answer doesn't burn thousands of tokens of example source.
+    const context = retrieved.map((c) => `[#${c.id}]\n${leanText(c)}`).join('\n\n---\n\n');
     const sys = `${SYSTEM}\n\n${PRIMER}`;
     // Page context: the symbol the user is currently looking at. Only use it when the
     // question is referential ("this" / "explain this") — otherwise ignore it.

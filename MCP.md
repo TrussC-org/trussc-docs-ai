@@ -62,9 +62,16 @@ API names, signatures, conventions (TAU not PI, colors 0–1, `using namespace t
 and a working example. Prefer APIs that appear in its results; do not invent ones.
 ```
 
-## Tuning
+## Tools & behaviour
 
-- `k` (tool arg, default 8): number of chunks returned (server clamps 1–20). Chunks
-  are returned in full (example chunks are whole multi-file sources) — lower `k` for a
-  leaner result. Note: per-source quota still applies (≤3 examples, ≤3 addons, rest
-  reference/doc), so a large `k` mostly adds reference/doc chunks.
+- **`trussc_search(query, k?, full?)`** — ranked by hybrid retrieval (BM25 over names
+  + bge-m3 semantic, RRF-fused). Example chunks come back **trimmed** by default (header
+  + start of source) to keep the result light; pass `full: true` for whole text. `k` is
+  the **max total results** (default 8, clamped 1–20). Each result shows `cos` (cosine)
+  and `rrf` (fused rank score) so the ordering is legible.
+- **`trussc_get(ids)`** — fetch the FULL text of specific chunks (e.g. expand a trimmed
+  example). Ids are exactly as shown in results / the `[#id]` tags: `symbol:drawCircle`,
+  `symbol:Fbo::begin`, `example:shaderExample`, `addon:tcxOsc`, `doc:...`, `concept:...`.
+
+The intended agent move: `trussc_search` to find the right chunks cheaply, then
+`trussc_get` (or `full:true`) for the one or two you actually need in full.

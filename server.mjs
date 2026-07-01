@@ -5,13 +5,14 @@
 //   GET  /         → demo.html                              (dev harness only)
 //   POST /chat     → SSE stream (events: sources, links, token, done, error)  (widget)
 //   POST /ask      → JSON { answer, links, sources }        (one-shot; CLI / tchat)
-//   POST /search   → JSON { results:[{id,title,source,score,link,text}] }     (agents: retrieval only)
-//   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; tool: trussc_search)  (remote MCP gateway)
+//   POST /search   → JSON { results:[{id,title,source,score,rrf,link,text}] }  (agents: retrieval only; body.full for whole text)
+//   POST /get      → JSON { results:[...] } by body.ids (full text)            (fetch specific chunks)
+//   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; trussc_search/trussc_get)  (remote MCP gateway)
 // POST bodies: { question, history?:[{role,content}], k? }.
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { answer, answerStream, retrieve, chunks, refLink } from './rag.mjs';
+import { answer, answerStream, retrieve, chunks, refLink, leanText, getByIds } from './rag.mjs';
 import { dispatch as mcpDispatch } from './mcp-core.mjs';
 import { WIDGET_FILE } from './config.mjs';
 import { logStat, hashIp, suggested } from './stats.mjs';
@@ -44,12 +45,17 @@ function readJson(req) {
 }
 const sources = (retrieved) => retrieved.map((c) => ({ title: c.title, source: c.source, score: c.score, link: refLink(c) }));
 
-// Local retrieval for the MCP tool — same shape as /search results, but no HTTP
-// round-trip (the box already has the corpus + bge).
-async function mcpSearch(query, k) {
-    const retrieved = await retrieve(query, k);
-    return retrieved.map((c) => ({ id: c.id, title: c.title, source: c.source, score: c.score, link: refLink(c), text: c.text }));
-}
+// A retrieved chunk → the /search result shape. `full` keeps whole text; otherwise
+// examples are trimmed to a head excerpt (leanText).
+const toResult = (c, full) => {
+    const link = refLink(c);
+    return { id: c.id, title: c.title, source: c.source, score: c.score, rrf: c.rrf ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
+};
+// Handlers for the MCP tools — local (no HTTP round-trip; the box has corpus + bge).
+const mcpHandlers = {
+    search: async (query, k, full) => (await retrieve(query, k)).map((c) => toResult(c, full)),
+    get: async (ids) => getByIds(ids),   // getByIds already returns full text
+};
 
 const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -88,9 +94,15 @@ const server = createServer(async (req, res) => {
         // Remote MCP gateway (Streamable HTTP, stateless): body is a JSON-RPC message.
         // Retrieval runs locally (mcpSearch); notifications get a 202 with no body.
         if (url.pathname === '/mcp') {
-            const resp = await mcpDispatch(body, mcpSearch);
+            const resp = await mcpDispatch(body, mcpHandlers);
             if (!resp) { res.writeHead(202); return res.end(); }
             return json(200, resp);
+        }
+
+        // Fetch full chunks by id (retrieval-only, no question). Powers trussc_get.
+        if (url.pathname === '/get') {
+            const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === 'string').slice(0, 20) : [];
+            return json(200, { results: getByIds(ids) });
         }
 
         const question = (body.question || '').trim();
@@ -115,12 +127,12 @@ const server = createServer(async (req, res) => {
         // /search + /ask are awaited inline — wrap so an Ollama/LLM error returns
         // 500 instead of an unhandled rejection that would kill the whole daemon.
         try {
-        // Agents: raw retrieval, no generation (fast; let the caller reason).
+        // Agents: raw retrieval, no generation (fast; let the caller reason). Examples
+        // are trimmed unless full:true; each result carries cosine + fused rrf.
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
             const retrieved = await retrieve(question, k);
-            const results = retrieved.map((c) =>
-                ({ id: c.id, title: c.title, source: c.source, score: c.score, link: refLink(c), text: c.text }));
+            const results = retrieved.map((c) => toResult(c, !!body.full));
             logStat({ ep: 'search', ms: Date.now() - t0, ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             return json(200, { results });
         }

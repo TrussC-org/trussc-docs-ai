@@ -15,36 +15,59 @@ export const TOOLS = [{
         'so its priors are unreliable. Call this BEFORE writing, reviewing, or answering ' +
         'anything about TrussC C++ code to get the REAL API signatures, conventions ' +
         '(TAU not PI, colors are 0–1 floats, `using namespace tc`, include <TrussC.h>), ' +
-        'working example code, and addon usage. Returns the most relevant chunks ' +
-        '(reference / doc / example / addon) ranked by semantic (bge-m3) similarity. ' +
-        'Use a specific natural-language query, e.g. "draw a filled circle in a color", ' +
-        '"load and play a sound file", "follow the mouse with a node", "send OSC".',
+        'working example code, and addon usage. Results are ranked by hybrid retrieval ' +
+        '(BM25 over names + bge-m3 semantic, fused). Example chunks come back TRIMMED by ' +
+        'default (header + start of source); pass full:true, or call trussc_get with the ' +
+        'chunk id, to get the whole multi-file source. Use a specific natural-language ' +
+        'query, e.g. "draw a filled circle in a color", "load and play a sound file".',
     inputSchema: {
         type: 'object',
         properties: {
             query: { type: 'string', description: 'Natural-language description of what you want to do in TrussC.' },
-            k: { type: 'number', description: 'How many chunks to return (default 8).' },
+            k: { type: 'number', description: 'Max total results to return (default 8).' },
+            full: { type: 'boolean', description: 'Return full untrimmed text for every result (default false; examples are trimmed). Prefer trussc_get for a specific chunk.' },
         },
         required: ['query'],
     },
+}, {
+    name: 'trussc_get',
+    description:
+        'Fetch the FULL text of specific TrussC corpus chunks by id — use after ' +
+        'trussc_search to expand a trimmed example (or any chunk) to its complete ' +
+        'multi-file source. Pass ids exactly as shown in results / the [#id] tags: ' +
+        'API symbols are "symbol:drawCircle" / "symbol:Fbo::begin", plus ' +
+        '"example:shaderExample", "addon:tcxOsc", "doc:...", "concept:...".',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            ids: { type: 'array', items: { type: 'string' }, description: 'Chunk ids to fetch in full.' },
+        },
+        required: ['ids'],
+    },
 }];
 
-// Full chunk text, never truncated — this is a grounding tool, and example chunks
-// are whole multi-file sources the caller needs intact to write correct code. The
-// result size is the CALLER's context budget (not the box's cost), so lower `k` for
-// a leaner result rather than cutting chunks here.
+// Render results. Score line shows the fused rank (rrf) alongside the raw cosine so
+// the ordering is legible ("why is a 0.52 above a 0.55?" → different bm25 rank).
+function scoreLine(c) {
+    const cos = c.score == null ? null : `cos ${Number(c.score).toFixed(3)}`;
+    const rrf = c.rrf == null ? null : `rrf ${Number(c.rrf).toFixed(4)}`;
+    const parts = [cos, rrf].filter(Boolean).join(' · ');
+    return parts ? `  (${parts})` : '';
+}
 export function formatResults(results, query) {
     if (!results || !results.length) return `No TrussC matches for "${query}".`;
     return results.map((c) =>
-        `### [${c.source}] ${c.title}${c.link ? `  ·  ${c.link}` : ''}  (score ${Number(c.score).toFixed(3)})\n${c.text || ''}`
+        `### [${c.source}] ${c.title}${c.link ? `  ·  ${c.link}` : ''}${scoreLine(c)}\n${c.text || ''}`
     ).join('\n\n---\n\n');
 }
 
-export async function dispatch(msg, searchFn) {
+// handlers: { search(query, k, full) -> results[], get(ids) -> results[] }.
+export async function dispatch(msg, handlers) {
     const { id, method, params } = msg || {};
     if (id === undefined || id === null) return null;   // notification: no reply
     const ok = (result) => ({ jsonrpc: '2.0', id, result });
     const err = (code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
+    const toolText = (text, isError) => ok({ content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
     try {
         if (method === 'initialize') return ok({
             protocolVersion: (params && params.protocolVersion) || '2024-11-05',
@@ -54,16 +77,26 @@ export async function dispatch(msg, searchFn) {
         if (method === 'tools/list') return ok({ tools: TOOLS });
         if (method === 'ping') return ok({});
         if (method === 'tools/call') {
-            if (!params || params.name !== 'trussc_search') return err(-32602, `unknown tool: ${params && params.name}`);
-            const args = params.arguments || {};
-            const query = String(args.query || '').trim();
-            if (!query) return ok({ content: [{ type: 'text', text: 'error: empty query' }], isError: true });
-            const k = Math.max(1, Math.min(20, Number(args.k) || 8));
+            const name = params && params.name;
+            const args = (params && params.arguments) || {};
             try {
-                const results = await searchFn(query, k);
-                return ok({ content: [{ type: 'text', text: formatResults(results, query) }] });
+                if (name === 'trussc_search') {
+                    const query = String(args.query || '').trim();
+                    if (!query) return toolText('error: empty query', true);
+                    const k = Math.max(1, Math.min(20, Number(args.k) || 8));
+                    const results = (await handlers.search(query, k, !!args.full)).slice(0, k);
+                    return toolText(formatResults(results, query));
+                }
+                if (name === 'trussc_get') {
+                    const ids = Array.isArray(args.ids) ? args.ids.filter((x) => typeof x === 'string').slice(0, 20) : [];
+                    if (!ids.length) return toolText('error: no ids', true);
+                    const results = await handlers.get(ids);
+                    if (!results.length) return toolText(`No chunks found for: ${ids.join(', ')}`);
+                    return toolText(formatResults(results, ids.join(', ')));
+                }
+                return err(-32602, `unknown tool: ${name}`);
             } catch (e) {
-                return ok({ content: [{ type: 'text', text: `error: ${String((e && e.message) || e)}` }], isError: true });
+                return toolText(`error: ${String((e && e.message) || e)}`, true);
             }
         }
         return err(-32601, `method not found: ${method}`);

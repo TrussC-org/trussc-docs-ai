@@ -11,14 +11,18 @@ import { dispatch } from './mcp-core.mjs';
 
 const API = (process.env.TRUSSC_DOCS_API || 'https://api.trussc.org').replace(/\/+$/, '');
 
-async function httpSearch(query, k) {
-    const r = await fetch(`${API}/search`, {
+async function post(path, payload) {
+    const r = await fetch(`${API}${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ question: query, k }),
+        body: JSON.stringify(payload),
     });
-    if (!r.ok) throw new Error(`search ${r.status}: ${await r.text()}`);
+    if (!r.ok) throw new Error(`${path} ${r.status}: ${await r.text()}`);
     return (await r.json()).results || [];
 }
+const handlers = {
+    search: (query, k, full) => post('/search', { question: query, k, full }),
+    get: (ids) => post('/get', { ids }),
+};
 
 const rl = createInterface({ input: process.stdin });
 rl.on('line', async (line) => {
@@ -26,6 +30,6 @@ rl.on('line', async (line) => {
     if (!line) return;
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
-    const resp = await dispatch(msg, httpSearch);
+    const resp = await dispatch(msg, handlers);
     if (resp) process.stdout.write(JSON.stringify(resp) + '\n');
 });

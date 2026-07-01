@@ -143,18 +143,27 @@ async function rerankCandidates(query, cand) {
     return results.map((s) => ({ ...cand[s.index], rerank: s.score }));
 }
 
-// Optional cross-encoder rerank of the top RRF candidates, then per-source quota.
-// Rerank failure falls back to the incoming (RRF) order — never breaks retrieval.
+// Optional cross-encoder rerank of the top RRF candidates, blended in as a THIRD RRF
+// vote (not a sole re-sort). Rank-based fusion is robust to the reranker's uncalibrated
+// absolute scores and stops a lexically-rich decoy (RectNodeButton::draw for "draw a
+// circle") from overriding a symbol that dense+BM25 both rank high. Rerank failure
+// falls back to the incoming RRF order — never breaks retrieval.
 async function finalize(sorted, k, supK, query) {
-    let ranked = sorted;
     if (RERANK && query) {
         try {
             const cand = sorted.slice(0, RERANK_CANDIDATES);
-            const reranked = await rerankCandidates(query, cand);
-            ranked = [...reranked, ...sorted.slice(RERANK_CANDIDATES)];
+            const reranked = await rerankCandidates(query, cand);   // rerank order, carries .rerank
+            const rrRank = new Map(reranked.map((c, i) => [c.id, i + 1]));
+            const rrScore = new Map(reranked.map((c) => [c.id, c.rerank]));
+            for (const c of cand) {
+                c.rerank = rrScore.get(c.id) ?? null;
+                if (rrRank.has(c.id)) c.rrf = (c.rrf ?? 0) + 1 / (RRF_K + rrRank.get(c.id));   // +1 vote
+            }
+            cand.sort((a, b) => (b.rrf ?? 0) - (a.rrf ?? 0));
+            sorted = [...cand, ...sorted.slice(RERANK_CANDIDATES)];
         } catch { /* keep RRF order on any reranker error */ }
     }
-    return fillQuota(ranked, k, supK, supK);
+    return fillQuota(sorted, k, supK, supK);
 }
 
 // Per-source quota fill. examples (multi-file, one chunk = a whole example) and addon

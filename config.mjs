@@ -20,6 +20,13 @@ export const RRF_K = Number(process.env.RRF_K || 60);         // Reciprocal Rank
 // Supplementary sources (example/addon) are capped dynamically as floor((k-1)/2) —
 // k=4→1, k=8→3 — so they don't crowd a small result but grow with k (rag.retrieveMulti).
 
+// Cross-encoder rerank: re-score the top RRF candidates with a reranker service
+// (bge-reranker-v2-m3) that reads query+doc together, killing lexical noise the
+// bi-encoder/BM25 let through. Off unless a reranker is running (RERANK=1).
+export const RERANK = process.env.RERANK === '1';
+export const RERANK_URL = (process.env.RERANK_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
+export const RERANK_CANDIDATES = Number(process.env.RERANK_CANDIDATES || 30);
+
 // Generation context window. Bigger = more room for history + rich chunks, but more
 // KV-cache VRAM. ~24k is generous for several turns; tune once we measure how many
 // turns actually fit (target ~10). Cap it rather than letting Ollama default to 32k.

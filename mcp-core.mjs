@@ -51,7 +51,8 @@ export const TOOLS = [{
 function scoreLine(c) {
     const cos = c.score == null ? null : `cos ${Number(c.score).toFixed(3)}`;
     const rrf = c.rrf == null ? null : `rrf ${Number(c.rrf).toFixed(4)}`;
-    const parts = [cos, rrf].filter(Boolean).join(' · ');
+    const rr = c.rerank == null ? null : `rr ${Number(c.rerank).toFixed(3)}`;
+    const parts = [cos, rrf, rr].filter(Boolean).join(' · ');
     return parts ? `  (${parts})` : '';
 }
 export function formatResults(results, query) {

@@ -1,0 +1,21 @@
+# systemd --user unit for the bge-reranker service. Install:
+#   cp trussc-rerank.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now trussc-rerank
+#   loginctl enable-linger $USER
+# Adjust WorkingDirectory / ExecStart paths if the repo lives elsewhere.
+[Unit]
+Description=TrussC docs reranker (bge-reranker-v2-m3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/trussc-docs-ai/rerank-server
+ExecStart=%h/trussc-docs-ai/rerank-server/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 8790
+Restart=always
+RestartSec=3
+# Keep the model on the GPU; HF cache in the home dir.
+Environment=HF_HOME=%h/.cache/huggingface
+
+[Install]
+WantedBy=default.target

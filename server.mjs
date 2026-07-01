@@ -49,7 +49,7 @@ const sources = (retrieved) => retrieved.map((c) => ({ title: c.title, source: c
 // examples are trimmed to a head excerpt (leanText).
 const toResult = (c, full) => {
     const link = refLink(c);
-    return { id: c.id, title: c.title, source: c.source, score: c.score, rrf: c.rrf ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
+    return { id: c.id, title: c.title, source: c.source, score: c.score, rrf: c.rrf ?? null, rerank: c.rerank ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
 };
 // Handlers for the MCP tools — local (no HTTP round-trip; the box has corpus + bge).
 const mcpHandlers = {

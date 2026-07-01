@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -130,6 +130,33 @@ function ranks(entries) {
     return m;
 }
 
+// Cross-encoder rerank of the top candidates via the reranker service. Sends a
+// compact repr (title + head) per chunk; returns them reordered by rerank score.
+async function rerankCandidates(query, cand) {
+    const texts = cand.map((c) => `${c.title}\n${(c.text || '').slice(0, 600)}`);
+    const r = await fetch(`${RERANK_URL}/rerank`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ query, texts }),
+    });
+    if (!r.ok) throw new Error(`rerank ${r.status}: ${await r.text()}`);
+    const { results } = await r.json();   // [{index, score}] desc
+    return results.map((s) => ({ ...cand[s.index], rerank: s.score }));
+}
+
+// Optional cross-encoder rerank of the top RRF candidates, then per-source quota.
+// Rerank failure falls back to the incoming (RRF) order — never breaks retrieval.
+async function finalize(sorted, k, supK, query) {
+    let ranked = sorted;
+    if (RERANK && query) {
+        try {
+            const cand = sorted.slice(0, RERANK_CANDIDATES);
+            const reranked = await rerankCandidates(query, cand);
+            ranked = [...reranked, ...sorted.slice(RERANK_CANDIDATES)];
+        } catch { /* keep RRF order on any reranker error */ }
+    }
+    return fillQuota(ranked, k, supK, supK);
+}
+
 // Per-source quota fill. examples (multi-file, one chunk = a whole example) and addon
 // READMEs each get their own small cap so they can't crowd out the hand-written
 // concept/reference chunks on a generic query; everything else shares otherK. Within
@@ -169,7 +196,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
 
     if (!HYBRID) {
         const sorted = dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score }));
-        return fillQuota(sorted, k, supK, supK);
+        return finalize(sorted, k, supK, qs[0] || '');
     }
 
     // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
@@ -183,7 +210,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return fillQuota(fused, k, supK, supK);
+    return finalize(fused, k, supK, qs[0] || '');
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the

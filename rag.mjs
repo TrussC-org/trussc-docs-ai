@@ -203,9 +203,15 @@ export async function retrieveMulti(queries, k = TOP_K) {
     // k=8→3. They never crowd a small result, but grow when the caller asks for more.
     const supK = Math.max(0, Math.floor((k - 1) / 2));
 
+    // Rerank query = all variants joined, so on the chat path the English keyword
+    // expansion (already computed) reaches the cross-encoder too — a JP-only query
+    // otherwise scores weakly against the English-dominant chunks. (MCP/search has a
+    // single variant, so this is just the raw query there.)
+    const rerankQuery = qs.join(' ');
+
     if (!HYBRID) {
         const sorted = dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score }));
-        return finalize(sorted, k, supK, qs[0] || '');
+        return finalize(sorted, k, supK, rerankQuery);
     }
 
     // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
@@ -219,7 +225,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return finalize(fused, k, supK, qs[0] || '');
+    return finalize(fused, k, supK, rerankQuery);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the

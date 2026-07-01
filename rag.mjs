@@ -326,9 +326,9 @@ const USED_INSTRUCTION = 'After your whole answer, add ONE final line on its own
 // carries the freshly-retrieved context (keeps history compact).
 export function buildMessages(question, retrieved, history = [], pageName = null) {
     // Tag each chunk with its [#id] so the model can cite which ones it used (the
-    // @@USED trail). Use the lean view — examples are trimmed to a head excerpt so a
-    // single answer doesn't burn thousands of tokens of example source.
-    const context = retrieved.map((c) => `[#${c.id}]\n${leanText(c)}`).join('\n\n---\n\n');
+    // @@USED trail). Feed the FULL text — this is a single-turn RAG answer (not an
+    // agentic loop), so completeness beats token thrift; examples come through whole.
+    const context = retrieved.map((c) => `[#${c.id}]\n${c.text || ''}`).join('\n\n---\n\n');
     const sys = `${SYSTEM}\n\n${PRIMER}`;
     // Page context: the symbol the user is currently looking at. Only use it when the
     // question is referential ("this" / "explain this") — otherwise ignore it.

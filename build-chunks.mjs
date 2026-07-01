@@ -257,6 +257,25 @@ const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
 const chunks = [...concept, ...docs, ...symbols, ...examples, ...addons];
 
+// Compact English-only repr for the cross-encoder reranker. The full chunk text is
+// multilingual (en/ja/ko desc) + code + of-mapping, which dilutes cross-encoder
+// scores; a clean "title + English desc + signatures" restores sharp rr. NOT embedded
+// (vectors unchanged) — only fed to the reranker at query time (rag.rerankCandidates).
+const CJK = /[぀-ヿ㐀-鿿가-힯]/;
+function rerankRepr(c) {
+    const keep = [];
+    for (const raw of (c.text || '').split('\n')) {
+        const t = raw.trim();
+        if (!t || t.startsWith('```') || t.startsWith('# ') || t.startsWith('// =====')) continue;
+        if (/^openFrameworks:/.test(t) || /^keywords:/i.test(t)) continue;
+        if (CJK.test(t)) continue;                          // drop ja/ko desc lines
+        keep.push(t);
+        if (keep.length >= 6) break;
+    }
+    return `${c.title}\n${keep.join('\n')}`.slice(0, 500);
+}
+for (const c of chunks) c.rerankText = rerankRepr(c);
+
 writeFileSync(CHUNKS, chunks.map((c) => JSON.stringify(c)).join('\n') + '\n');
 console.log(`wrote ${chunks.length} chunks → ${CHUNKS}`);
 console.log(`  concept (for-ai):     ${concept.length}`);

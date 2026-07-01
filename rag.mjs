@@ -133,7 +133,8 @@ function ranks(entries) {
 // Cross-encoder rerank of the top candidates via the reranker service. Sends a
 // compact repr (title + head) per chunk; returns them reordered by rerank score.
 async function rerankCandidates(query, cand) {
-    const texts = cand.map((c) => `${c.title}\n${(c.text || '').slice(0, 600)}`);
+    // Prefer the compact English rerankText (build-chunks); fall back to title + head.
+    const texts = cand.map((c) => c.rerankText || `${c.title}\n${(c.text || '').slice(0, 600)}`);
     const r = await fetch(`${RERANK_URL}/rerank`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ query, texts }),

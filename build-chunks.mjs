@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { FOR_AI, TRUSSC_API, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, CHUNKS } from './config.mjs';
+import { FOR_AI, TRUSSC_API, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, CHUNKS } from './config.mjs';
 
 const require = createRequire(import.meta.url);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -293,6 +293,65 @@ function chunkExamples(jsonPath, srcRoot, nameSet) {
 
 // --- Assemble ---------------------------------------------------------------
 const api = require(TRUSSC_API);
+// --- Source: GitHub release notes (releases.json, cached by fetch-releases.mjs) ----
+// Release notes are the only source that records WHAT changed and WHY — rationale
+// that never reaches the reference or docs. Two hazards, both handled here:
+//   1. Old notes mention APIs that were since renamed/removed → every chunk opens
+//      with a historical-context header so the model treats it as history, not as
+//      proof an API currently exists.
+//   2. "What's new lately?" is a RECENCY question, and no ranking stage (dense /
+//      BM25 / cross-encoder) knows dates — all releases look equally "release-ish".
+//      So recency is baked in at build time: a digest chunk (release:latest) lists
+//      the newest releases in order and carries the latest/recent/changelog keywords.
+function chunkReleases(path) {
+    if (!existsSync(path)) { console.warn(`  (releases: ${path} not found — run fetch-releases.mjs; skipping)`); return []; }
+    const rel = JSON.parse(readFileSync(path, 'utf8'));   // newest-first (GitHub order)
+    if (!rel.length) return [];
+    const RELEASE_BODY_CAP = 6000;
+    const chunks = rel.map((r, i) => {
+        const latest = i === 0;
+        const head = latest
+            ? `[Release note for the CURRENT latest TrussC release: ${r.tag} (${r.date}).]`
+            : `[Historical release note: ${r.tag}, published ${r.date}. It describes TrussC as of that version — APIs mentioned may have been renamed or removed since; for current signatures trust the reference. Use this note for what changed and why.]`;
+        let body = r.body;
+        if (body.length > RELEASE_BODY_CAP) body = body.slice(0, RELEASE_BODY_CAP) + '\n\n… (truncated)';
+        return {
+            id: 'release:' + r.tag, source: 'release', lang: 'en',
+            title: `Release ${r.tag}${latest ? ' (latest)' : ''} — ${r.date}`,
+            text: `${head}\n\n# ${r.name}\n\n${body}`,
+            meta: { tag: r.tag, date: r.date, url: r.url, keywords: [r.tag, 'release', 'release notes', 'changelog'] },
+        };
+    });
+    // Digest: the deterministic answer to recency queries, rebuilt every corpus update.
+    // Excerpts cut on markdown line boundaries (never mid-bullet): whole lines are
+    // taken top-down until the budget, and a heading left dangling with no content
+    // below it is dropped. Feature bullets lead every note, so the budget naturally
+    // captures the headline items and sheds the fixes/chores tail.
+    const DIGEST_BUDGET = 1000;
+    const excerpt = (body) => {
+        const kept = [];
+        let used = 0;
+        for (const line of body.split('\n')) {
+            if (used + line.length + 1 > DIGEST_BUDGET && kept.length) { kept.push('…'); break; }
+            kept.push(line);
+            used += line.length + 1;
+        }
+        while (kept.length && /^(#|\s*$|…$)/.test(kept[kept.length - 1])) {
+            if (kept[kept.length - 1] === '…') break;
+            kept.pop();                       // drop a trailing heading/blank with nothing under it
+        }
+        return kept.join('\n').trim();
+    };
+    const digest = rel.slice(0, 5).map((r) => `## ${r.tag} — ${r.name} (${r.date})\n${excerpt(r.body)}`).join('\n\n');
+    chunks.unshift({
+        id: 'release:latest', source: 'release', lang: 'en',
+        title: 'Latest TrussC releases (newest first)',
+        text: `The current latest TrussC release is ${rel[0].tag} (${rel[0].date}). Recent releases, newest first:\n\n${digest}\n\nFull history: https://github.com/TrussC-org/TrussC/releases`,
+        meta: { url: 'https://github.com/TrussC-org/TrussC/releases', keywords: ['release notes', 'releases', 'latest release', 'newest', 'recent releases', 'changelog', 'version', 'update history', "what's new", 'リリースノート', '最新リリース', '更新履歴'] },
+    });
+    return chunks;
+}
+
 const ofIdx = loadOfIndex(OF_MAPPING);
 
 // names for example API-usage detection: functions + type/method/static + enums
@@ -307,7 +366,8 @@ const symbols = chunkApi(api, ofIdx);
 const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
 const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
-const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons];
+const releases = chunkReleases(RELEASES_JSON);
+const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons, ...releases];
 
 // Compact English-only repr for the cross-encoder reranker. The full chunk text is
 // multilingual (en/ja/ko desc) + code + of-mapping, which dilutes cross-encoder
@@ -327,6 +387,25 @@ function rerankRepr(c) {
             !t.startsWith('![') && !t.startsWith('>') && !CJK.test(t)) || '';
         const kw = ((c.meta && c.meta.keywords) || []).join(', ');
         return `${c.title}\n${desc}\n${kw}`.slice(0, 500);
+    }
+    // Releases: skip the historical-context header (pure boilerplate to a reranker)
+    // and feed title + the first real content lines, so version/history queries score
+    // on substance while ordinary API queries don't get hijacked by note bodies.
+    if (c.source === 'release') {
+        const keep = [];
+        for (const raw of (c.text || '').split('\n')) {
+            const t = raw.trim();
+            if (!t || t.startsWith('[') || t.startsWith('```') || CJK.test(t)) continue;
+            // keep headings (minus the marks): the release NAME line ("# v0.5.3 —
+            // miniaudio unification, …") is often the best one-line summary there is
+            keep.push(t.replace(/^#+\s+/, '').replace(/^[-*]\s+/, ''));
+            if (keep.length >= 5) break;
+        }
+        // Keywords carry the query-facing vocabulary ("release notes", "latest",
+        // 最新リリース…) — without them the digest loses to any old note whose body
+        // happens to open with the literal phrase "Release Notes".
+        const kw = ((c.meta && c.meta.keywords) || []).join(', ');
+        return `${c.title}\n${kw}\n${keep.join('\n')}`.slice(0, 500);
     }
     const keep = [];
     for (const raw of (c.text || '').split('\n')) {
@@ -348,3 +427,4 @@ console.log(`  doc     (docs/*.md):  ${docs.length}`);
 console.log(`  symbol  (trussc-api): ${symbols.length}  (of-mapping entries: ${ofIdx.size})`);
 console.log(`  example (examples):   ${examples.length}`);
 console.log(`  addon   (registry):   ${addons.length}`);
+console.log(`  release (github):     ${releases.length}`);

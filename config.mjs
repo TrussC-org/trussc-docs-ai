@@ -90,6 +90,10 @@ export const DOCS_DIR = process.env.DOCS_DIR || join(TRUSSC_REPO, 'docs');
 //   curl -s https://raw.githubusercontent.com/TrussC-org/trussc-addons/gh-pages/registry.json -o addon-registry.json
 export const ADDON_REGISTRY = process.env.ADDON_REGISTRY || new URL('./addon-registry.json', import.meta.url).pathname;
 export const ADDONS_DIR = process.env.ADDONS_DIR || join(TRUSSC_REPO, 'addons');
+// releases: GitHub release notes, cached locally by fetch-releases.mjs so the
+// build stays deterministic/offline (same pattern as the addon registry).
+export const RELEASES_JSON = process.env.RELEASES_JSON || new URL('./releases.json', import.meta.url).pathname;
+export const RELEASES_REPO = process.env.RELEASES_REPO || 'TrussC-org/TrussC';
 
 // The chat widget is a trussc.org site asset (served same-origin by GitHub Pages
 // in prod). The dev server serves this same file so there's one source of truth;

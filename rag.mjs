@@ -166,13 +166,14 @@ async function finalize(sorted, k, supK, query) {
 // each bucket, by score. Input must be score-sorted desc.
 function fillQuota(sorted, otherK, exampleK, addonK) {
     const out = [];
-    let ex = 0, ad = 0, other = 0;
+    let ex = 0, ad = 0, rl = 0, other = 0;
     for (const c of sorted) {
         if (c.source === 'example') { if (ex >= exampleK) continue; ex++; }
         else if (c.source === 'addon') { if (ad >= addonK) continue; ad++; }
+        else if (c.source === 'release') { if (rl >= addonK) continue; rl++; }   // same small cap as addons
         else { if (other >= otherK) continue; other++; }
         out.push(c);
-        if (ex >= exampleK && ad >= addonK && other >= otherK) break;
+        if (ex >= exampleK && ad >= addonK && rl >= addonK && other >= otherK) break;
     }
     return out;
 }
@@ -237,6 +238,7 @@ export function refLink(c) {
         return `${REF_BASE}/examples/player.html?type=examples&group=${encodeURIComponent(group)}&name=${encodeURIComponent(name)}`;
     }
     if (c.source === 'addon') return c.meta?.url || `${REF_BASE}/addons/`;   // addon repo, else the catalog
+    if (c.source === 'release') return c.meta?.url || 'https://github.com/TrussC-org/TrussC/releases';   // the GitHub release page
     if (c.source !== 'reference') return null;       // concept/doc chunks have no symbol page
     const m = c.meta || {};
     if (m.owner) return `${REF_BASE}/reference/#type:${m.owner}`;   // any member (method/static/field) → its type page

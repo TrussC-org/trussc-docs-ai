@@ -32,9 +32,12 @@ DIR="${TRUSSC_DEPLOY_DIR:-trussc-docs-ai}"
 SVC="${TRUSSC_SERVICE:-trussc-docs-ai}"
 PORT="${PORT:-8788}"
 
-echo "▶ 1/2  build-chunks…"
-node build-chunks.mjs
-echo "▶ 2/2  embed (bge-m3 — this takes a couple of minutes)…"
+echo "▶ 0/3  fetch release notes (GitHub)…"
+node fetch-releases.mjs || echo "  (fetch failed — using the cached releases.json)"
+echo "▶ 1/3  build-chunks…"
+# addon examples are part of the standard corpus (override with ADDON_EXAMPLES='')
+ADDON_EXAMPLES="${ADDON_EXAMPLES-all}" node build-chunks.mjs
+echo "▶ 2/3  embed (bge-m3 — this takes a couple of minutes)…"
 node embed.mjs
 COUNT=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("chunks.embedded.json")).length)')
 echo "✔ corpus rebuilt: ${COUNT} chunks"

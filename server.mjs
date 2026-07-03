@@ -140,7 +140,7 @@ const server = createServer(async (req, res) => {
         // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
             const { retrieved, links, text, corrected, usedIds } = await answer(question, history, page, pinned);
-            logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
+            logStat({ ep: 'ask', ms: Date.now() - t0, ...stat, q: question, a: (text || '').slice(0, 4000), corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             return json(200, { answer: text, links, sources: sources(retrieved), corrected, usedIds });
         }
         } catch (e) {
@@ -154,7 +154,7 @@ const server = createServer(async (req, res) => {
             res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
-                let retrieved = [], links = [], corrected = false;
+                let retrieved = [], links = [], corrected = false, answerText = '';
                 for await (const ev of answerStream(question, history, page, pinned)) {
                     if (ev.type === 'meta') {
                         retrieved = ev.retrieved; links = ev.links;
@@ -162,14 +162,16 @@ const server = createServer(async (req, res) => {
                         send('links', links);
                     } else if (ev.type === 'delta') {
                         send('token', ev.text);            // append on the client
+                        answerText += ev.text;
                     } else if (ev.type === 'replace') {
                         send('replace', ev.text);          // verify pass rewrote it → swap whole bubble
+                        answerText = ev.text;
                     } else if (ev.type === 'final') {
                         corrected = ev.corrected;
                         send('done', { corrected, usedIds: ev.usedIds || [] });   // client folds usedIds into its pin ledger
                     }
                 }
-                logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
+                logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, a: answerText.slice(0, 4000), corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             } catch (e) {
                 send('error', String((e && e.message) || e));
                 logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e) });

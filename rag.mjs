@@ -325,6 +325,20 @@ export const SYSTEM = [
 // client can carry them across turns. We strip this line before showing the answer.
 const USED_INSTRUCTION = 'After your whole answer, add ONE final line on its own, exactly: `@@USED: id1, id2, ...` — the [#id] tags of the context chunks you actually relied on, especially any worth keeping for later turns in this conversation. Use the exact ids from the [#...] tags; if none, write `@@USED:` alone. This line is internal bookkeeping, never prose, and must be the very last line.';
 
+// Sketch mode: the ask-AI button on trussc.org/sketch sends page:'sketch'. The
+// corpus and SYSTEM are C++-flavored, but that user is writing LUA — this block
+// overrides the code-example rules (later instructions win over the earlier
+// ```cpp rule in SYSTEM). API names are shared between both languages, so the
+// C++ context chunks still carry the right knowledge; only the syntax changes.
+// Normal site chat never sends page:'sketch', so it is completely unaffected.
+const SKETCH_MODE = [
+    'SKETCH MODE — this question comes from TrussSketch (trussc.org/sketch), the in-browser playground where the user writes LUA (Lua 5.4), NOT C++.',
+    'Every code example you write MUST be Lua, fenced as ```lua (this replaces the earlier ```cpp rule): no type declarations, no semicolons, no #include, no "::"; blocks close with `end`; comments are `--`; call methods with a colon (mesh:draw()), access fields and constants with a dot (v.x, colors.red, BlendMode.Add).',
+    'The sketch lifecycle is plain global Lua functions: function setup() end, function update() end, function draw() ... end. TrussSketch also provides cooperative tasks: spawn(fn), wait(seconds), forever(fn) — inside a task, wait(1) pauses that task for one second.',
+    'Context chunks may contain C++ snippets — translate them to Lua before showing anything; never show C++ syntax to this user.',
+    'Many TrussSketch users are children: keep answers extra short, concrete, and encouraging.',
+].join(' ');
+
 // Assemble the chat messages. The system message carries the constant rules +
 // primer; prior turns (plain Q/A text) give conversational memory so follow-ups
 // like "then how do I connect by device name?" resolve; only the CURRENT turn
@@ -334,10 +348,12 @@ export function buildMessages(question, retrieved, history = [], pageName = null
     // @@USED trail). Feed the FULL text — this is a single-turn RAG answer (not an
     // agentic loop), so completeness beats token thrift; examples come through whole.
     const context = retrieved.map((c) => `[#${c.id}]\n${c.text || ''}`).join('\n\n---\n\n');
-    const sys = `${SYSTEM}\n\n${PRIMER}`;
+    const sketchMode = pageName === 'sketch';
+    const sys = sketchMode ? `${SYSTEM}\n\n${SKETCH_MODE}\n\n${PRIMER}` : `${SYSTEM}\n\n${PRIMER}`;
     // Page context: the symbol the user is currently looking at. Only use it when the
     // question is referential ("this" / "explain this") — otherwise ignore it.
-    const note = pageName
+    // ('sketch' is a mode switch, not a reference page — no note for it.)
+    const note = (pageName && !sketchMode)
         ? `The user is currently viewing the reference page for \`${pageName}\`. If their question is referential ("this", "it", "explain this", "これ", "それ") without naming a specific API, assume it refers to ${pageName}. If the question names or is about something else, ignore this note. Answer directly — do not mention this note or that the question was "referential".\n\n`
         : '';
     const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}\n\n---\n${USED_INSTRUCTION}`;

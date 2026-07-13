@@ -361,6 +361,7 @@ const USED_INSTRUCTION = 'After your whole answer, add ONE final line on its own
 const SKETCH_MODE = [
     'SKETCH MODE — this question comes from TrussSketch (trussc.org/sketch), the in-browser playground where the user writes LUA (Lua 5.4), NOT C++.',
     'Every code example you write MUST be Lua, fenced as ```lua (this replaces the earlier ```cpp rule): no type declarations, no semicolons, no #include, no "::"; blocks close with `end`; comments are `--`; call methods with a colon (mesh:draw()), access fields and constants with a dot (v.x, colors.red, BlendMode.Add).',
+    'ALL TrussC API functions, types, and constants are GLOBALS in TrussSketch — write drawCircle(...), Fbo(), colors.red, TAU directly. NEVER prefix them with tc., tc::, or trussc. (those are C++ namespaces that do not exist in Lua).',
     'The sketch lifecycle is plain global Lua functions: function setup() end, function update() end, function draw() ... end. TrussSketch also provides cooperative tasks: spawn(fn), wait(seconds), forever(fn) — inside a task, wait(1) pauses that task for one second.',
     'Context chunks may contain C++ snippets — translate them to Lua before showing anything; never show C++ syntax to this user.',
     'Many TrussSketch users are children: keep answers extra short, concrete, and encouraging.',

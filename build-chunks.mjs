@@ -397,7 +397,9 @@ function chunkLuaGotchas() {
 
 TrussSketch runs Lua 5.4, not C++. The API NAMES are the same as TrussC C++, but the syntax differs. Watch these:
 
+- Everything is a GLOBAL — no namespace prefix, ever: write \`drawCircle(300, 300, 40)\`, \`Fbo()\`, \`colors.red\`, \`TAU\`. NEVER write \`tc.drawCircle\`, \`tc::\`, or \`trussc.\` (those are C++ namespaces that do not exist in Lua).
 - Call METHODS with a colon: \`fbo:begin()\`, \`mesh:draw()\`, \`v:length()\`. Access FIELDS, static functions, enum values and constants with a dot: \`v.x\`, \`Vec2.fromAngle(a)\`, \`BlendMode.Add\`, \`colors.red\`, \`TAU\`.
+- Trailing optional arguments really are optional (defaults apply): \`setColor(1, 0, 0)\` (alpha defaults to 1), \`fbo:allocate(600, 600)\`, \`clear()\`. You never need to pad out argument lists.
 - Constructors work BOTH ways: \`Vec2(10, 20)\` and \`Vec2.new(10, 20)\` are equivalent — use whichever reads better.
 - Reserved-word renames — Lua keyword \`end\` cannot be a method name, so the begin/end pairs are renamed. NEVER call \`:end()\`. Use:
     - Fbo:     \`fbo:begin()\` … \`fbo:end_fbo()\`

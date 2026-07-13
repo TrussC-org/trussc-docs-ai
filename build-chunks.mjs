@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { FOR_AI, TRUSSC_API, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, CHUNKS } from './config.mjs';
+import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, CHUNKS } from './config.mjs';
 
 const require = createRequire(import.meta.url);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -43,7 +43,7 @@ function chunkForAi(path) {
     const cut = md.indexOf('\n## API Index');
     if (cut !== -1) md = md.slice(0, cut);
     return splitHeadings(md).map(({ crumb, text }) =>
-        ({ id: 'concept:' + slug(crumb), source: 'for-ai', lang: 'en', title: crumb, text: `# ${crumb}\n\n${text}` }));
+        ({ id: 'concept:' + slug(crumb), source: 'for-ai', lang: 'cpp', title: crumb, text: `# ${crumb}\n\n${text}` }));
 }
 
 // --- Source: hand-written TrussC docs (docs/*.md) --------------------------
@@ -69,7 +69,7 @@ function chunkDocs(docsDir) {
         if (!existsSync(path)) continue;
         for (const { crumb, text } of splitHeadings(readFileSync(path, 'utf8'))) {
             const title = `${label} > ${crumb}`;
-            chunks.push({ id: 'doc:' + slug(label + ' ' + crumb), source: 'for-ai', lang: 'en', title, text: `# ${title}\n\n${text}` });
+            chunks.push({ id: 'doc:' + slug(label + ' ' + crumb), source: 'for-ai', lang: 'common', title, text: `# ${title}\n\n${text}` });
         }
     }
     return chunks;
@@ -100,7 +100,7 @@ function chunkAddons(registryPath, addonsDir) {
         let body = existsSync(readme) ? readFileSync(readme, 'utf8').replace(/\r/g, '') : '';
         if (body.length > ADDON_README_CAP) body = body.slice(0, ADDON_README_CAP) + '\n\n… (README truncated)';
         const text = body ? `${head}\n\n${body}` : head;
-        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'en', title: `${a.name} (addon)`, text, meta: { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name } });
+        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'common', title: `${a.name} (addon)`, text, meta: { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name } });
     }
     return chunks;
 }
@@ -130,7 +130,7 @@ function chunkApi(api, ofIdx) {
         return `⚠ Deprecated: ${r}${dep && dep.replacement ? ` Use ${dep.replacement}.` : ''}`;
     };
     const push = (id, title, lines, meta) =>
-        chunks.push({ id: 'symbol:' + id, source: 'reference', lang: 'multi', title, text: lines.filter((l) => l != null && l !== '').join('\n'), meta });
+        chunks.push({ id: 'symbol:' + id, source: 'reference', lang: 'cpp', title, text: lines.filter((l) => l != null && l !== '').join('\n'), meta });
 
     // functions — group overloads by name into one card
     const fnGroups = new Map();
@@ -256,7 +256,7 @@ function chunkAddonExamples(registryPath, addonsDir, nameSet) {
             const block = (f) => `// ===== ${f.rel} =====\n\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``;
             const text = `${head}\n\n${files.map(block).join('\n\n')}`;
             const embedTexts = files.map((f) => `${label} (${a.name} addon example) — ${f.rel}\n${f.src}`);
-            chunks.push({ id: 'example:' + label, source: 'example', lang: 'en', title: `${label} (addon example)`, text, embedTexts, meta: { group: `${a.name} addon`, addon: a.name, webSupported: false, apis, files: files.map((f) => f.rel) } });
+            chunks.push({ id: 'example:' + label, source: 'example', lang: 'cpp', title: `${label} (addon example)`, text, embedTexts, meta: { group: `${a.name} addon`, addon: a.name, webSupported: false, apis, files: files.map((f) => f.rel) } });
         }
     }
     return chunks;
@@ -285,14 +285,144 @@ function chunkExamples(jsonPath, srcRoot, nameSet) {
             // Per-file embed vectors; the header line carries the example name/group so
             // a file vector also responds to "<name> example" / "<group>" queries.
             const embedTexts = files.map((f) => `${it.name} (example — ${group}) — ${f.rel}\n${f.src}`);
-            chunks.push({ id: 'example:' + it.name, source: 'example', lang: 'en', title: `${it.name} (example)`, text, embedTexts, meta: { group, webSupported: web, apis, files: files.map((f) => f.rel) } });
+            chunks.push({ id: 'example:' + it.name, source: 'example', lang: 'cpp', title: `${it.name} (example)`, text, embedTexts, meta: { group, webSupported: web, apis, files: files.map((f) => f.rel) } });
         }
     }
     return chunks;
 }
 
+// --- Source: Lua reference (generated/trusssketch-ref.js) -------------------
+// TrussSketch is the in-browser Lua playground (trussc.org/sketch). Its API is a
+// Lua-flavored TWIN of the C++ reference: the SAME symbols, but Lua syntax — methods
+// with ':' (fbo:begin()), fields/statics/enum values/constants with '.' (v.x,
+// Vec2.fromAngle, BlendMode.Add), Type(...) / Type.new(...) constructors, and
+// reserved-word renames (end_fbo/end_shader/end_cam). We ingest it as a SEPARATE
+// lang:'lua' corpus (source:'sketch-lua') so sketch-mode retrieval can PREFER the Lua
+// twin over the C++ card (rag.mjs), while normal C++ chat excludes lang:'lua' entirely.
+//
+// Granularity mirrors the C++ reference chunking so titles line up 1:1 for the
+// twin-dedup in rag.mjs: one chunk per function symbol (overloads grouped), one per
+// type (methods + properties + statics INLINE — not per-member like C++, so the Lua
+// renames like end_fbo travel with their type), one per enum. Plus a grouped Tasks
+// chunk (spawn/wait/forever — TrussSketch-only, no C++ twin) and a single constants
+// overview. Title = the bare symbol name, IDENTICAL to the C++ reference title.
+const luaDesc = (o) => [o.desc, o.desc_ja].filter(Boolean);   // en (+ja); ko dropped to keep Lua cards lean
+const luaRet = (rt) => (rt && rt !== '(nothing)' && rt !== 'void' && rt !== '' ? ` -> ${rt}` : '');
+const luaSig = (m) => ((m.signatures && m.signatures.length ? m.signatures : ['']).map((s) => `${m.name}(${s})`).join(' | ')) + luaRet(m.return);
+function chunkSketchLua(luaApi) {
+    const out = [];
+    const push = (name, kind, lines, meta) =>
+        out.push({ id: 'lua:' + name, source: 'sketch-lua', lang: 'lua', title: name, text: lines.filter((l) => l != null && l !== '').join('\n'), meta: { kind, ...meta } });
+
+    // functions — group overloads by name into one card (mirrors chunkApi). The Tasks
+    // trio is pulled into its own grouped chunk below, so skip it here.
+    const TASKS = new Set(['spawn', 'wait', 'forever']);
+    const fnGroups = new Map();
+    for (const cat of luaApi.categories || []) for (const f of cat.functions || []) {
+        if (TASKS.has(f.name)) continue;
+        if (!fnGroups.has(f.name)) fnGroups.set(f.name, { cat: cat.name, items: [] });
+        fnGroups.get(f.name).items.push(f);
+    }
+    for (const [name, g] of fnGroups) {
+        const f0 = g.items[0];
+        const lines = [`# ${name}   (Lua function · ${g.cat})`, ...luaDesc(f0)];
+        const seen = new Set(), sigs = [];
+        for (const f of g.items) {
+            const s = `  ${name}(${f.params_typed || f.params || ''})${luaRet(f.return_type)}`;
+            if (!seen.has(s)) { seen.add(s); sigs.push(s); }
+        }
+        if (sigs.length) lines.push('', 'Lua signatures:', ...sigs);
+        if (f0.keywords?.length) lines.push('', `keywords: ${f0.keywords.join(', ')}`);
+        push(name, 'function', lines, { category: g.cat, keywords: f0.keywords || [] });
+    }
+
+    // types — one card, methods + properties + statics INLINE. Constructor works as
+    // BOTH Type(...) and Type.new(...) in Lua (see lua:gotchas).
+    for (const t of luaApi.types || []) {
+        const lines = [`# ${t.name}   (Lua type)`, ...luaDesc(t)];
+        const ctorSigs = (t.constructor && t.constructor.signatures) || [];   // own prop from JSON.parse; shadows Object.prototype
+        if (ctorSigs.length) {
+            lines.push('', `Construct with ${t.name}(...) or ${t.name}.new(...):`);
+            for (const s of ctorSigs) lines.push(`  ${t.name}(${s})`);
+        }
+        if (t.properties?.length) { lines.push('', 'Properties (access with .):'); for (const p of t.properties) lines.push(`  ${p.name}${p.type ? ` (${p.type})` : ''}${p.desc ? ` — ${p.desc}` : ''}`); }
+        if (t.methods?.length) { lines.push('', 'Methods (call with :):'); for (const m of t.methods) lines.push(`  ${luaSig(m)}${m.desc ? ` — ${m.desc}` : ''}`); }
+        if (t.static_methods?.length) { lines.push('', 'Static functions (call with .):'); for (const m of t.static_methods) lines.push(`  ${luaSig(m)}${m.desc ? ` — ${m.desc}` : ''}`); }
+        if (t.operators?.length) { lines.push('', 'Operators:'); for (const o of t.operators) lines.push(`  ${o.signature || o.cpp || ''}${o.desc ? ` — ${o.desc}` : ''}`); }
+        if (t.related?.length) lines.push('', `Related: ${t.related.join(', ')}`);
+        if (t.keywords?.length) lines.push(`keywords: ${t.keywords.join(', ')}`);
+        push(t.name, 'type', lines, { keywords: t.keywords || [], related: t.related || [] });
+    }
+
+    // enums — accessed with '.', e.g. BlendMode.Add
+    for (const e of luaApi.enums || []) {
+        const lines = [`# ${e.name}   (Lua enum)`, ...luaDesc(e)];
+        if (e.values?.length) { lines.push('', 'Values (access with .):'); for (const v of e.values) lines.push(`  ${e.name}.${v.name}${v.value != null ? ` = ${v.value}` : ''}${v.desc ? ` — ${v.desc}` : ''}`); }
+        if (e.related?.length) lines.push('', `Related: ${e.related.join(', ')}`);
+        if (e.keywords?.length) lines.push(`keywords: ${e.keywords.join(', ')}`);
+        push(e.name, 'enum', lines, { keywords: e.keywords || [] });
+    }
+
+    // Tasks trio (spawn / wait / forever) — TrussSketch-only cooperative coroutines,
+    // no C++ twin. Grouped because they only make sense together.
+    const tasksCat = (luaApi.categories || []).find((c) => c.name === 'Tasks');
+    if (tasksCat) {
+        const lines = ['# Tasks: spawn / wait / forever   (Lua — TrussSketch cooperative tasks)',
+            'TrussSketch runs cooperative tasks (coroutines) so you can animate or sequence things over time without blocking draw().', ''];
+        for (const f of tasksCat.functions || []) {
+            lines.push(`  ${f.name}(${f.params_typed || f.params || ''}) — ${f.desc || ''}`);
+            if (f.desc_ja) lines.push(`      ${f.desc_ja}`);
+        }
+        lines.push('', 'Inside a task, wait(sec) pauses just that task. forever(fn) repeats fn forever, with an implicit wait(0) each loop so it yields.',
+            'keywords: spawn, wait, forever, task, coroutine, async, animation, sequence, タスク, 待つ, 繰り返し');
+        out.push({ id: 'lua:tasks', source: 'sketch-lua', lang: 'lua', title: 'Tasks (spawn/wait/forever)', text: lines.join('\n'), meta: { kind: 'tasks', keywords: ['spawn', 'wait', 'forever', 'task', 'coroutine'] } });
+    }
+
+    // constants overview — one card listing every global constant (used by bare name)
+    if (luaApi.constants?.length) {
+        const lines = ['# TrussSketch constants   (Lua)', 'Global constants available in every sketch (use the bare name):', ''];
+        for (const c of luaApi.constants) lines.push(`  ${c.name}${c.desc ? ` — ${c.desc}` : ''}`);
+        lines.push('', 'keywords: constant, key code, TAU, PI, angle, direction, blend, mouse button, 定数, キー');
+        out.push({ id: 'lua:constants', source: 'sketch-lua', lang: 'lua', title: 'TrussSketch constants', text: lines.join('\n'), meta: { kind: 'constants', keywords: (luaApi.constants || []).map((c) => c.name) } });
+    }
+
+    return out;
+}
+
+// --- Hand-written: Lua gotchas (the sharp edges of the Lua binding) ---------
+// Force-pinned in sketch mode (rag.mjs) so every TrussSketch answer respects the
+// Lua-vs-C++ syntax differences even when the specific symbol chunk didn't surface.
+function chunkLuaGotchas() {
+    const text = `# TrussSketch Lua gotchas (read me first)
+
+TrussSketch runs Lua 5.4, not C++. The API NAMES are the same as TrussC C++, but the syntax differs. Watch these:
+
+- Call METHODS with a colon: \`fbo:begin()\`, \`mesh:draw()\`, \`v:length()\`. Access FIELDS, static functions, enum values and constants with a dot: \`v.x\`, \`Vec2.fromAngle(a)\`, \`BlendMode.Add\`, \`colors.red\`, \`TAU\`.
+- Constructors work BOTH ways: \`Vec2(10, 20)\` and \`Vec2.new(10, 20)\` are equivalent — use whichever reads better.
+- Reserved-word renames — Lua keyword \`end\` cannot be a method name, so the begin/end pairs are renamed. NEVER call \`:end()\`. Use:
+    - Fbo:     \`fbo:begin()\` … \`fbo:end_fbo()\`
+    - Shader:  \`shader:begin()\` … \`shader:end_shader()\`
+    - Camera:  \`cam:begin()\` … \`cam:end_cam()\`
+- Matrices: \`Mat3\` / \`Mat4\` use accessor methods, not index/operator sugar — read and write elements with \`m:at(row, col)\` and \`m:set(...)\`.
+- Tweens are per-type globals: \`TweenFloat\`, \`TweenVec2\`, \`TweenVec3\`, \`TweenColor\`. There is NO plain \`Tween\` — pick the one matching the value you animate.
+- Filesystem paths are plain Lua strings (e.g. \`"data/img.png"\`) — there is no path object.
+- NOT bound in Lua (do not use in a sketch): \`Thread\`, \`SoundSource\`, \`Environment\`, \`VideoPlayerBase\`, \`Event<T>\`, \`ThreadChannel<T>\`. These are native-only.
+- Cooperative tasks: \`spawn(fn)\` starts a task, \`wait(seconds)\` pauses the current task, \`forever(fn)\` loops fn forever (with an implicit \`wait(0)\` each iteration so it yields). Use these for animation/sequencing instead of blocking loops.
+- Sketch lifecycle functions are OPTIONAL global functions: \`function setup() end\`, \`function update() end\`, \`function draw() end\`. If you don't define one, the host provides a no-op — define only what you need.
+- Same core conventions as C++: colors are 0.0–1.0 floats (not 0–255); angles are in radians — use \`TAU\` (a full turn) instead of PI.
+
+Lua syntax reminders: blocks close with \`end\`; comments start with \`--\`; no \`#include\`, no \`::\`, no type declarations, no semicolons.`;
+    return {
+        id: 'lua:gotchas', source: 'sketch-lua', lang: 'lua',
+        title: 'TrussSketch Lua gotchas',
+        text,
+        meta: { kind: 'gotchas', keywords: ['lua', 'syntax', 'colon', 'dot', 'end_fbo', 'end_shader', 'end_cam', 'Type.new', 'constructor', 'tween', 'spawn', 'wait', 'forever', 'setup', 'update', 'draw', 'gotcha'] },
+    };
+}
+
 // --- Assemble ---------------------------------------------------------------
 const api = require(TRUSSC_API);
+const luaApi = require(SKETCH_LUA_REF);
 // --- Source: GitHub release notes (releases.json, cached by fetch-releases.mjs) ----
 // Release notes are the only source that records WHAT changed and WHY — rationale
 // that never reaches the reference or docs. Two hazards, both handled here:
@@ -316,7 +446,7 @@ function chunkReleases(path) {
         let body = r.body;
         if (body.length > RELEASE_BODY_CAP) body = body.slice(0, RELEASE_BODY_CAP) + '\n\n… (truncated)';
         return {
-            id: 'release:' + r.tag, source: 'release', lang: 'en',
+            id: 'release:' + r.tag, source: 'release', lang: 'common',
             title: `Release ${r.tag}${latest ? ' (latest)' : ''} — ${r.date}`,
             text: `${head}\n\n# ${r.name}\n\n${body}`,
             meta: { tag: r.tag, date: r.date, url: r.url, keywords: [r.tag, 'release', 'release notes', 'changelog'] },
@@ -344,7 +474,7 @@ function chunkReleases(path) {
     };
     const digest = rel.slice(0, 5).map((r) => `## ${r.tag} — ${r.name} (${r.date})\n${excerpt(r.body)}`).join('\n\n');
     chunks.unshift({
-        id: 'release:latest', source: 'release', lang: 'en',
+        id: 'release:latest', source: 'release', lang: 'common',
         title: 'Latest TrussC releases (newest first)',
         text: `The current latest TrussC release is ${rel[0].tag} (${rel[0].date}). Recent releases, newest first:\n\n${digest}\n\nFull history: https://github.com/TrussC-org/TrussC/releases`,
         meta: { url: 'https://github.com/TrussC-org/TrussC/releases', keywords: ['release notes', 'releases', 'latest release', 'newest', 'recent releases', 'changelog', 'version', 'update history', "what's new", 'リリースノート', '最新リリース', '更新履歴'] },
@@ -367,7 +497,9 @@ const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
 const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
 const releases = chunkReleases(RELEASES_JSON);
-const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons, ...releases];
+const sketchLua = chunkSketchLua(luaApi);
+const luaGotchas = chunkLuaGotchas();
+const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons, ...releases, luaGotchas, ...sketchLua];
 
 // Compact English-only repr for the cross-encoder reranker. The full chunk text is
 // multilingual (en/ja/ko desc) + code + of-mapping, which dilutes cross-encoder
@@ -428,3 +560,4 @@ console.log(`  symbol  (trussc-api): ${symbols.length}  (of-mapping entries: ${o
 console.log(`  example (examples):   ${examples.length}`);
 console.log(`  addon   (registry):   ${addons.length}`);
 console.log(`  release (github):     ${releases.length}`);
+console.log(`  sketch-lua (lua ref): ${sketchLua.length + 1}  (gotchas + fn/type/enum/tasks/constants)`);

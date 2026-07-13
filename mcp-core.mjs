@@ -21,13 +21,16 @@ export const TOOLS = [{
         'chunks come back TRIMMED by ' +
         'default (header + start of source); pass full:true, or call trussc_get with the ' +
         'chunk id, to get the whole multi-file source. Use a specific natural-language ' +
-        'query, e.g. "draw a filled circle in a color", "load and play a sound file".',
+        'query, e.g. "draw a filled circle in a color", "load and play a sound file". ' +
+        'Set lang:"lua" for TrussSketch (the in-browser Lua playground) to get Lua-flavored ' +
+        'cards (colon methods, Type.new, end_fbo/end_shader/end_cam) instead of the C++ API.',
     inputSchema: {
         type: 'object',
         properties: {
             query: { type: 'string', description: 'Natural-language description of what you want to do in TrussC.' },
             k: { type: 'number', description: 'Max total results to return (default 8).' },
             full: { type: 'boolean', description: 'Return full untrimmed text for every result (default false; examples are trimmed). Prefer trussc_get for a specific chunk.' },
+            lang: { type: 'string', enum: ['cpp', 'lua'], description: 'API flavor: "cpp" (default, the C++ framework) or "lua" (TrussSketch playground — prefers the Lua twin of each symbol, hides nothing else).' },
         },
         required: ['query'],
     },
@@ -87,7 +90,8 @@ export async function dispatch(msg, handlers) {
                     const query = String(args.query || '').trim();
                     if (!query) return toolText('error: empty query', true);
                     const k = Math.max(1, Math.min(20, Number(args.k) || 8));
-                    const results = (await handlers.search(query, k, !!args.full)).slice(0, k);
+                    const lang = args.lang === 'lua' ? 'lua' : 'cpp';
+                    const results = (await handlers.search(query, k, !!args.full, lang)).slice(0, k);
                     return toolText(formatResults(results, query));
                 }
                 if (name === 'trussc_get') {

@@ -20,7 +20,7 @@ async function post(path, payload) {
     return (await r.json()).results || [];
 }
 const handlers = {
-    search: (query, k, full) => post('/search', { question: query, k, full }),
+    search: (query, k, full, lang) => post('/search', { question: query, k, full, lang }),
     get: (ids) => post('/get', { ids }),
 };
 

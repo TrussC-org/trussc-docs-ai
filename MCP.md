@@ -64,11 +64,15 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 
 ## Tools & behaviour
 
-- **`trussc_search(query, k?, full?)`** — ranked by hybrid retrieval (BM25 over names
-  + bge-m3 semantic, RRF-fused). Example chunks come back **trimmed** by default (header
-  + start of source) to keep the result light; pass `full: true` for whole text. `k` is
-  the **max total results** (default 8, clamped 1–20). Each result shows `cos` (cosine)
-  and `rrf` (fused rank score) so the ordering is legible.
+- **`trussc_search(query, k?, full?, lang?)`** — ranked by hybrid retrieval (BM25 over
+  names + bge-m3 semantic, RRF-fused). Example chunks come back **trimmed** by default
+  (header + start of source) to keep the result light; pass `full: true` for whole text.
+  `k` is the **max total results** (default 8, clamped 1–20). Each result shows `cos`
+  (cosine) and `rrf` (fused rank score) so the ordering is legible.
+  - `lang` — API flavor. `"cpp"` (default) is the C++ framework; `"lua"` targets
+    **TrussSketch** (the in-browser Lua playground) — it prefers the Lua twin of each
+    symbol (colon-call methods, `Type.new(...)`, reserved-word renames like `fbo:end_fbo()`)
+    and drops the C++ twin, while C++ examples/docs (no Lua twin) still come through.
 - **`trussc_get(ids)`** — fetch the FULL text of specific chunks (e.g. expand a trimmed
   example). Ids are exactly as shown in results / the `[#id]` tags: `symbol:drawCircle`,
   `symbol:Fbo::begin`, `example:shaderExample`, `addon:tcxOsc`, `doc:...`, `concept:...`.

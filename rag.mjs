@@ -16,6 +16,32 @@ function chunkById(id) {
     return _byId.get(id) || null;
 }
 
+// Titles of every Lua (sketch) chunk — a Lua symbol whose title matches a C++ chunk's
+// title is its TWIN. Built once (lazy), used by applyLangPolicy for the sketch-mode
+// preference (prefer the Lua card, drop its C++ twin).
+let _luaTitles = null;
+function luaTitles() {
+    if (!_luaTitles) { _luaTitles = new Set(); for (const c of chunks()) if (c.lang === 'lua') _luaTitles.add(c.title); }
+    return _luaTitles;
+}
+
+// Language view of the corpus. The corpus is single, tagged lang:'cpp' | 'common' |
+// 'lua'. 'common' (docs / addon READMEs / release notes) is language-neutral and stays
+// in both views.
+//   - 'cpp'  (default, normal site chat + MCP): Lua chunks are hidden entirely.
+//   - 'lua'  (TrussSketch): everything is eligible, BUT when a Lua chunk and a C++
+//            chunk are the same symbol (same title), the C++ twin is dropped so the
+//            user sees Lua syntax. C++ chunks with NO Lua twin (examples, docs,
+//            member-level Type::method cards) stay — the persona translates them.
+// Applied to the ranked candidate list BEFORE quota-fill, so ranking is unaffected.
+function applyLangPolicy(list, lang) {
+    if (lang === 'lua') {
+        const lt = luaTitles();
+        return list.filter((c) => c.lang === 'lua' || !lt.has(c.title));
+    }
+    return list.filter((c) => c.lang !== 'lua');
+}
+
 // Lean view: example chunks are whole multi-file sources (heavy for LLM context and
 // for Haiku's bill), so trim them to a head excerpt (the header + APIs-used + start
 // of tcApp.cpp — enough to see how it's used) and point to the full via trussc_get.
@@ -178,8 +204,8 @@ function fillQuota(sorted, otherK, exampleK, addonK) {
     return out;
 }
 
-export async function retrieve(question, k = TOP_K) {
-    return retrieveMulti([question], k);
+export async function retrieve(question, k = TOP_K, opts = {}) {
+    return retrieveMulti([question], k, opts);
 }
 
 // Multi-query retrieval: embed several query variants and score each chunk by its
@@ -188,7 +214,8 @@ export async function retrieve(question, k = TOP_K) {
 // keyword-expanded query together find the right chunks. Diagnosis: "おとをならすには？"
 // alone retrieves Node noise; adding "音を鳴らす sound play beep" pulls in the real
 // Sound API. Result is then quota-filled (otherK non-example + exampleK examples).
-export async function retrieveMulti(queries, k = TOP_K) {
+export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
+    const lang = opts.lang === 'lua' ? 'lua' : 'cpp';   // 'cpp' = default (Lua hidden); 'lua' = sketch (prefer Lua twin)
     const qs = [...new Set(queries.map((q) => (q || '').trim()).filter(Boolean))];
     const cs = chunks();
     const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
@@ -205,7 +232,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
     const rerankQuery = qs.join(' ');
 
     if (!HYBRID) {
-        const sorted = dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score }));
+        const sorted = applyLangPolicy(dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score })), lang);
         return finalize(sorted, k, supK, rerankQuery);
     }
 
@@ -220,7 +247,7 @@ export async function retrieveMulti(queries, k = TOP_K) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return finalize(fused, k, supK, rerankQuery);
+    return finalize(applyLangPolicy(fused, lang), k, supK, rerankQuery);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the
@@ -487,10 +514,15 @@ function validMembersOf(owner) {
 // in the carried-over "pinned" chunks the model flagged on earlier turns, then
 // assemble the prompt. Shared by answer() and answerStream().
 async function prep(question, history, k, page, pinned = []) {
+    // TrussSketch (trussc.org/sketch) sends page:'sketch' — the Lua playground mode.
+    // It steers retrieval to the Lua corpus view, force-pins the Lua gotchas card, and
+    // activates the SKETCH_MODE Lua persona in buildMessages.
+    const sketchMode = page === 'sketch';
+    if (sketchMode) pinned = ['lua:gotchas', ...pinned];   // auto-pin gotchas (deduped by pinSeen below)
     const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
     const base = [...recentUser, question].join('\n');
     const expanded = await expandQuery(question);   // keyword-rich variant (English API terms)
-    const fresh = await retrieveMulti([base, expanded], k);
+    const fresh = await retrieveMulti([base, expanded], k, { lang: sketchMode ? 'lua' : 'cpp' });
 
     // Carried-over importance: resolve the LLM-curated pinned ids (recent-first) to
     // chunks, take the first PIN_K that still exist. They persist across turns so a
@@ -521,7 +553,10 @@ async function prep(question, history, k, page, pinned = []) {
     // Links favor the freshly-retrieved (real scores) so "詳しくは" stays relevant to
     // the current question, with page/pinned as fallbacks.
     const links = buildLinks([...fresh, ...(pc ? [pc] : []), ...pinnedChunks]);
-    return { retrieved: ordered, links, messages: buildMessages(question, ordered, history, pc ? pc.title : null) };
+    // Sketch mode passes 'sketch' straight through so buildMessages activates the Lua
+    // persona (pageChunk('sketch') is null, so it never travels as a reference-page hint).
+    const pageName = sketchMode ? 'sketch' : (pc ? pc.title : null);
+    return { retrieved: ordered, links, messages: buildMessages(question, ordered, history, pageName) };
 }
 
 // Parse the model's `@@USED:` trail off the end of its answer → { answer, reported }.

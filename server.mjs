@@ -53,7 +53,7 @@ const toResult = (c, full) => {
 };
 // Handlers for the MCP tools — local (no HTTP round-trip; the box has corpus + bge).
 const mcpHandlers = {
-    search: async (query, k, full) => (await retrieve(query, k)).map((c) => toResult(c, full)),
+    search: async (query, k, full, lang) => (await retrieve(query, k, { lang })).map((c) => toResult(c, full)),
     get: async (ids) => getByIds(ids),   // getByIds already returns full text
 };
 
@@ -131,7 +131,7 @@ const server = createServer(async (req, res) => {
         // are trimmed unless full:true; each result carries cosine + fused rrf.
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
-            const retrieved = await retrieve(question, k);
+            const retrieved = await retrieve(question, k, { lang: body.lang });   // body.lang:'lua' for TrussSketch; else C++ (default)
             const results = retrieved.map((c) => toResult(c, !!body.full));
             logStat({ ep: 'search', ms: Date.now() - t0, ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             return json(200, { results });

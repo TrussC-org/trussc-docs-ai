@@ -78,6 +78,10 @@ export const FOR_AI = process.env.FOR_AI || join(TRUSSC_REPO, 'docs/FOR_AI_ASSIS
 export const TRUSSC_API = process.env.TRUSSC_API || join(SITE_REPO, 'generated/trussc-api.js');
 // openFrameworks → TrussC mapping (trussc-api.js doesn't carry `of`; join it in).
 export const OF_MAPPING = process.env.OF_MAPPING || join(SITE_REPO, 'generated/of-mapping.json');
+// sketch-lua: the Lua-flavored TWIN of the reference (TrussSketch playground). Same
+// global (`TrussCAPI`) and schema as trussc-api.js — it module.exports the object, so
+// build-chunks require()s it. Feeds the lang:'lua' corpus (rag prefers it in sketch mode).
+export const SKETCH_LUA_REF = process.env.SKETCH_LUA_REF || join(SITE_REPO, 'generated/trusssketch-ref.js');
 // examples: site manifest + on-disk sources (src/tcApp.cpp).
 export const EXAMPLES_JSON = process.env.EXAMPLES_JSON || join(SITE_REPO, 'examples/examples.json');
 export const EXAMPLES_SRC = process.env.EXAMPLES_SRC || join(TRUSSC_REPO, 'examples');

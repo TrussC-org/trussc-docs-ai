@@ -266,6 +266,11 @@ export function refLink(c) {
     }
     if (c.source === 'addon') return c.meta?.url || `${REF_BASE}/addons/`;   // addon repo, else the catalog
     if (c.source === 'release') return c.meta?.url || 'https://github.com/TrussC-org/TrussC/releases';   // the GitHub release page
+    if (c.source === 'sketch-lua') {                  // Lua twin → the sketch (Lua) reference
+        const hk = HASH_KIND[(c.meta || {}).kind];
+        return hk ? `${REF_BASE}/sketch/reference/#${hk}:${c.title}`
+                  : `${REF_BASE}/sketch/reference/`;   // tasks/constants/gotchas → overview
+    }
     if (c.source !== 'reference') return null;       // concept/doc chunks have no symbol page
     const m = c.meta || {};
     if (m.owner) return `${REF_BASE}/reference/#type:${m.owner}`;   // any member (method/static/field) → its type page
@@ -615,7 +620,32 @@ function nameLink(name) {
     }
     return _nameLink.get(name) || null;
 }
-export function resolveLinks(text) {
+
+// Sketch-mode [[Name]] index: symbol titles of the Lua chunks, PLUS member names
+// (mesh:draw, fbo:end_fbo, Type.static) recovered from the Lua type-chunk texts so
+// method-level links like [[end_fbo]] land on their owner's type page. A name the
+// index doesn't know degrades to plain text — never a C++ link inside a Lua answer.
+let _luaNameLink = null;
+function luaNameLink(name) {
+    if (!_luaNameLink) {
+        _luaNameLink = new Map();
+        const members = new Map();   // member name -> owner type link (first wins)
+        for (const c of chunks()) {
+            if (c.lang !== 'lua') continue;
+            const url = refLink(c);
+            if (!url) continue;
+            if (!_luaNameLink.has(c.title)) _luaNameLink.set(c.title, url);
+            if ((c.meta || {}).kind === 'type') {
+                for (const m of String(c.text || '').matchAll(/\b\w+[:.]([A-Za-z_]\w*)\s*\(/g)) {
+                    if (!members.has(m[1])) members.set(m[1], url);
+                }
+            }
+        }
+        for (const [n, url] of members) if (!_luaNameLink.has(n)) _luaNameLink.set(n, url);
+    }
+    return _luaNameLink.get(name) || null;
+}
+export function resolveLinks(text, sketchMode = false) {
     // 1) strip the model's own (untrustworthy) links/URLs first, keeping visible labels
     let t = String(text)
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')     // [label](url) → label
@@ -623,7 +653,7 @@ export function resolveLinks(text) {
     // 2) resolve our [[Name]] wiki-links into real deep-links (strip optional quotes)
     t = t.replace(/\[\[\s*["“”']?([^\]]+?)["“”']?\s*\]\]/g, (_, name) => {
         const n = name.trim();
-        const url = nameLink(n);
+        const url = sketchMode ? luaNameLink(n) : nameLink(n);
         return url ? `[${n}](${url})` : n;            // known → markdown link, unknown → plain
     });
     return t.replace(/[ \t]{2,}/g, ' ');             // tidy gaps left behind
@@ -634,6 +664,7 @@ export function resolveLinks(text) {
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
 // Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
 export async function answer(question, history = [], page = null, pinned = [], k = TOP_K) {
+    const sketchMode = page === 'sketch';
     const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
     let { answer: text, reported } = splitUsed(await collect(chatStream(messages)));
     let corrected = false;
@@ -643,7 +674,7 @@ export async function answer(question, history = [], page = null, pinned = [], k
         ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
     }
     const usedIds = usedIdsOf(reported, text, retrieved);
-    return { retrieved, links, text: resolveLinks(text), corrected, usedIds };
+    return { retrieved, links, text: resolveLinks(text, sketchMode), corrected, usedIds };
 }
 
 // Streaming variant for the widget. Yields events:
@@ -655,6 +686,7 @@ export async function answer(question, history = [], page = null, pinned = [], k
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
 export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K) {
+    const sketchMode = page === 'sketch';
     const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
     yield { type: 'meta', retrieved, links };
 
@@ -682,10 +714,10 @@ export async function* answerStream(question, history = [], page = null, pinned 
     const bad = findFabrications(text);
     if (bad.size) {
         ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
-        text = resolveLinks(text);
+        text = resolveLinks(text, sketchMode);
         yield { type: 'replace', text };   // fabrication fix (also link-resolved)
     } else {
-        const resolved = resolveLinks(text);
+        const resolved = resolveLinks(text, sketchMode);
         if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }  // had tags/URLs/trail → swap to resolved
         else text = resolved;
     }

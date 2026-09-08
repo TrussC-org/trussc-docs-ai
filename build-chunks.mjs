@@ -85,7 +85,9 @@ function chunkAddons(registryPath, addonsDir) {
     if (!existsSync(registryPath)) return [];
     const reg = JSON.parse(readFileSync(registryPath, 'utf8')).addons || [];
     const chunks = [];
+    const missing = [];
     for (const a of reg) {
+        const meta = { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name };
         const head = [
             `# ${a.name}  (official addon — ${a.category || 'addon'})`,
             a.description || null,
@@ -93,16 +95,56 @@ function chunkAddons(registryPath, addonsDir) {
             (a.keywords && a.keywords.length) ? `keywords: ${a.keywords.join(', ')}` : null,
             `Add to a project: \`trusscli addon add ${a.name}\``,
         ].filter(Boolean).join('\n');
-        // Prefer the README when the addon is bundled locally with one; otherwise fall
-        // back to a registry-metadata-only card so every official addon is at least
-        // findable (README-less ones like tcxBox2d were being dropped entirely before).
+
+        // The registry card always goes in, so every official addon is findable even
+        // when it is not cloned here (README-less ones like tcxBox2d were being
+        // dropped entirely before) and whatever else follows.
+        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'common', title: `${a.name} (addon)`, text: head, meta });
+
         const readme = join(addonsDir, a.name, 'README.md');
-        let body = existsSync(readme) ? readFileSync(readme, 'utf8').replace(/\r/g, '') : '';
-        if (body.length > ADDON_README_CAP) body = body.slice(0, ADDON_README_CAP) + '\n\n… (README truncated)';
-        const text = body ? `${head}\n\n${body}` : head;
-        chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'common', title: `${a.name} (addon)`, text, meta: { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name } });
+        if (!existsSync(readme)) { if (!existsSync(join(addonsDir, a.name))) missing.push(a.name); continue; }
+        const body = readFileSync(readme, 'utf8').replace(/\r/g, '');
+
+        // Split the README the way docs are split, one chunk per section. A whole
+        // README in a single chunk gets one embedding for "install + API + samples +
+        // troubleshooting" at once, which matches every question about the addon
+        // weakly and none of them strongly — and anything past ADDON_README_CAP was
+        // simply discarded (tcxPhysics is 24 kB, three times the cap).
+        const sections = splitHeadings(body);
+        if (!sections.length) {
+            // No ## / ### at all: keep the README whole rather than dropping it,
+            // since splitHeadings ignores text before the first heading.
+            const text = body.length > ADDON_README_CAP
+                ? body.slice(0, ADDON_README_CAP) + '\n\n… (README truncated)'
+                : body;
+            if (text.trim()) chunks.push({ id: `addon:${a.name}#readme`, source: 'addon', lang: 'common', title: `${a.name} (addon README)`, text: `${a.name}\n\n${text}`, meta });
+            continue;
+        }
+        for (const sec of sections) {
+            let text = sec.text;
+            if (text.length > ADDON_README_CAP) text = text.slice(0, ADDON_README_CAP) + '\n\n… (section truncated)';
+            // Name the addon inside the text too: a section titled "Usage" says
+            // nothing on its own, and the crumb is what makes it retrievable.
+            chunks.push({
+                id: `addon:${a.name}#${slugify(sec.crumb)}`,
+                source: 'addon', lang: 'common',
+                title: `${a.name} > ${sec.crumb} (addon)`,
+                text: `# ${a.name} — ${sec.crumb}\n\n${text}`,
+                meta,
+            });
+        }
+    }
+    if (missing.length) {
+        console.warn(`  ⚠ ${missing.length} registry addon(s) not cloned into ${addonsDir} — README + examples absent from the corpus:`);
+        console.warn(`     ${missing.join(', ')}`);
+        console.warn(`     fix: trusscli addon clone ${missing.join(' ')}`);
     }
     return chunks;
+}
+
+// Stable id fragment for a heading crumb ("Joints > Motors" -> "joints-motors")
+function slugify(s) {
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'section';
 }
 
 // --- openFrameworks index: TrussC symbol name -> [of names] ----------------

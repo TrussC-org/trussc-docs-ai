@@ -8,3 +8,9 @@ MORNING.md
 *.log
 # usage logs (privacy: contains questions + hashed IPs — never commit)
 stats.jsonl
+
+# machine-local deploy overrides: the committed deploy/ files are TEMPLATES.
+# The real unit/tunnel config for a given box carries its paths, its node
+# binary and — critically — a real STATS_SALT, so it must never be committed.
+deploy/*.local
+deploy/*.local.*

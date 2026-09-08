@@ -64,6 +64,28 @@ sudo systemctl daemon-reload && sudo systemctl enable --now trussc-docs-ai
 systemctl status trussc-docs-ai
 ```
 
+**The files in `deploy/` are templates.** They carry placeholders, not any real
+box's paths or secrets, so editing them in place makes a diff that is only ever
+noise for the next person. Keep a machine's own copy alongside them instead:
+
+```bash
+cp deploy/trussc-docs-ai.service deploy/trussc-docs-ai.service.local
+cp deploy/cloudflared-config.yml deploy/cloudflared-config.local.yml
+```
+
+`deploy/*.local` and `deploy/*.local.*` are gitignored, so those hold the real
+`User=`, `WorkingDirectory=` and node path for the box without ever being
+committed.
+
+**Secrets are the exception: keep them out of the repo directory entirely.**
+`ANTHROPIC_API_KEY` and `STATS_SALT` belong only in the installed unit under
+`/etc/systemd/system/`, and that file should be root-only — systemd does not
+need it world-readable, and the default `cp` leaves it at 644:
+
+```bash
+sudo chmod 640 /etc/systemd/system/trussc-docs-ai.service
+```
+
 ## B. Exposure — Cloudflare Tunnel
 
 ### 5. Install + auth

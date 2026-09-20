@@ -208,8 +208,28 @@ function chunkApi(api, ofIdx) {
         if (t.operators?.length) { lines.push('', 'Operators:'); for (const o of t.operators) lines.push(`  ${o.signature || o.cpp}${o.desc ? ` — ${o.desc}` : ''}`); }
         if (t.related?.length) lines.push('', `Related: ${t.related.join(', ')}`);
         if (t.examples?.length) lines.push(`Examples: ${t.examples.map((e) => e.name || e).join(', ')}`);
+        if (t.nested?.length) lines.push('', `Nested types: ${t.nested.map((n) => n.name).join(', ')}`);
         if (t.keywords?.length) lines.push(`keywords: ${t.keywords.join(', ')}`);
         push(t.name, t.name, lines, { kind: 'type', related: t.related || [] });
+
+        // Nested types and enums get their own card, keyed by the qualified name
+        // (symbol:Ray::Hit). Methods advertise them by the bare name -- the
+        // signature reads `Hit Ray::intersectSphere(float radius)` -- so without a
+        // card of their own there is nothing to retrieve when someone asks what
+        // that return value holds.
+        for (const n of t.nested || []) {
+            const nl = [`# ${n.name}   (${n.kind === 'enum' ? 'nested enum' : 'nested type'} of ${t.name})`, ofLine(n.name), ...descBlock(n)];
+            if (n.constructor?.signatures?.length) nl.push('', 'Constructor:', ...n.constructor.signatures.map((s) => `  ${n.short}(${s})`));
+            if (n.properties?.length) { nl.push('', 'Properties:'); for (const p of n.properties) nl.push(`  ${p.type} ${p.name}${p.desc ? ` — ${p.desc}` : ''}`); }
+            for (const m of (n.methods || []).concat(n.static_methods || [])) {
+                for (const sg of m.signatures || []) {
+                    const sig = typeof sg === 'string' ? { ret: m.return, params: sg } : sg;
+                    nl.push(`  ${sig.ret || 'void'} ${n.name}::${m.name}(${sig.params || ''})`);
+                }
+            }
+            if (n.values?.length) { nl.push('', 'Values:'); for (const v of n.values) nl.push(`  ${n.short}::${v.name}${v.value !== undefined && v.value !== null ? ` = ${v.value}` : ''}${v.desc ? ` — ${v.desc}` : ''}`); }
+            push(n.name, n.name, nl, { kind: n.kind === 'enum' ? 'enum' : 'type', owner: t.name });
+        }
 
         const member = (m, kindLabel, kind) => {
             const id = `${t.name}::${m.name}`;

@@ -214,7 +214,17 @@ function chunkApi(api, ofIdx) {
         const member = (m, kindLabel, kind) => {
             const id = `${t.name}::${m.name}`;
             const ml = [`# ${id}   (${kindLabel} of ${t.name})`, ofLine(id), ...descBlock(m)];
-            if (m.signatures?.length) { ml.push('', 'Signatures:'); for (const s of m.signatures) ml.push(`  ${m.return || 'void'} ${id}(${s})`); }
+            // Overloads carry their own return type. They used to share the
+            // member's single `return`, so an overload set that disagreed was
+            // advertised with the wrong type -- Ray::intersectSphere's out-param
+            // form read as returning Hit when it returns bool.
+            if (m.signatures?.length) {
+                ml.push('', 'Signatures:');
+                for (const s of m.signatures) {
+                    const sig = typeof s === 'string' ? { ret: m.return, params: s } : s;
+                    ml.push(`  ${sig.ret || 'void'} ${id}(${sig.params || ''})`);
+                }
+            }
             if (deprNote(m.deprecated)) ml.push('', deprNote(m.deprecated));
             push(id, id, ml, { kind, owner: t.name });
         };

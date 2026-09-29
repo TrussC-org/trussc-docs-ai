@@ -646,8 +646,17 @@ function luaNameLink(name) {
     return _luaNameLink.get(name) || null;
 }
 export function resolveLinks(text, sketchMode = false) {
+    // Code passes through untouched: a C++ lambda `[this](auto& e) { … }` has exactly
+    // the shape of a markdown link, `[[nodiscard]]` that of a wiki-link, and the space
+    // tidy-up below would flatten indentation.
+    return String(text)
+        .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/)
+        .map((part, i) => (i % 2 ? part : resolveProse(part, sketchMode)))
+        .join('');
+}
+function resolveProse(text, sketchMode) {
     // 1) strip the model's own (untrustworthy) links/URLs first, keeping visible labels
-    let t = String(text)
+    let t = text
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')     // [label](url) → label
         .replace(/<?https?:\/\/[^\s>)]+>?/g, '');     // <http://…> or bare URL → drop
     // 2) resolve our [[Name]] wiki-links into real deep-links (strip optional quotes)

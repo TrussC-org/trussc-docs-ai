@@ -21,6 +21,10 @@ const QUESTIONS = [
     ['concept/ja', 'FPSを設定するには？'],
     ['symbol/en',  'how do I rotate the coordinate system?'],
     ['example/ja', 'シェーダーのサンプルある？'],
+    ['issue/en',   'my Thread subclass aborts with terminate when it is destroyed'],
+    ['issue/ja',   'Windows で callAfterAsync のタイミングが 15ms くらいずれる'],
+    ['issue/ja',   'Font で Meiryo UI を読むと別のフォントになる'],
+    ['issue/en',   'VideoPlayer setLoop before load does not work'],
 ];
 
 for (const [tag, q] of QUESTIONS) {

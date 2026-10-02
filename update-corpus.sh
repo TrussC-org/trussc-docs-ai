@@ -5,6 +5,7 @@
 # or any corpus source changes (FOR_AI_ASSISTANT.md, examples, of-mapping…).
 #
 # Steps:
+#   0. fetch-*.mjs        refresh the GitHub caches (releases.json, issues.json)
 #   1. build-chunks.mjs   sources → chunks.jsonl
 #   2. embed.mjs          chunks.jsonl → chunks.embedded.json   (bge-m3, ~couple min)
 #   3. scp                copy the corpus + runtime code to the server
@@ -34,6 +35,8 @@ PORT="${PORT:-8788}"
 
 echo "▶ 0/3  fetch release notes (GitHub)…"
 node fetch-releases.mjs || echo "  (fetch failed — using the cached releases.json)"
+echo "▶ 0/3  fetch open bug issues (GitHub)…"
+node fetch-issues.mjs || echo "  (fetch failed — using the cached issues.json)"
 echo "▶ 1/3  build-chunks…"
 # addon examples are part of the standard corpus (override with ADDON_EXAMPLES='')
 ADDON_EXAMPLES="${ADDON_EXAMPLES-all}" node build-chunks.mjs

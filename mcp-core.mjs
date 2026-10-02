@@ -10,7 +10,7 @@ export const TOOLS = [{
     name: 'trussc_search',
     description:
         'Search the TrussC creative-coding framework: API reference, hand-written docs, ' +
-        'runnable examples, official addons, and release notes. TrussC is a niche openFrameworks-like C++ ' +
+        'runnable examples, official addons, release notes, and known open bugs (GitHub issues). TrussC is a niche openFrameworks-like C++ ' +
         'framework (namespace `tc`, built on sokol) that model training data barely covers, ' +
         'so its priors are unreliable. Call this BEFORE writing, reviewing, or answering ' +
         'anything about TrussC C++ code to get the REAL API signatures, conventions ' +
@@ -41,7 +41,7 @@ export const TOOLS = [{
         'trussc_search to expand a trimmed example (or any chunk) to its complete ' +
         'multi-file source. Pass ids exactly as shown in results / the [#id] tags: ' +
         'API symbols are "symbol:drawCircle" / "symbol:Fbo::begin", plus ' +
-        '"example:shaderExample", "addon:tcxOsc", "release:v0.6.2", "doc:...", "concept:...".',
+        '"example:shaderExample", "addon:tcxOsc", "release:v0.6.2", "issue:257", "doc:...", "concept:...".',
     inputSchema: {
         type: 'object',
         properties: {

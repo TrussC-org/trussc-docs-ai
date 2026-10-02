@@ -5,11 +5,12 @@
 //              rich cards (signatures, enum values, properties, operators, related,
 //              multilingual prose) whose NAMES match the reference page (links resolve)
 //   example  — examples.json + each example's src/tcApp.cpp (APIs used + excerpt)
+//   issue    — open `bug` issues (issues.json, cached by fetch-issues.mjs): summary + workaround
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, CHUNKS } from './config.mjs';
+import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, ISSUES_JSON, CHUNKS } from './config.mjs';
 
 const require = createRequire(import.meta.url);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -60,6 +61,7 @@ const DOC_FILES = [
     ['ADDONS.md', 'Addons'],
     ['BUILD_SYSTEM.md', 'Build System'],
     ['AI_AUTOMATION.md', 'AI Automation (MCP)'],
+    ['INSTALLATION_WINDOWS.md', 'Installation (Windows)'],
     ['ROADMAP.md', 'Roadmap'],
 ];
 function chunkDocs(docsDir) {
@@ -576,6 +578,29 @@ function chunkReleases(path) {
     return chunks;
 }
 
+// --- Source: open bug issues (issues.json, cached by fetch-issues.mjs) -------
+// "Known issues" are not written up in the docs; the open `bug` issues ARE the list.
+// One chunk per issue: title + Summary + Workaround (the full body is repro and
+// root-cause detail that would only dilute retrieval). The header states the issue
+// is still open as of the fetch date, so the model reports it as a current bug in
+// one line, not as an API fact. When the issue is closed, it drops out on the next
+// rebuild — there is nothing to retire by hand.
+function chunkIssues(path) {
+    if (!existsSync(path)) { console.warn(`  (issues: ${path} not found — run fetch-issues.mjs; skipping)`); return []; }
+    const { fetched, issues } = JSON.parse(readFileSync(path, 'utf8'));
+    return issues.map((i) => ({
+        id: 'issue:' + i.number, source: 'issue', lang: 'common',
+        title: `Known issue #${i.number}: ${i.title}`,
+        text: [
+            `[Known bug in the current TrussC: GitHub issue #${i.number}, still open as of ${fetched}. Until it is fixed, TrussC behaves as described here. Mention it only when the question touches this behavior.]`,
+            `# Known issue #${i.number}: ${i.title}`,
+            `## Summary\n${i.summary}`,
+            i.workaround ? `## Workaround\n${i.workaround}` : '(No workaround is written in the issue yet.)',
+        ].join('\n\n'),
+        meta: { number: i.number, url: i.url, keywords: ['known issue', 'bug', `#${i.number}`] },
+    }));
+}
+
 const ofIdx = loadOfIndex(OF_MAPPING);
 
 // names for example API-usage detection: functions + type/method/static + enums
@@ -591,9 +616,10 @@ const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
 const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
 const releases = chunkReleases(RELEASES_JSON);
+const issues = chunkIssues(ISSUES_JSON);
 const sketchLua = chunkSketchLua(luaApi);
 const luaGotchas = chunkLuaGotchas();
-const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons, ...releases, luaGotchas, ...sketchLua];
+const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, ...addons, ...releases, ...issues, luaGotchas, ...sketchLua];
 
 // Compact English-only repr for the cross-encoder reranker. The full chunk text is
 // multilingual (en/ja/ko desc) + code + of-mapping, which dilutes cross-encoder
@@ -633,6 +659,13 @@ function rerankRepr(c) {
         const kw = ((c.meta && c.meta.keywords) || []).join(', ');
         return `${c.title}\n${kw}\n${keep.join('\n')}`.slice(0, 500);
     }
+    // Issues: the title already names the symptom; add the start of the Summary
+    // (skipping the open-as-of header and the section marks).
+    if (c.source === 'issue') {
+        const body = (c.text || '').split('\n').map((s) => s.trim())
+            .filter((t) => t && !t.startsWith('[') && !t.startsWith('#') && !t.startsWith('('));
+        return `${c.title}\n${body.join(' ')}`.slice(0, 500);
+    }
     const keep = [];
     for (const raw of (c.text || '').split('\n')) {
         const t = raw.trim();
@@ -661,4 +694,5 @@ console.log(`  symbol  (trussc-api): ${symbols.length}  (of-mapping entries: ${o
 console.log(`  example (examples):   ${examples.length}`);
 console.log(`  addon   (registry):   ${addons.length}`);
 console.log(`  release (github):     ${releases.length}`);
+console.log(`  issue   (open bugs):  ${issues.length}`);
 console.log(`  sketch-lua (lua ref): ${sketchLua.length + 1}  (gotchas + fn/type/enum/tasks/constants)`);

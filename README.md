@@ -46,6 +46,7 @@ node eval.mjs             # retrieval-quality snapshot over a question set
 - **concept** — hand-written half of `TrussC/docs/FOR_AI_ASSISTANT.md` (before `## API Index`), by heading. *This is the place to add high-level knowledge by hand.*
 - **symbol** — every entry in `trussc.org/generated/trussc-api.js` (the same data the reference page renders: signatures, enum values, properties, multilingual prose) joined with `of-mapping.json` (openFrameworks → TrussC).
 - **example** — each example in `examples.json` + the APIs it calls + a `src/tcApp.cpp` excerpt.
+- **issue** — the open `bug` issues of TrussC-org/TrussC, one chunk each (title + `## Summary` + `## Workaround`), cached in `issues.json` by `node fetch-issues.mjs` (`update-corpus.sh` runs it). A closed issue drops out on the next rebuild. Retrieval admits an issue only when it ranks among the top k and clears a rerank floor; the model links it as `[[#123]]`.
 
 Source paths default to the sibling-checkout layout (`../TrussC`, `../trussc.org`)
 and are env-overridable (`TRUSSC_REPO`, `SITE_REPO`, …). The running server needs

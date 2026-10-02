@@ -190,13 +190,24 @@ async function finalize(sorted, k, supK, query) {
 // READMEs each get their own small cap so they can't crowd out the hand-written
 // concept/reference chunks on a generic query; everything else shares otherK. Within
 // each bucket, by score. Input must be score-sorted desc.
+// Known issues are the exception to "fill each bucket": the other buckets take their
+// best N whatever the score, but a known bug that is not about the question is not
+// background — the model is told to report every known issue it is given. So an
+// issue only goes in when it ranks among the top otherK of the WHOLE list AND, when
+// the reranker scored it, clears ISSUE_MIN_RERANK. Rank alone is not enough: on a
+// question nothing matches well, an unrelated bug at rerank 0.001 still ranks 5th.
+const ISSUE_MIN_RERANK = 0.01;
 function fillQuota(sorted, otherK, exampleK, addonK) {
     const out = [];
-    let ex = 0, ad = 0, rl = 0, other = 0;
-    for (const c of sorted) {
+    let ex = 0, ad = 0, rl = 0, is = 0, other = 0;
+    for (const [pos, c] of sorted.entries()) {
         if (c.source === 'example') { if (ex >= exampleK) continue; ex++; }
         else if (c.source === 'addon') { if (ad >= addonK) continue; ad++; }
         else if (c.source === 'release') { if (rl >= addonK) continue; rl++; }   // same small cap as addons
+        else if (c.source === 'issue') {
+            if (is >= addonK || pos >= otherK || (c.rerank != null && c.rerank < ISSUE_MIN_RERANK)) continue;
+            is++;
+        }
         else { if (other >= otherK) continue; other++; }
         out.push(c);
         if (ex >= exampleK && ad >= addonK && rl >= addonK && other >= otherK) break;
@@ -266,6 +277,7 @@ export function refLink(c) {
     }
     if (c.source === 'addon') return c.meta?.url || `${REF_BASE}/addons/`;   // addon repo, else the catalog
     if (c.source === 'release') return c.meta?.url || 'https://github.com/TrussC-org/TrussC/releases';   // the GitHub release page
+    if (c.source === 'issue') return c.meta?.url || null;                          // the GitHub issue page
     if (c.source === 'sketch-lua') {                  // Lua twin → the sketch (Lua) reference
         const hk = HASH_KIND[(c.meta || {}).kind];
         return hk ? `${REF_BASE}/sketch/reference/#${hk}:${c.title}`
@@ -328,7 +340,14 @@ Major classes (use the right one; if a name is not here or in the context, do no
 - Events: Event<T> / EventListener (+ per-kind args: MouseEventArgs, MouseMoveEventArgs, KeyEventArgs, ...)
 - Data & IO: Xml, Serial, FileReader, FileWriter (JSON via loadJson/saveJson)
 - Network: TcpClient, TcpServer, UdpSocket (OSC via the tcxOsc addon)
-- Threading: Thread, ThreadChannel`;
+- Threading: Thread, ThreadChannel
+
+Crash-safety rules (never emit code that breaks these):
+- Create every Node with make_shared<T>(); do tree work (addChild, callEvery) in setup(), not in the constructor.
+- To remove a node from inside an event handler or while iterating, call destroy() (deferred), not removeChild().
+- GPU objects (Image, Texture, Fbo, Font, Shader) are main-thread only — e.g. load Pixels on a worker thread, then create the Image/Texture from it on the main thread. audioOut/audioIn, network onReceive and *Async timers run on other threads: copy data out, or listen with Deliver::Main / use runOnMainThread() before touching nodes or GPU.
+- A Thread subclass must call waitForThread() in its own destructor.
+- Keep listeners as EventListener members (RAII); never capture a raw \`this\` in a callback that can outlive the object.`;
 
 export const SYSTEM = [
     'You are the TrussC documentation assistant for beginners.',
@@ -339,7 +358,8 @@ export const SYSTEM = [
     'When a task needs several APIs working together (e.g. a shape that follows the mouse, or animating a value over time), briefly SKETCH how they fit together — just the few essential lines (e.g. inside draw()), NOT a full runnable program. Name the APIs and show the key calls; keep it short. Use only APIs present in the context.',
     'Format your answer in Markdown: inline code in `backticks`, code in ```cpp fenced blocks```. Do not write HTML tags (no <code>, <kbd>, <br>, etc.).',
     // Links: the model only marks intent with a tag; we resolve it to the real URL.
-    'To link to an API, wrap its EXACT name in double brackets like [[drawCircle]] — we turn it into the correct link for you. NEVER write a raw URL or a normal markdown link [..](..): any URL you write is wrong (you cannot know the real paths).',
+    'To link to an API, wrap its EXACT name in double brackets like [[drawCircle]]; to link a known issue, wrap just its number the same way, like [[#123]] — we turn it into the correct link for you. NEVER write a raw URL or a normal markdown link [..](..): any URL you write is wrong (you cannot know the real paths). The [#...] tags on the context chunks (#symbol:…, #concept:…, #example:…) are internal: never write them in the answer — name the API, doc section or example in plain words instead.',
+    'If the context marks something as a known issue (with an issue number) or as added/changed in a specific version, say so in one short line and give the workaround.',
     // Keep technical terms in their real (English/Latin) form — also stops multilingual bleed.
     "Write technical terms, API names, parameters, and code identifiers in their original English (Latin) form — do NOT transliterate them into katakana or other scripts (write `alpha`, not `アルファ`). Only the surrounding explanation is in the user's language; do not let other languages bleed in.",
     // Graduated confidence: answer outright when sure; offer one line / ask back when not.
@@ -586,6 +606,7 @@ function usedIdsOf(reported, answer, retrieved) {
     for (const m of String(answer).matchAll(/\[\[\s*["“”']?([^\]]+?)["“”']?\s*\]\]/g)) linked.add(m[1].trim());
     if (linked.size) for (const c of retrieved) {
         if (linked.has(c.title) || linked.has(c.title.replace(/ \(example\)$/, ''))) out.add(c.id);
+        else if (c.source === 'issue' && linked.has('#' + c.meta?.number)) out.add(c.id);
     }
     return [...out];
 }
@@ -645,6 +666,33 @@ function luaNameLink(name) {
     }
     return _luaNameLink.get(name) || null;
 }
+
+// [[#123]] → the GitHub issue page, but only for an issue that is in the corpus (an
+// open bug as of the last rebuild). Any other number — a guess, or an issue closed
+// since — stays plain "#123", the same way an unknown [[Name]] does.
+function issueLink(name) {
+    const m = /^#(\d+)$/.exec(name);
+    if (!m) return null;
+    return chunkById('issue:' + m[1])?.meta?.url || null;
+}
+// A context tag the model copied into its prose (#symbol:setColor, [#concept:…],
+// #sym:Node::removeMod|removeMod, #issue:292) → what the reader should see instead:
+// the chunk's name, linked where it has a page. The tags are internal bookkeeping;
+// a leak is not an error worth a correction pass, just something to clean up.
+const LEAKED_ID = /\[?#(symbol|sym|concept|doc|example|addon|release|issue|lua):([\w:.#\-]*[\w#])(?:\|([^\s\]|「」『』、。，,)]+))?\]?/g;
+function leakedIdText(prefix, body, label, sketchMode) {
+    const id = `${prefix === 'sym' ? 'symbol' : prefix}:${body}`;
+    const c = chunkById(id);
+    if (prefix === 'issue') {
+        const url = issueLink('#' + body);
+        return url ? `[#${body}](${url})` : `#${body}`;
+    }
+    const shown = label || (c ? c.title.replace(/ \((addon )?example\)$/, '') : body);
+    if (!c) return shown;
+    const url = c.source === 'reference' ? (sketchMode ? luaNameLink(c.title) : nameLink(c.title)) : refLink(c);
+    return url ? `[${shown}](${url})` : shown;
+}
+
 export function resolveLinks(text, sketchMode = false) {
     // Code passes through untouched: a C++ lambda `[this](auto& e) { … }` has exactly
     // the shape of a markdown link, `[[nodiscard]]` that of a wiki-link, and the space
@@ -659,12 +707,16 @@ function resolveProse(text, sketchMode) {
     let t = text
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')     // [label](url) → label
         .replace(/<?https?:\/\/[^\s>)]+>?/g, '');     // <http://…> or bare URL → drop
-    // 2) resolve our [[Name]] wiki-links into real deep-links (strip optional quotes)
+    // 2) resolve our [[Name]] wiki-links into real deep-links (strip optional quotes).
+    // A leaked id prefix inside the brackets ([[symbol:setColor]], [[#issue:292]]) is
+    // dropped first so the name underneath still resolves.
     t = t.replace(/\[\[\s*["“”']?([^\]]+?)["“”']?\s*\]\]/g, (_, name) => {
-        const n = name.trim();
-        const url = sketchMode ? luaNameLink(n) : nameLink(n);
+        const n = name.trim().replace(/^#?(?:symbol|sym):/, '').replace(/^#?issue:(\d+)$/, '#$1');
+        const url = issueLink(n) || (sketchMode ? luaNameLink(n) : nameLink(n));
         return url ? `[${n}](${url})` : n;            // known → markdown link, unknown → plain
     });
+    // 3) context tags copied into the prose → the chunk's name (linked if it has a page)
+    t = t.replace(LEAKED_ID, (_, prefix, body, label) => leakedIdText(prefix, body, label, sketchMode));
     return t.replace(/[ \t]{2,}/g, ' ');             // tidy gaps left behind
 }
 

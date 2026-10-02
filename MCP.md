@@ -75,7 +75,7 @@ and a working example. Prefer APIs that appear in its results; do not invent one
     and drops the C++ twin, while C++ examples/docs (no Lua twin) still come through.
 - **`trussc_get(ids)`** — fetch the FULL text of specific chunks (e.g. expand a trimmed
   example). Ids are exactly as shown in results / the `[#id]` tags: `symbol:drawCircle`,
-  `symbol:Fbo::begin`, `example:shaderExample`, `addon:tcxOsc`, `doc:...`, `concept:...`.
+  `symbol:Fbo::begin`, `example:shaderExample`, `addon:tcxOsc`, `issue:257`, `doc:...`, `concept:...`.
 
 The intended agent move: `trussc_search` to find the right chunks cheaply, then
 `trussc_get` (or `full:true`) for the one or two you actually need in full.

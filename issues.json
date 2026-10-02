@@ -1,0 +1,1323 @@
+{
+ "repo": "TrussC-org/TrussC",
+ "fetched": "2026-10-02",
+ "issues": [
+  {
+   "number": 532,
+   "title": "tcxHap: a YCoCg shader that fails to load is retried and logged on every frame",
+   "url": "https://github.com/TrussC-org/TrussC/issues/532",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-10-01",
+   "updated": "2026-10-01",
+   "summary": "Found while reviewing #529. `HapPlayer` loads the YCoCg shader (HAP-Q) lazily when it draws (tcxHapPlayer.h#L946-L950): when `ycocgShader_.load()` fails, it logs \"Failed to load YCoCg shader!\" and tries again on the next draw. A shader that can't load (for example a backend it was not compiled for, as before #523) retries and logs every frame.",
+   "workaround": ""
+  },
+  {
+   "number": 531,
+   "title": "Hot reload: the guest doesn't wait for the app's or an addon's own shader headers",
+   "url": "https://github.com/TrussC-org/TrussC/issues/531",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-10-01",
+   "updated": "2026-10-01",
+   "summary": "Found while reviewing #529. #491 / #509 made the hot reload `guest` target wait for `TrussC_shaders`, because the guest does not link TrussC. The same holds for the app's own shaders and for addon shaders: `trussc_compile_shaders()` adds a `<target>_shaders` dependency to the app target or to the addon library, but not to `guest`. Guest sources that include `shaders/<name>.glsl.h` can then compile before that header exists on a fresh tree, and the first build fails (a second build succeeds).",
+   "workaround": ""
+  },
+  {
+   "number": 514,
+   "title": "WebSocketClient: frames that RFC 6455 says must fail the connection are accepted (non-zero RSV bits, unknown opcodes, fragmented control frames)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/514",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-10-01",
+   "updated": "2026-10-01",
+   "summary": "Found while auditing #513 (fragmentation, #338). Pre-existing on main. `WebSocketClient::processFrame()` reads FIN, the opcode and the mask bit, but accepts several frames that RFC 6455 says must fail the connection:\n\n- **RSV1-3 set** without a negotiated extension (5.2). The bits are not read.\n- **Reserved opcodes** 0x3-0x7 and 0xB-0xF (5.2). The frame is consumed and ignored.\n- **Fragmented control frames**: Close, Ping or Pong with FIN=0, or a control frame with a payload over 125 bytes (5.5).\n\nNone of these is sent by a correct server. With #513, `failConnection()` exists: these cases can use it (Close 1002, onError, onClose), as the fragmentation errors do.",
+   "workaround": ""
+  },
+  {
+   "number": 467,
+   "title": "tcxBox2d: Collider2D::isTrigger is never applied; destroying a trigger RigidBody2D sends onCollisionEnded; Stay comment says every step",
+   "url": "https://github.com/TrussC-org/TrussC/issues/467",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "Three small inconsistencies in tcxBox2d triggers and contact events (pre-existing, found during the #427 work, 2026-10-01; derived from code):\n\n1. `Collider2D::isTrigger` is stored but never applied to the fixtures, so setting it has no effect.\n2. Destroying a trigger `RigidBody2D` sends the other side `onCollisionEnded` instead of `onTriggerEnded`.\n3. The Stay event's comment says it fires \"every step\", but it fires once per `update()`.",
+   "workaround": ""
+  },
+  {
+   "number": 466,
+   "title": "tcxBox2d: moving a Body doesn't move its Collider2D (fixture user data can dangle); contactRouters keyed by World* is never cleaned",
+   "url": "https://github.com/TrussC-org/TrussC/issues/466",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "Two lifetime problems in tcxBox2d's collider bookkeeping (pre-existing, found during the #427 work, 2026-10-01; derived from code):\n\n1. **Moving a `Body` doesn't move its `collider_`.** The move constructor and move assignment transfer the `b2Body*`, but not the `Collider2D` that the body's fixtures point to through their user data. After a move (for example, when a `std::vector<CircleBody>` reallocates), fixture user data can point to a `Collider2D` that was destroyed with the moved-from object. The next contact dereferences it (use after free).\n2. **`contactRouters()` is keyed by `World*` and never cleaned up.** When a `World` is destroyed and a new one is created at the same address, the new world reuses the old router state.",
+   "workaround": ""
+  },
+  {
+   "number": 465,
+   "title": "tcxGltf: non-ASCII model paths on Windows, and percent-encoded URIs are not decoded",
+   "url": "https://github.com/TrussC-org/TrussC/issues/465",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "Two path-handling gaps in tcxGltf, left over after the input-validation work (2026-10-01):\n\n1. **Non-ASCII file names on Windows.** `GltfModel::load(const std::string&)` passes the path through `getDataPath()` and into `cgltf_parse_file()` / `cgltf_load_buffers()` using narrow strings. On Windows a UTF-8 path with characters outside the ANSI code page may not open. TrussC's convention is UTF-8 strings converted with `utf8ToPath()` / `pathToUtf8()` (#259, #368).\n2. **Percent-encoded image and buffer URIs.** glTF URIs may be percent-encoded (for example `my%20texture.png`). The loader uses them as file names without decoding, so such files are not found. cgltf has `cgltf_decode_uri()` for this.",
+   "workaround": ""
+  },
+  {
+   "number": 463,
+   "title": "Streamed MP3: building the seek table on play() stalls the calling thread (~125 ms for a 1-hour file)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/463",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "With #280 (PR #462), a streamed MP3 builds a seek table (one point per second, up to 1024) when its decoder is opened, so that seeks are fast (about 3 ms instead of up to 2.5 s in a 1-hour file). The table and the header scan are built on the thread that calls `play()`, usually the main thread, and they take about 125 ms for a 1-hour MP3. Every `play()` of a long streamed MP3 then drops frames.",
+   "workaround": ""
+  },
+  {
+   "number": 459,
+   "title": "trusscli clean deletes build/ in any parent folder with src/, without checking it is a TrussC project",
+   "url": "https://github.com/TrussC-org/TrussC/issues/459",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`trusscli clean` deletes `build/` and `build-<platform>/` in whatever folder `autoDetectProjectRoot()` finds: the first parent (up to 10 levels) that has a `src/` directory. Unlike `update`, `clean` never checks that this folder is a TrussC project. Run from inside an unrelated source tree (any CMake or other project with `src/` and `build/`), or from a subfolder of one, it removes that tree's build folder.",
+   "workaround": ""
+  },
+  {
+   "number": 456,
+   "title": "tcxBox2d: calling setup() again leaves the previous b2Body in the world (and a refused re-setup keeps it)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/456",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "Calling `setup()` again on a tcxBox2d body that already has one leaves the old `b2Body` in the world. `CircleBody`, `RectBody` and `PolyShape` assign `body_ = world.getWorld()->CreateBody(...)` without destroying the previous body. So a re-setup adds a second, orphaned body that keeps simulating and colliding, and nothing can remove it any more. With #342 / PR #454, a re-setup that fails validation returns early and keeps the old body, so `isCreated()` stays true even though the new shape was refused.",
+   "workaround": ""
+  },
+  {
+   "number": 455,
+   "title": "saveScreenshot: an unknown extension is handled differently per platform (Windows appends .png); iOS has no bmp",
+   "url": "https://github.com/TrussC-org/TrussC/issues/455",
+   "labels": [
+    "bug",
+    "needs-decision"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`saveScreenshot()` treats an unknown extension differently on each platform. Everywhere it writes PNG, but on Windows it also appends `.png` to the path, while the other platforms write PNG data under the name as given (`shot.xyz` holds PNG data). The supported formats also differ: macOS adds tiff/gif, Windows adds tga, and iOS has no bmp. #452 documents the per-platform formats in the reference, but the unknown-extension behaviour is inconsistent.",
+   "workaround": ""
+  },
+  {
+   "number": 453,
+   "title": "Linux: SoundBuffer::loadAac (GStreamer) can hang on a broken .m4a/.aac (pull_sample blocks after a pipeline error)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/453",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Linux, `SoundBuffer::loadAac()` (GStreamer) can hang on a broken `.m4a` / `.aac` file: trussc-ai saw it block for over 60 s. `load()` runs on the calling thread, usually the main thread, so the app freezes.",
+   "workaround": ""
+  },
+  {
+   "number": 449,
+   "title": "Audio: after a live re-init at another rate, SoundStream::sampleRate is stale, so getPosition/setPosition are off",
+   "url": "https://github.com/TrussC-org/TrussC/issues/449",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "After a live re-init at a different sample rate (`AudioEngine::init(settings)`), a loaded `SoundStream` keeps its old `sampleRate`. Its `getPosition()` / `setPosition()` then convert between seconds and frames with the wrong rate, so reported positions and seeks are off by the ratio of the two rates.\n\nFound by trussc-ai during #280. Derived from code.",
+   "workaround": ""
+  },
+  {
+   "number": 448,
+   "title": "Audio: a looping stream voice whose decoder fails stays 'playing' in silence",
+   "url": "https://github.com/TrussC-org/TrussC/issues/448",
+   "labels": [
+    "bug",
+    "needs-decision"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "When a looping stream voice's decoder stops producing data (read errors, or a zero-frame read right after seeking back to 0), the voice goes silent but stays \"playing\": `isPlaying()` stays true and nothing is logged. An unattended app can't tell its music stopped.\n\nFound by trussc-ai during #280. Its fix stops decoding after such errors (\"halt\") until the next seek, so the voice can no longer spin, but it is still reported as playing.",
+   "workaround": ""
+  },
+  {
+   "number": 445,
+   "title": "Pixels::save and the recorders fail without saying why (stbi_write result, dropped create_directories error); empty paths",
+   "url": "https://github.com/TrussC-org/TrussC/issues/445",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "Some file writers fail without saying why. This is left over after #356 (PR #444), which made the core text/data writers log the reason when they can't create a parent folder.\n\n1. **`Pixels::save()` doesn't log a failed write.** It returns `result != 0` from `stbi_write_*`, but nothing tells the app why a save failed (read-only folder, disk full, bad path): https://github.com/TrussC-org/TrussC/blob/a5f2ca909c69ca45af7e21a7d038f7b6ceaeee64/core/include/tc/graphics/tcPixels.cpp#L20-L34\n2. **`AudioRecorder` and `VideoRecorder` drop the folder-creation error.** Both call `create_directories(parent, ec)` and then ignore `ec`. The following open then fails with a generic message:\n   - https://github.com/TrussC-org/TrussC/blob/a5f2ca909c69ca45af7e21a7d038f7b6ceaeee64/core/include/tc/sound/tcAudioRecorder.h#L96\n   - https://github.com/TrussC-org/TrussC/blob/a5f2ca909c69ca45af7e21a7d038f7b6ceaeee64/core/include/tc/video/tcVideoRecorder.h#L148\n3. **An empty path** creates the data folder and then fails to open. It is harmless, but it can be refused up front with a clear message.",
+   "workaround": ""
+  },
+  {
+   "number": 441,
+   "title": "AudioEngine: a failed live re-init leaves voices converted to the failed rate, and the next init() doesn't migrate them back",
+   "url": "https://github.com/TrussC-org/TrussC/issues/441",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "When a live `AudioEngine::init(settings)` fails, the engine's voices stay converted to the rate that failed. The next `init()` is then treated as a first init, so it doesn't convert them back. Voices that were playing come back at the wrong speed and pitch, or at wrong positions.",
+   "workaround": ""
+  },
+  {
+   "number": 440,
+   "title": "AudioRecorder: write failures during a take are not noticed; getRecordedSeconds() and the header count lost frames",
+   "url": "https://github.com/TrussC-org/TrussC/issues/440",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`AudioRecorder`'s writer thread doesn't check whether each write succeeded. It counts the frames it tried to write, so when the disk fills up or the file becomes unwritable during a take, `getRecordedSeconds()` keeps growing, and nothing reports the failure until `stop()`. In a long unattended recording (the case #336 is about), the app can't tell that the take stopped being saved.",
+   "workaround": ""
+  },
+  {
+   "number": 437,
+   "title": "tcxObj: mixing faces with and without normals (or texcoords) in one object leaves the mesh with fewer normals than vertices",
+   "url": "https://github.com/TrussC-org/TrussC/issues/437",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`ObjLoader::load()` adds a normal only for face vertices that reference one. Texcoords are added the same way. When one object mixes faces with normals (`f 1//1 2//1 3//1`) and faces without (`f 1 2 3`), the resulting `Mesh` has fewer normals than vertices, and normal *i* no longer belongs to vertex *i*. Normals are not auto-computed in this case, because that only happens when the mesh has no normals at all. Mixed texcoords shift UVs the same way.",
+   "workaround": ""
+  },
+  {
+   "number": 417,
+   "title": "Windows: trusscli build --debug records no header dependencies for the first build, so a header change leaves stale objects and crashes",
+   "url": "https://github.com/TrussC-org/TrussC/issues/417",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, in a project built with `trusscli build --debug`, the objects compiled in the first build have no header dependencies recorded in Ninja: `ninja -t deps` shows `#deps 0` for `main.cpp.obj`. After a header such as `tcApp.h` changes, a rebuild recompiles only the `.cpp` files that Ninja knows depend on it. The rest keep the old class layout, and the app crashes non-deterministically. Release and RelWithDebInfo record the dependencies normally (119–120 per object).",
+   "workaround": ""
+  },
+  {
+   "number": 413,
+   "title": "VideoGrabber (Windows): setup() returns true while the media type is not RGB32 and every frame is black (v0.7 part of #276)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/413",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "v0.7 part carved out of #276. On Windows, `VideoGrabber::setup()` can return true while every frame is dropped, because the current media type is still YUY2 / NV12 / MJPG, not RGB32. The result is a black image. The owner decided the full fix in #276, including a new native-mode selection. That fix changes which mode currently working cameras get, so it waits for v0.8.0. This issue covers only the part that changes nothing for working cameras.",
+   "workaround": ""
+  },
+  {
+   "number": 408,
+   "title": "Serial (Windows): the port is opened without FILE_FLAG_OVERLAPPED, so available() and reads wait behind a WriteFile in progress",
+   "url": "https://github.com/TrussC-org/TrussC/issues/408",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, `Serial` opens the port without `FILE_FLAG_OVERLAPPED`. The OS then serializes every call on the handle. While one thread is inside `WriteFile`, another thread's `available()` (`ClearCommError`) and reads wait for that write. When a worker writes back to back, the writer can go first again, so the wait is not bounded to one write.\n\n#379 fixes the TrussC-side starvation with a shared lock. The OS-level wait on Windows remains, and this issue covers it.",
+   "workaround": ""
+  },
+  {
+   "number": 406,
+   "title": "tcxQuadWarp: load() ends the app with json type_error when a point is missing x/y or a value is not a number",
+   "url": "https://github.com/TrussC-org/TrussC/issues/406",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`QuadWarp::load()` reads each corner with `p[\"x\"].get<float>()` and does not check the JSON shape first. nlohmann::json throws `type_error` when a point is missing `x` or `y`, when a value is not a number, or when an entry is not an object. Nothing catches the exception, so the app ends. A hand-edited or partly written settings file is enough to cause this. When the file loads but has fewer than 4 points, `load()` changes only some of the corners.",
+   "workaround": ""
+  },
+  {
+   "number": 405,
+   "title": "stringReplace and stringTimesInString never return when the search string is empty; stringReplace also copies the rest of the string on every match",
+   "url": "https://github.com/TrussC-org/TrussC/issues/405",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`stringTimesInString(haystack, \"\")` and `stringReplace(input, \"\", replaceStr)` never return. With a non-empty `replaceStr`, `stringReplace` also keeps growing `input` until an allocation fails. `stringTimesInString` is bound in tcxLua, so a Lua script can hit it too. There is also a separate problem: `stringReplace` copies the rest of the string on every match, so a large text with many matches takes a very long time.",
+   "workaround": ""
+  },
+  {
+   "number": 403,
+   "title": "Image::load() reports success when the image is larger than the GPU texture limit; Pixels::load() briefly holds two copies of the decoded image",
+   "url": "https://github.com/TrussC-org/TrussC/issues/403",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`Image::load()` and `Image::loadFromMemory()` return success even when the GPU texture could not be created. The most common cause is an image larger than the GPU's maximum texture size, for example a wide panorama. The app gets a truthy `LoadResult` and `isAllocated() == true`, so it has no way to notice. Also, `Pixels::load()` copies the decoded image into a second buffer before freeing the first, so peak memory is twice the image size.",
+   "workaround": ""
+  },
+  {
+   "number": 402,
+   "title": "IesProfile: angle counts from the file are not checked; a 0 or negative count in a damaged .ies crashes load() or loads an all-dark profile",
+   "url": "https://github.com/TrussC-org/TrussC/issues/402",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`IesProfile` reads the number of vertical and horizontal angles from the .ies file and uses them without checking them. A count of 0 or a negative count, as in a damaged or hand-edited file, makes `load()` / `loadFromString()` crash or silently produce an all-dark profile. Valid files from manufacturers are not affected.",
+   "workaround": ""
+  },
+  {
+   "number": 400,
+   "title": "OscReceiver: setup() always shares the port, so a second instance binds without error and unicast OSC reaches only one of them",
+   "url": "https://github.com/TrussC-org/TrussC/issues/400",
+   "labels": [
+    "bug",
+    "ready",
+    "v0.8.0"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-10-01",
+   "summary": "`OscReceiver::setup(port)` always turns on `SO_REUSEADDR` and `SO_REUSEPORT` before it binds. This is on purpose: several apps can then share one multicast port. The side effect hits plain unicast use. If a second copy of the app starts, or another receiver on the same PC already holds the port, `setup()` still returns `true`. Nothing is logged. Unicast datagrams then reach only one of the sockets, so one instance gets no messages (or only some of them), and neither side sees an error.\n\nThis needs a decision on the default, so it is filed with options.",
+   "workaround": ""
+  },
+  {
+   "number": 398,
+   "title": "UdpSocket: every send/receive failure logs one error line, so a lost route floods the log (hundreds of lines per second when sending every frame)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/398",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`UdpSocket::notifyError()` writes one `logError` line for every failure. Code that sends every frame (OSC, lighting data over UDP) produces one line per failed send for as long as the destination can't be reached. With several messages per frame, that is hundreds of lines per second into the console and the log file.",
+   "workaround": ""
+  },
+  {
+   "number": 395,
+   "title": "ScreenRecorder: stop() and the destructor do not wait for a running audioOut callback (the #256 race fixed for AudioRecorder)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/395",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`ScreenRecorder` taps `audioOut` the same way `AudioRecorder` does, but its `stop()` does not wait for an audio callback that is already running. Destroying the recorder, or calling `stop()` then `start()` for a new take, can let the audio thread write into the ring buffer after it is freed or reset. This is the #256 race that #388 fixes for `AudioRecorder`.",
+   "workaround": ""
+  },
+  {
+   "number": 394,
+   "title": "Windows (D3D11) and macOS (Metal): a GPU or main-window failure at startup is not logged, and runApp() returns 0",
+   "url": "https://github.com/TrussC-org/TrussC/issues/394",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows (D3D11) and macOS (Metal), a failure to create the GPU device or the main window at startup is not logged anywhere, and `runApp()` then returns 0. An unattended machine sees what looks like a clean exit, with nothing in `TRUSSC_LOG_FILE`, stderr or the debugger output. #391 routes the fork's existing messages through the Logger, and that works on Linux (X11/GLX, GLES3), iOS and the web, but these two backends have no message at those failure points to route.\n\nThis issue also asks the owner whether a startup failure should give a non-zero exit code.",
+   "workaround": ""
+  },
+  {
+   "number": 392,
+   "title": "TlsClient (Windows, setUseThread(false)): a failed asynchronous connect is never reported and stays pending forever",
+   "url": "https://github.com/TrussC-org/TrussC/issues/392",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, a `TlsClient` in non-threaded mode (`setUseThread(false)`) never notices that an asynchronous connect failed. It stays \"connecting\" forever, and neither `onError` nor `onConnect(false)` fires. `TcpClient` handles the same case correctly.",
+   "workaround": ""
+  },
+  {
+   "number": 390,
+   "title": "core/tests/tcpServerSend: fixed ports 45871-45878 sit in Linux's ephemeral range, so the test fails when another process holds one",
+   "url": "https://github.com/TrussC-org/TrussC/issues/390",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`core/tests/tcpServerSend` listens on fixed ports 45871-45878. On Linux these ports are inside the default ephemeral range (32768-60999). When another process on the machine happens to hold one of them for an outgoing connection, `start()` fails and the test reports a failure that has nothing to do with `TcpServer`.",
+   "workaround": ""
+  },
+  {
+   "number": 387,
+   "title": "Linux VideoPlayer: the NV12 hardware-decode draw ignores the matrix, color and Fbo size, and resets sokol_gl's matrices",
+   "url": "https://github.com/TrussC-org/TrussC/issues/387",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Linux, when hardware decoding is active and frames come out as NV12 (CUDA / VAAPI), `VideoPlayer::draw()` goes through a dedicated NV12 shader. That path ignores the current matrix, `setColor()` and the render target size. Afterwards it also overwrites sokol_gl's projection and modelview. Software decoding and the other platforms draw through `texture_.draw()`, so the same app draws the video differently depending on whether the machine has a hardware decoder.\n\nThis is the same pattern as HAP-Q in #283, and gets the same fix.",
+   "workaround": ""
+  },
+  {
+   "number": 386,
+   "title": "core/tests/sglLayerUpload: MSVC builds the standalone test without /utf-8 (C4819 on code page 932)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/386",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On MSVC, the standalone test `core/tests/sglLayerUpload` is compiled without `/utf-8`. On a machine whose ANSI code page is 932 (Japanese Windows), it builds with 20 C4819 warnings from `main.c` and `sokol_gfx.h`. Everything else in the repository gets `/utf-8` from the `TrussC` target.",
+   "workaround": ""
+  },
+  {
+   "number": 384,
+   "title": "TlsClient: a TLS setup failure before the handshake retries forever (onError ~1000/s, leaks buffers, no onConnect(false))",
+   "url": "https://github.com/TrussC-org/TrussC/issues/384",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "When the TLS setup step before the handshake fails, `TlsClient` does not tear the connection down or fire `onConnect(false)`. It keeps retrying the setup:\n- about every 1 ms in threaded mode, or once a frame in non-threaded mode;\n- each retry fires `onError` again and leaks mbedTLS's record buffers.\n\nThe failing calls are `mbedtls_ssl_config_defaults`, `mbedtls_ssl_setup` and `mbedtls_ssl_set_hostname`. The loop runs until the app calls `disconnect()`. The handshake failure a few lines below already has a proper failure path; these three branches do not use it.",
+   "workaround": ""
+  },
+  {
+   "number": 383,
+   "title": "Headless: a Ctrl+C just before the loop's flag reset is lost, and Ctrl+C / requestExit() is not read during a long catch-up pass",
+   "url": "https://github.com/TrussC-org/TrussC/issues/383",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`runHeadlessApp()` has two small gaps in how it stops.\n\n1. It installs the SIGINT / SIGTERM / console handlers first and resets `headless::running = true` afterwards. A Ctrl+C that lands between the two is overwritten and lost.\n2. The fixed-step catch-up loop does not read `headless::running` or `app.isExitRequested()`. After a stall, Ctrl+C, SIGTERM or `App::requestExit()` only takes effect once every due step has run. On main every headless app is affected, because main has no step cap. With #313 only `setMaxUpdateSteps(<= 0)` is affected.\n\nOn POSIX, repeated Ctrl+C does not help. On Windows, the second Ctrl+C (#368) ends the process without `exit()` / `cleanup()`.",
+   "workaround": ""
+  },
+  {
+   "number": 382,
+   "title": "tc::Thread: a subclass that waits still terminates when destroyed on its own worker (waitForThread() joins itself)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/382",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "A `Thread` subclass that follows the documented rule and calls `waitForThread()` in its own destructor still calls `std::terminate` when it is destroyed on its own worker thread. That happens when `threadedFunction()` does `delete this` or drops the last `shared_ptr`, or when a `thread_local` owner is released at thread exit. `waitForThread()` joins its own thread. `~Thread()` already detects this case and detaches, and ofThread's `waitForThread()` returns early here. `waitForThread()` should do the same.",
+   "workaround": ""
+  },
+  {
+   "number": 380,
+   "title": "Windows: log and error text in the loaders and setLogFile still uses the strict pathToUtf8, so a name with an unpaired surrogate throws",
+   "url": "https://github.com/TrussC-org/TrussC/issues/380",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, `pathToUtf8()` throws `std::system_error` for a name that is not valid UTF-16, which NTFS allows (an unpaired surrogate). #368 made it public and kept it strict on purpose: it is for strings that go back into a path. For text people read, #368 added `internal::pathToDisplayUtf8()`, which writes U+FFFD instead of throwing. It also added `LogStream << fs::path`, which uses it.\n\nSeveral loaders, and `Logger::setLogFile()`, still build their log lines and `LoadResult` messages with the strict `pathToUtf8()`. For such a name they throw instead of loading or returning a failure. The worst cases are files the OS opens fine through the wide API. The WAV / MP3 / FLAC / OGG buffers, `SoundStream` and `setLogFile()` all throw because of their log text alone. So does Windows AAC, if Media Foundation opens the file. `setLogFile()` throws after the file is open and leaves the Logger half-updated.\n\n#368 listed these sites as a follow-up. None of them is a regression from #368.",
+   "workaround": ""
+  },
+  {
+   "number": 378,
+   "title": "Headless: exitApp() and requestExitApp() do nothing inside runHeadlessApp; the loop only stops on Ctrl+C or App::requestExit()",
+   "url": "https://github.com/TrussC-org/TrussC/issues/378",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "In an app started with `runHeadlessApp<App>()`, `exitApp()` and `requestExitApp()` do nothing. Both only set sokol_app quit flags, and the headless loop never reads them. The loop stops only on Ctrl+C / SIGTERM or `App::requestExit()`. The docs tell users to call `exitApp()` / `requestExitApp()` from a headless app, so a tool that follows them never exits. Also, `runHeadlessApp()` always returns 0, although the reference says it returns the process exit code.",
+   "workaround": ""
+  },
+  {
+   "number": 377,
+   "title": "Windows hot reload: the .def generator drops every TrussC symbol at a .lib offset below 0x100000 (guest link fails with LNK2019)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/377",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, a hot reload host exports TrussC through a generated `trussc_exports.def`. The script parses `dumpbin /LINKERMEMBER:1` with a regex that needs at least 6 hex digits before the symbol name. dumpbin does not zero-pad the member offset. So every public symbol of an object in the first 1 MB of TrussC.lib (offset < 0x100000) is left out of the .def. The host then does not export those symbols, and a guest that calls one of them fails to link with LNK2019. Which functions are affected depends on the order and size of the objects in the lib, so it changes with the generator and the build config.",
+   "workaround": ""
+  },
+  {
+   "number": 375,
+   "title": "Build: app and addon source/shader globs lack CONFIGURE_DEPENDS, so an existing app tree misses a new src/*.cpp or src/*.glsl",
+   "url": "https://github.com/TrussC-org/TrussC/issues/375",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "`trussc_app()` collects an app's sources and shaders with plain `file(GLOB_RECURSE ...)`. These globs run only at configure time. An app's existing build tree does not see a `.cpp` or `.glsl` added to `src/` later, and `trusscli build` does not reconfigure in that case. So the new file is not compiled, and the build fails with a link error or a missing `*.glsl.h`. Addons have the same gap, both in the auto-collect globs in `use_addon.cmake` and in the `src/` globs of most in-repo addons' own `CMakeLists.txt`. PR #314 fixes this for core's own globs with `CONFIGURE_DEPENDS` (#366). This issue is the app and addon follow-up.",
+   "workaround": ""
+  },
+  {
+   "number": 374,
+   "title": "Windows hot reload: the generated .def exports deleting destructors (LNK4102 warnings on every host link)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/374",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, a hot reload host exports every TrussC symbol through a generated `trussc_exports.def`. The generator does not skip MSVC deleting destructors (`??_G...` scalar, `??_E...` vector). link.exe then prints LNK4102 (\"export of deleting destructor\") once for each of them. trussc-windows reported this while testing #314 and counted 54 warnings. The count is from that report and is not in the PR comment. No runtime effect was reported. The warnings show up on every Windows hot reload host link, not only in the tests, and they bury real linker warnings.",
+   "workaround": ""
+  },
+  {
+   "number": 373,
+   "title": "trusscli: on Windows, update and addon add/remove write addons.make and CMakeLists.txt with CRLF, so build_all.py leaves the tree -dirty",
+   "url": "https://github.com/TrussC-org/TrussC/issues/373",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, `trusscli` writes `addons.make` and `CMakeLists.txt` through a text-mode `ofstream`, so each line ends in CRLF. The repo commits both files with LF (`* text=auto eol=lf`). `examples/build_all.py` runs `trusscli update` on every project it builds. On Windows that marks these files modified even though their content has not changed, and `git describe --dirty` then reports `-dirty`. The fix is to open these three writers in binary mode. The rest of the codebase already does this when text must be written byte for byte.",
+   "workaround": ""
+  },
+  {
+   "number": 371,
+   "title": "Hot reload on Windows: host link fails (LNK2019) when tcApp.h includes tcxImGui.h",
+   "url": "https://github.com/TrussC-org/TrussC/issues/371",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-30",
+   "updated": "2026-09-30",
+   "summary": "On Windows, a hot-reload app whose `tcApp.h` includes `<tcxImGui.h>` fails to link the host exe:\n\n- `LNK2019` unresolved `ImGuiWindow::GetID(const char*, const char*)`, referenced from `ImGuiTcHook_ItemValue`\n- `LNK2019` unresolved `ImGui::DataTypeGetInfo(int)`, referenced from `tcx::imgui::detail::captureValue`\n\n`tcImGuiHooks.h` defines imgui's hook functions inline, in a header that the host's `main.cpp` sees through `tcApp.h`. Dear ImGui itself is linked only into the guest. Most tcxImGui apps include the addon from `tcApp.h`, so on Windows they can't use hot reload. The fix is to move the hook definitions into a compiled source file of the addon.",
+   "workaround": ""
+  },
+  {
+   "number": 364,
+   "title": "Serial: RX bytes lost during a main-thread stall are dropped silently on desktop; Windows discards the ClearCommError overrun flags",
+   "url": "https://github.com/TrussC-org/TrussC/issues/364",
+   "labels": [
+    "bug",
+    "needs-decision"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On desktop, `Serial` has no receive buffer of its own. Incoming bytes wait in the OS driver queue until the app polls on the main thread. If the app stalls longer than that queue can hold, bytes are lost, and TrussC reports nothing on any desktop platform.\n\nOn Windows the driver does report the loss, but TrussC throws the report away: `Serial::available()` calls `ClearCommError()`, which returns and clears the error flags (receive overrun, queue overflow, framing, parity), and only the queue length is used. The lost bytes then look like a protocol bug in the app.\n\nThe Android backend already avoids the stall loss: a worker thread drains the port into a capped 1 MiB buffer and warns when it drops data.",
+   "workaround": ""
+  },
+  {
+   "number": 363,
+   "title": "getTimestampString(format): returns an empty string when the result is 256 bytes or longer",
+   "url": "https://github.com/TrussC-org/TrussC/issues/363",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`getTimestampString(format)` formats into a fixed 256-byte stack buffer with `strftime`. When the result doesn't fit, `strftime` returns 0. The function then returns `\"\"` and logs nothing.",
+   "workaround": ""
+  },
+  {
+   "number": 362,
+   "title": "Shader: setTexture()/setUniform() slots are not range-checked; texture slots 12+ write past samplers[] in a stack sg_bindings",
+   "url": "https://github.com/TrussC-org/TrussC/issues/362",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`Shader::setTexture()` and `Shader::setUniform()` accept any `int` slot. The texture slot is later used as the index into both `views[32]` and `samplers[12]` of a local `sg_bindings` (sokol's per-draw binding struct). The uniform slot is passed to `sg_apply_uniforms()`, which supports slots 0-7. TrussC checks neither range. sokol's only checks are asserts and debug validation, and for textures only an end-of-struct canary. Both are compiled out when `NDEBUG` is set, which includes the default RelWithDebInfo build.\n\nThe real limits are different for the two arrays. Texture (view) slots 12-31 are valid in sokol, but for them the `samplers[slot]` write overflows. A texture slot of 12-31 writes the sampler past `samplers[]`: slot 12 overwrites `_end_canary`, and slots 13-31 write past the end of the struct on the stack. A slot of 32 or more, or a negative one, corrupts other fields of the struct or the stack. A uniform slot outside 0-7 makes the backend index its per-shader tables out of range.",
+   "workaround": ""
+  },
+  {
+   "number": 361,
+   "title": "macOS: captureWindowAsync can overwrite a staging texture before a recorder frame has read it",
+   "url": "https://github.com/TrussC-org/TrussC/issues/361",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On macOS, `internal::captureWindowAsync()` copies each window capture into one of 3 static staging textures, round-robin. A staging texture is a CPU-readable copy of the drawable. The consumer reads it later, in the Metal completion handler. Nothing checks that the previous capture in a slot has been read before the slot is reused. The ring is a single static, shared by all windows.\n\nWith one screen `VideoRecorder` and nothing else capturing, the ring is just deep enough. Any other capture on sokol's queue that is issued while 3 recorder captures are pending takes the oldest pending slot. The GPU blit overwrites it before the recorder's handler reads it, so that frame is encoded with later pixels. Nothing is logged.\n\nAffected: `grabScreen()` in `update()`, `grabScreen()` in an `afterFrame` listener registered after the recorder, a second screen recorder, and `saveScreenshot()`/MCP captures of a recorded secondary window. Main-window `saveScreenshot()`/MCP captures are safe, but only because of listener order (details below).",
+   "workaround": ""
+  },
+  {
+   "number": 360,
+   "title": "iOS: device enumeration (tc_get_audio_state, AudioEngine::listDevices) changes, activates and then deactivates the AVAudioSession",
+   "url": "https://github.com/TrussC-org/TrussC/issues/360",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On iOS, TrussC's two device-enumeration paths change the shared `AVAudioSession`. Each opens a throwaway miniaudio context with the default config. On iOS, miniaudio's context init sets the session category to PlayAndRecord with DefaultToSpeaker and activates the session; its uninit deactivates the session. Apple documents that deactivating a session stops running audio I/O.\n\n- `tc_get_audio_state` (documented as \"read-only; never starts the engine\") takes this path when the engine has no context (no `Sound` loaded, or after `shutdown()`).\n- `AudioEngine::listDevices()` takes it on every call, including while the engine is playing.\n\nmacOS, Windows, Linux and Android have no such side effect.",
+   "workaround": ""
+  },
+  {
+   "number": 358,
+   "title": "trusscli: build no longer reconfigures after TC_HOT_RELOAD is toggled (the #35 pre-check was lost in a merge)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/358",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`TC_HOT_RELOAD(...)` turns on hot reload for an app. Hot reload is switched at configure time. So when the macro is added or removed, a pre-build check stops the build once, and the next build reconfigures. PR #35 also gave `trusscli build` a pre-check that reconfigures first, so trusscli works in one step. That pre-check was lost when #35 was merged. Today `trusscli build` (and `trusscli run`) fails once after every toggle, and the second run succeeds, the same as plain CMake. The CMake message and the docs still promise the one-step behaviour.\n\nThis is a regression from a merge conflict, not a missing feature.",
+   "workaround": ""
+  },
+  {
+   "number": 355,
+   "title": "CI: daily web core tests are skipped whenever any web example fails to build",
+   "url": "https://github.com/TrussC-org/TrussC/issues/355",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "PR #299 added a step to the daily `sweep-web` job. It builds the core tests that carry a `web-test` marker file for WebAssembly and runs them under node. The step comes after the web example sweep and has no `if:`. So GitHub skips it whenever the example sweep fails, and `build_all.py` fails that sweep if even one example fails. This step is the only place the web half of `core/tests/screenshotContract` runs, and that test guards #230. On any day with a broken web example, web-only (`#ifdef __EMSCRIPTEN__`) behaviour is not tested.",
+   "workaround": ""
+  },
+  {
+   "number": 354,
+   "title": "Windows batch scripts: `if errorlevel 1` misses negative exit codes (build_win.bat since #297, generated build-web.bat)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/354",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "#297 changed the configure check in `tools/build_win.bat` from `if %ERRORLEVEL% neq 0 (` to `if errorlevel 1 (`, and used the same form for the new retry check. `if errorlevel 1` is true only for exit codes of 1 or more. When a Windows process ends on an NTSTATUS code (a crash, or a DLL that fails to load), cmd stores a negative ERRORLEVEL. Both configure checks now let that through. The script then skips the retry and the \"CMake configuration failed\" message and goes on to `cmake --build`. The old `neq 0` form caught these codes. The PR description does not mention the switch.\n\nThe `build-web.bat` that trusscli writes into Windows projects has the same pattern after both of its `cmake` calls. That one predates #297.",
+   "workaround": ""
+  },
+  {
+   "number": 352,
+   "title": "CI: the sokol-shdc cache step still saves from merge-queue runs",
+   "url": "https://github.com/TrussC-org/TrussC/issues/352",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "#250 made merge-queue runs restore caches without saving them, because the queue's temporary refs are deleted right after each run. The change covered ccache and the build-directory caches. It did not cover the `Cache sokol-shdc` step in the four build jobs. That step is still a plain `actions/cache@v5`. So a queue run that misses its key saves a cache entry that no later run can read.",
+   "workaround": ""
+  },
+  {
+   "number": 351,
+   "title": "Coverage generator: const overloads are never referenced; both lines call the non-const overload",
+   "url": "https://github.com/TrussC-org/TrussC/issues/351",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`AllFeaturesExample` is the link canary from #250. It is a test app that references every documented public core API, so each CI platform has to link all of them. Its source `coverage_generated.cpp` is written by `docs/reference/emit-coverage.js`.\n\nThe emitter ignores the `const` qualifier of a method signature. Every method call goes through the non-const `af::val<Owner>()`. For a const/non-const overload pair this writes two identical lines, and both resolve to the non-const overload. The const overload is never referenced. On current main this affects 29 documented const overloads.",
+   "workaround": ""
+  },
+  {
+   "number": 345,
+   "title": "tcxImGui: touched record misses ColorEdit drops, records unchanged combos, keeps stale combo item",
+   "url": "https://github.com/TrussC-org/TrussC/issues/345",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "tcxImGui keeps a \"touched\" record: the widgets the user changed by hand, which an AI reads over MCP with `tcx_imgui_get_touched`. A per-widget \"value hook\" (`IMGUI_TC_ITEM_VALUE`, a TrussC patch to imgui) runs when a value widget returns and decides whether it was edited. It has three gaps for Combo and ColorEdit:\n\n1. A colour dropped onto a `ColorEdit` by drag-and-drop changes the variable, but it is not recorded unless the widget was already in the record.\n2. Typing in a filter field inside a combo popup, or clicking the item that is already selected, records the combo, although its value did not change.\n3. In the frame where the user picks a new combo item, the entry pairs the new index with the old item text, e.g. `{value: 2, item: \"Low\"}`. The frame entry corrects itself the next time the combo is drawn. The touched record keeps the mismatch if the pick hides the combo.\n\nCases 1 and 2 have one cause: the hook decides \"edited\" from ImGui's Edited status flag and its own edit counter, not from the value. For a plain `Combo()` there is a second path: the combo-popup branch of the ItemInfo hook creates the combo's entry on any Selectable press, before `Combo()` has decided whether the index changed. Case 3 copies the preview text without checking that it matches the index.",
+   "workaround": ""
+  },
+  {
+   "number": 341,
+   "title": "tcxNodeInspector: editing a string member or node name truncates it to 255 / 127 bytes",
+   "url": "https://github.com/TrussC-org/TrussC/issues/341",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "The Node Inspector edits `std::string` members through a 256-byte buffer and node names through a 128-byte buffer. A longer value is shown cut off. The first edit writes the cut value back to the member or name and records it as a hand edit. Values longer than the buffer can't be entered at all.",
+   "workaround": ""
+  },
+  {
+   "number": 340,
+   "title": "tcxImGui: imgui buffers are fixed at 65,536 vertices; past that, top windows and popups are not drawn",
+   "url": "https://github.com/TrussC-org/TrussC/issues/340",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`ImGuiManager::setup()` creates each window's sokol_imgui context without setting `max_vertices`, so it gets the default of 65,536 vertices (and 3 × 65,536 indices). The buffers are allocated once and never grow, and `imguiSetup()` has no way to raise the limit. When a frame's ImGui output is larger, `simgui_render()` logs an error and stops copying. The draw list that overflows and all later ones are not drawn. ImGui orders draw lists back to front, so the lost ones are the topmost windows, popups, combo lists, tooltips and the foreground list. This repeats every frame.",
+   "workaround": ""
+  },
+  {
+   "number": 337,
+   "title": "Linux VideoPlayer: load() decodes the whole audio track into RAM (about 1.4 GB per hour), and an allocation failure leaks the player",
+   "url": "https://github.com/TrussC-org/TrussC/issues/337",
+   "labels": [
+    "bug",
+    "enhancement",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On Linux, `VideoPlayer::load()` decodes the whole audio track up front. The result is one float stereo buffer at the engine sample rate, kept in memory until `close()`. At 48 kHz that is 384 KB per second, about 1.4 GB per hour. `load()` blocks on the calling thread until the whole file has been read once. The macOS (AVPlayer) and Windows (IMFMediaEngine) backends do not decode audio up front.\n\nThis is a known limit, not an oversight. PR #28, which added Linux audio, says: \"Pre-decodes audio into `SoundBuffer` at load time for stable A/V sync\" and \"Pre-loading the full audio buffer works well for videos up to ~10 minutes. A streaming approach for longer content is left as future work.\" This issue tracks that deferred work (enhancement, needs a decision).\n\nOne part is a plain bug: if the allocation fails, `std::bad_alloc` escapes `loadPlatform()` and the whole player implementation leaks.",
+   "workaround": ""
+  },
+  {
+   "number": 335,
+   "title": "Touch: events carry at most 8 points (7 on iOS), and the cap can drop the finger that changed, so its begin or end is lost",
+   "url": "https://github.com/TrussC-org/TrussC/issues/335",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "A touch event carries at most 8 points. The cap is applied inside sokol_app_tc (TrussC's fork of sokol_app), in each platform backend, before TrussC sees the event: iOS keeps 7, Android and Web keep 8. The backends keep the first points in the platform's order, not the point that changed. When the changed finger falls past the cap, `touchPressed` / `touchReleased` fire with no point marked `changed`. Apps that track fingers by id then never add or never remove that finger. Nothing is logged.",
+   "workaround": ""
+  },
+  {
+   "number": 334,
+   "title": "Drag and drop / clipboard: fixed buffers cap drops at 16 files and clipboard text at 64 KB, and X11 rejects INCR pastes, mostly without a log",
+   "url": "https://github.com/TrussC-org/TrussC/issues/334",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "File drops and clipboard text go through fixed buffers in `sokol_app_tc.h`, TrussC's fork of sokol_app (the windowing layer). TrussC sizes these buffers once at startup.\n\n- Drop: `max_dropped_files = 16` is hard-coded, with no setting. A larger drop delivers the first 16 files, and no backend reports the rest. A path of 2048 bytes or more aborts the whole drop on macOS, X11 and Raspberry Pi. On Windows, a long ASCII path arrives truncated; only a path whose UTF-8 form overflows aborts the drop. Only the Raspberry Pi and web backends log the abort.\n- Clipboard: `WindowSettings::clipboardSize` (default 65536) sizes the buffer. A larger paste is cut or returned empty. On X11 (desktop and Raspberry Pi), pastes that the source app sends by INCR (X11's chunked transfer for large selections) are always rejected, whatever the buffer size. `setClipboardString()` logs \"Text truncated\", but that is wrong on every platform: some copy the full text, some copy nothing, and Raspberry Pi copies a byte-cut prefix.",
+   "workaround": ""
+  },
+  {
+   "number": 332,
+   "title": "Frame loop: ticks that don't draw never call sg_commit(), so GPU work from update() piles up (EVENT_DRIVEN) or aborts Debug builds (draw rate below tick rate)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/332",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`sg_commit()` ends a sokol frame. TrussC's frame loop calls it only in `present()`, and a tick that doesn't draw skips `present()`. With independent update, `update()` also runs on ticks that don't draw. Any GPU work it records there (Fbo passes, texture/buffer uploads) stays in the open sokol frame until the next drawn tick.\n\nThis hits two documented setups:\n\n- **Draw rate below the tick rate**, e.g. `setIndependentFps(60, 30)`. About every other tick doesn't draw, so two ticks share one sokol frame. A texture uploaded in every `update()` passes TrussC's once-per-frame guard (keyed on `sapp_frame_count()`, which advances every tick) and hits sokol's `VALIDATE_UPDIMG_ONCE`. That is a panic, so a Debug build aborts within the first few ticks.\n- **EVENT_DRIVEN draw**, e.g. `setIndependentFps(60, EVENT_DRIVEN)`, which the docs recommend for GUI/tool apps. The frame stays open until the next `redraw()`. Per-frame buffers rewind only when a frame ends, so they keep growing while the app is idle. On WebGPU the uniform staging buffer overflows instead of growing.",
+   "workaround": ""
+  },
+  {
+   "number": 331,
+   "title": "Matrix stack: past 63 nested pushMatrix / Node levels, every later 2D draw of the frame is dropped",
+   "url": "https://github.com/TrussC-org/TrussC/issues/331",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "`RenderContext::pushMatrix()` pushes two stacks: TrussC's own, which grows, and sokol_gl's, which has a fixed 64 entries. sokol_gl is the immediate-mode layer that records TrussC's 2D shapes, text and images. On the 64th nested push, sokol_gl sets its context error flag. While that flag is set, `sgl_end()` records nothing. So every sokol_gl draw after the overflow is dropped until the end of the frame, not just drawn with the wrong transform. The warning in `present()` says that transforms are wrong. An overflow inside an Fbo pass is never reported.",
+   "workaround": ""
+  },
+  {
+   "number": 330,
+   "title": "build_win.bat: a VS 2022 build cache is kept after VS 2026 is installed alongside, and the build fails",
+   "url": "https://github.com/TrussC-org/TrussC/issues/330",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "`tools/build_win.bat` builds trusscli, the TrussC project generator and command-line tool, into `tools/build`. Before configuring, it runs a stale-cache guard: a check that deletes `CMakeCache.txt` when the cache can no longer work. The guard only checks whether the cached compiler file still exists. The configure retry added in #297 only runs when configure fails.\n\nWhen VS 2026 is installed next to VS 2022, neither of them fires. VS 2022 stays installed unless the user removes it. The VS 2022 `cl.exe` recorded in the cache still exists, so the cache is kept, and configure succeeds. But `vcvarsall` has loaded the VS 2026 environment. The mismatch first shows up in `cmake --build`, which has no retry and says nothing about the cache. Every later run that recompiles something fails the same way until the user deletes `tools/build` by hand.\n\n#251 says the guard exists for \"local users who upgrade Visual Studio\". Installing side by side is a normal way to upgrade. The gap predates #297; that PR did not cause it.",
+   "workaround": ""
+  },
+  {
+   "number": 328,
+   "title": "Coverage generator: class-level TC_PLATFORMS guards only the constructor; [[deprecated]] on ctors/classes ignored",
+   "url": "https://github.com/TrussC-org/TrussC/issues/328",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`docs/reference/emit-coverage.js` (added in #250) generates `coverage_generated.cpp`. That file makes the AllFeaturesExample CI canary reference every documented API on every platform. The generator takes each reference's `#if` guard and its deprecation filter only from that symbol's own entry in `reference-data.json`. Annotations written on a class or on a single constructor never reach the generated code:\n\n1. **A class-level `TC_PLATFORMS` guards only the class's constructor.** Every method and field of the class is referenced on all six platforms. Ten classes have a class-level list today: `Window`, `TcpServer`, `TcpClient`, `UdpSocket`, `Serial`, `Thread`, `VideoPlayer`, `VideoGrabber`, `VideoWriter` and `ScreenRecorder`. Function-level and method-level `TC_PLATFORMS` already become guards, so class-level lists are the odd one out.\n2. **`[[deprecated]]` or `TC_PLATFORMS` on a single constructor is lost.** `structure.js` stores a constructor as `{ params, args }` and nothing else.\n3. **`[[deprecated]]` on a whole class skips only its constructors.** Every method and field is still referenced through `af::val<Owner>()`.\n\n`TC_PLATFORMS(\"...\")` is the attribute macro that lists the platforms an API works on. Nothing fails today. Items 2 and 3 break the per-PR lane on the next constructor or class deprecation. Item 1 is an inconsistency with the generator's own documented contract.",
+   "workaround": ""
+  },
+  {
+   "number": 327,
+   "title": "Fbo: an unbalanced push/pop inside an Fbo pass misplaces later nodes and stops 2D drawing in other Fbos",
+   "url": "https://github.com/TrussC-org/TrussC/issues/327",
+   "labels": [
+    "bug",
+    "needs-decision"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "#232 (fixed in #247) contains an unbalanced `pushMatrix()` / `popMatrix()` in two places. Per node, `Node::drawTree()` puts the depth back with `restoreStackDepth()`. Per frame, `present()` resets the stacks. Both assume one sokol_gl context.\n\nsokol_gl is the immediate-mode layer TrussC draws its 2D shapes, text and images with. Each sokol_gl context keeps its own matrix stack, 64 entries deep. An Fbo pass switches to a separate context, shared by all Fbos with the same format and sample count. So an imbalance between `fbo.begin()` and `fbo.end()` breaks in two ways:\n\n1. **Inside a node's `draw()`:** the node fix-up runs after `fbo.end()` has switched back to the screen context. Its sokol_gl pops land on a context that never saw the matching push. For the rest of the frame, the node's children lose the node's transform and later nodes lose an ancestor transform. The log shows a misleading \"underflow (sgl_pop_matrix without a push)\". Before #247 the screen context stayed paired in this case, so #247 made this sub-case worse.\n2. **Fbo contexts are never reset or checked:** the frame-end reset and the stack-error report cover only the screen context. A push left open in an Fbo pass raises the shared Fbo context's depth by one per pass. Once it reaches the top, the next push on that context overflows, and every later 2D draw in every Fbo that shares the context is dropped for the rest of the frame, every frame. Nothing is logged.\n\nBoth have one cause: nothing checks the stack …",
+   "workaround": ""
+  },
+  {
+   "number": 325,
+   "title": "tcxImGui: tcx_imgui_input on a SliderAngle takes degrees, while get_widgets / get_touched report radians",
+   "url": "https://github.com/TrussC-org/TrussC/issues/325",
+   "labels": [
+    "bug",
+    "ready",
+    "v0.8.0"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Since #244, `tcx_imgui_get_widgets` and `tcx_imgui_get_touched` report a `SliderAngle` as its variable in radians, with `unit: \"rad\"`. `tcx_imgui_input` on the same label types into the inner `SliderFloat`, which edits a local copy in degrees. So the typed number is read as degrees. The tool description and the docs do not say this.\n\nAn AI that writes back a value it read gets an angle 57.3 times too small. The tool still returns ok.\n\nWhich unit the input should take is an owner choice. It is the same choice #321 makes for ColorEdit, so both issues should follow one rule (see Suggested fix).",
+   "workaround": ""
+  },
+  {
+   "number": 324,
+   "title": "MCP: a tool reply with invalid UTF-8 fails the whole call (tcx_imgui_get_widgets, tc_get_audio_state)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/324",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "TrussC's built-in MCP server (the JSON-RPC endpoint that lets an AI agent inspect and drive a running app) serializes every tool reply with nlohmann's default `dump()`. That mode throws on any string that is not valid UTF-8. The throw is caught, and the whole call becomes a JSON-RPC error. So one bad string anywhere in a reply hides the rest of it.\n\nTwo tools on main can return such strings today:\n- `tcx_imgui_get_widgets` / `tcx_imgui_get_touched` (tcxImGui addon): `captureValue()` cuts text fields at 64 KiB without looking at UTF-8, so the cut can split a multi-byte character.\n- `tc_get_audio_state`: on POSIX a playing voice's file path is passed through as raw filename bytes.\n\nThe codebase already fixed the same crash once, in tcxCurl, by passing `error_handler_t::replace` to `dump()`. The MCP server should do the same.",
+   "workaround": ""
+  },
+  {
+   "number": 323,
+   "title": "tcxImGui: ImGuiManager destructor touches already-destroyed widget registries after std::exit()",
+   "url": "https://github.com/TrussC-org/TrussC/issues/323",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "#244 added `forgetContext(imguiCtx_)` to `ImGuiManager::shutdown()`. `forgetContext` clears two static registries that the ImGui MCP tools read. `detail::contexts()` holds per-context state, including the owner tag that every context gets. `detail::touched()` lists widgets the user changed by hand.\n\n`shutdown()` also runs from `~ImGuiManager` during static destruction. The code uses `sg_isvalid()` to tell that path apart from the live one. The check fails when an app ends with `std::exit()` (or `::exit()`) from inside a frame or event handler:\n- Sokol's cleanup callback never runs, so `sg_isvalid()` is still true.\n- `forgetContext` then runs on `detail::contexts()` and `detail::touched()`.\n- Those function-local statics were constructed after the manager registry, so they are destroyed before it.\n\nThe result is undefined behaviour at exit in every tcxImGui app that ends through `std::exit()`, with or without MCP. It is likely a crash with libc++ (macOS) and MSVC (Windows).",
+   "workaround": ""
+  },
+  {
+   "number": 320,
+   "title": "Multi-window: setSize() right after createWindow() uses DPI scale 1.0 until the window's first tick",
+   "url": "https://github.com/TrussC-org/TrussC/issues/320",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Since #237, `subApp->setSize()` resizes the sub-App's own window from any context. That includes the main App's `setup()` or a key handler, right after `createWindow()` + `setApp()`. If the call comes before the new window's first tick (its first per-window frame callback), it converts sizes with a DPI scale of 1.0 instead of the window's real scale. On a HiDPI display the window then comes out the wrong size. It is 2x too large on a Retina Mac in pixel-perfect mode, and 1/scale too small on Windows/X11 in the default logical mode. The same call one frame later is correct. The cause: `createWindow()` never sets `WindowContext::dpiScale`, and only the tick writes it.",
+   "workaround": ""
+  },
+  {
+   "number": 319,
+   "title": "Windows: setWindowSize() and the main App's setSize() ignore display scaling, so the window comes out too small",
+   "url": "https://github.com/TrussC-org/TrussC/issues/319",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On Windows, `setWindowSizeLogical()` passes its logical width and height straight to `AdjustWindowRectEx` / `SetWindowPos`. The process is per-monitor-v2 DPI aware, so those calls take physical pixels. On a display that is not at 100% scaling, the main window therefore comes out 1/scale of the requested size. At 150%, `setWindowSize(800, 600)` gives a window of 533x400 logical.\n\nTwo callers reach this function: the global `setWindowSize()` on the main window, and the main-App branch of `App::setSize()`. Secondary windows go through `Window::setSize()`, which does scale. So since #237, `mainApp->setSize(800, 600)` and `subApp->setSize(800, 600)` give windows that differ by the DPI factor. The defect itself is older than #237.\n\n`Window::setSize()` has two smaller problems of the same kind: it scales by sokol's `dpi_scale` (1.0 for a `highDpi = false` window) instead of the window DPI, and it computes the frame with system-DPI metrics.",
+   "workaround": ""
+  },
+  {
+   "number": 318,
+   "title": "Window::setApp(): swapping or removing a window's App skips the outgoing App's exit() and cleanup()",
+   "url": "https://github.com/TrussC-org/TrussC/issues/318",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`Window::setApp()` can replace a secondary window's App (`setApp(other)`) or remove it (`setApp(nullptr)`). In both cases the outgoing App is released without `exit()` or `cleanup()`. `Window::close()` calls both, and the main App gets both at shutdown. If the Window was the App's only owner, the App is destroyed without ever getting `exit()`, the hook the header documents for \"resource release or settings save\". Since #224 added `App::getWindow()`, `getWindow()->setApp(...)` makes per-window scene switching a one-liner, so more code will take this path. Whether a swap should tear the App down or only detach it is an owner decision, because the codebase has precedents both ways.",
+   "workaround": ""
+  },
+  {
+   "number": 317,
+   "title": "GPU pools: closing a window leaks sgl pipelines; sgl context pool (4) and sg shader pool (32) left at sokol defaults",
+   "url": "https://github.com/TrussC-org/TrussC/issues/317",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Three problems with sokol's fixed-size resource pools. sokol_gl (sgl) is the immediate-mode layer TrussC draws shapes with. Each sgl pipeline is built from 5 sokol_gfx (sg) pipelines.\n\n1. `Window::close()` destroys the secondary window's sgl context but not the sgl pipelines built for it. Each open/close cycle leaks 2-4 sgl pipelines, which hold 10-20 of the 256 sg pipeline slots. After roughly 10-20 cycles the sg pipeline pool is full for the whole app.\n2. `sgl_desc_t.context_pool_size` is never set. The sokol default is 4 contexts, including the default one. Each secondary window and each distinct Fbo `(sampleCount, format)` takes one. After that, the next one gets an invalid context. That Fbo draws no 2D for the rest of the run, or the window shows only its clear color.\n3. `sg_desc.shader_pool_size` is never set (sokol default: 32). Each loaded `Shader` takes one slot. TrussC's internal shaders are created lazily and never checked. Once the pool is full, PBR, point, shadow, IBL and Fbo-mip drawing gets an invalid shader.\n\nIn all three cases TrussC caches the invalid handle and keeps using it.\n- Cases 1 and 3: Debug builds abort in sokol validation. Release builds skip the affected draws, and case 1 can dereference NULL.\n- Case 2 is silent in Debug and Release alike. Every sgl call on the invalid context returns early.\n\nThe only trace is a sokol line on stderr, which bypasses tc::Logger today (#265).",
+   "workaround": ""
+  },
+  {
+   "number": 316,
+   "title": "Hot reload: pre-build check breaks on backslash/relative TRUSSC_DIR and misses relative SOURCES",
+   "url": "https://github.com/TrussC-org/TrussC/issues/316",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`trussc_app()` writes a pre-build check script, `_tc_check_hot_reload.cmake`, into the build dir. It runs on every build and fails the build when the `TC_HOT_RELOAD` scan result changed since configure (hot reload splits an app into a host exe and a guest shared library, so a change needs a reconfigure). Since #248 (the #234 fix), this script includes the shared scan rule and rescans the explicit `SOURCES` list. Both are written into the script as raw text. `cmake -P` parses that script again on every build, running in the build directory. This breaks in two ways:\n\n1. **`TRUSSC_DIR` is written in verbatim.** If it contains a backslash, the script no longer parses: `\\a` or `\\T` is an invalid escape in a quoted CMake argument. The reusable `release.yml` Windows job always passes such a path (`D:\\a\\<repo>\\<repo>/TrussC/core`). Every app target depends on the check, so `cmake --build` fails whether or not the app uses hot reload. A relative `TRUSSC_DIR` fails too, because `-P` resolves the include against the build dir.\n2. **Relative explicit `SOURCES` are never found by the check.** The shared rule skips files that fail `EXISTS`, and `EXISTS` resolves a relative path against the process working directory. The check always says OFF. Configure says ON or OFF depending on where cmake was started, so the configure/build split #234 was meant to remove is back for this layout. Before #248 this layout worked.\n\nThe macro already has a normalized path to TrussC: `TC_ROOT` (absolute, …",
+   "workaround": ""
+  },
+  {
+   "number": 315,
+   "title": "Multi-window: close() or setApp() called from the window's own App (update/draw/keyPressed) crashes",
+   "url": "https://github.com/TrussC-org/TrussC/issues/315",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Since #224, an App attached to a secondary window can get that window with `getWindow()`, and the `Window` header tells users to control the window through it \"from inside the App\". Two calls through that handle crash the whole process when the App makes them from its own `update()`, `draw()` or key handler:\n\n- `getWindow()->close()`: a window that closes itself after a timeout or on a key. `close()` tears down the native window and the App on the spot. The window's tick is still running, and so is sokol's tick wrapper, and both go on using what was just freed.\n- `getWindow()->setApp(make_shared<NextScene>())`: scene switching by swapping the window's App. If the Window was the App's only owner, the running App is destroyed inside its own `update()` / `draw()`.\n\nThe root cause is older than #224: `close()` and `setApp()` were never safe to call from inside the window's own callbacks. #224 turns this into a one-liner and documents the handle for use from inside the App. Nothing guards against the call and no doc warns about it.\n\nThe fix changes when `close()` and `setApp()` take effect, which users can see, so the semantics need an owner decision (see \"Suggested fix\").",
+   "workaround": ""
+  },
+  {
+   "number": 310,
+   "title": "iOS: default deployment target 15.0 is below what floating-point std::format needs (16.3)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/310",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "The iOS deployment target that trusscli writes into generated projects is 15.0, but floating-point `std::format` (which uses `std::to_chars` for `float` / `double`) is only available on iOS 16.3 and later. Any iOS build of code that formats a float, such as `format(\"Position: {:.1f} sec\", t)`, fails to compile. Many examples do this, so they don't build for iOS with the default settings. CI builds only `AllFeaturesExample` for iOS, so this went unnoticed.",
+   "workaround": ""
+  },
+  {
+   "number": 307,
+   "title": "Multi-window: timers created in a secondary window's update fire one tick late (update listeners run outside inUpdate)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/307",
+   "labels": [
+    "bug",
+    "needs-decision"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "With the countdown timers from #228, a timer created inside a **secondary window's** update listener fires **one tick later** than the same code on the main window. The cause is that the platform tick calls secondary-window update listeners outside the window's \"in update\" flag.",
+   "workaround": ""
+  },
+  {
+   "number": 304,
+   "title": "AAC: getPath() wrong after loadAac()/loadAacFromMemory(); a failed web AAC decode still plays silence and returns true",
+   "url": "https://github.com/TrussC-org/TrussC/issues/304",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "Two AAC problems:\n1. `SoundBuffer::getPath()` is wrong after AAC loads that bypass `SoundBuffer::load()`.\n2. On the web, a failed AAC decode still \"plays\" a silent placeholder and `play()` returns `true`.",
+   "workaround": ""
+  },
+  {
+   "number": 303,
+   "title": "Audio: isDefaultDevice is false when the default device is opened without a name (PulseAudio / ALSA / null)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/303",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`AudioDeviceChangedArgs::isDefaultDevice`, and `output.default` in `tc_get_audio_state`, is **false** exactly when the system default output device is in use on PulseAudio, ALSA and the null backend.",
+   "workaround": ""
+  },
+  {
+   "number": 295,
+   "title": "Touch-as-mouse uses touches[0] instead of the changed touch: extra mousePressed/mouseReleased with multiple fingers",
+   "url": "https://github.com/TrussC-org/TrussC/issues/295",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "With `touchAsMouse` on (the default), every touch event is converted to a mouse event using `touches[0]`, whichever finger actually changed. sokol puts all active touches into every touch event and flags the changed ones with `changed`. So when a second finger touches down or lifts, TrussC emits another `mousePressed` / `mouseReleased` at the first finger's position, and `mouseDragged` is emitted even when no press is active. On a touch kiosk where several people touch at once, buttons that act on release fire twice. This affects iOS, Android and Web; Windows and macOS have no touch path.",
+   "workaround": ""
+  },
+  {
+   "number": 294,
+   "title": "System font names inside a .ttc always load face 0 (MS PGothic, Meiryo UI, Noto Sans CJK SC/KR get the wrong face)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/294",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`Font::load(\"<name>\")` resolves a font name to a file with `systemFontPath()` and then always opens face 0 of that file. When the requested face sits at a later index inside a TrueType Collection (.ttc), the text silently renders in a different face: \"MS PGothic\" comes out as MS Gothic, \"Meiryo UI\" as Meiryo, and on Linux \"Noto Sans CJK SC\" / \"KR\" come out with Japanese glyph shapes. Nothing is logged. The default `TC_FONT_*_JA` names happen to be face 0, so the defaults are not affected.",
+   "workaround": ""
+  },
+  {
+   "number": 292,
+   "title": "Windows: callAfterAsync/callEveryAsync jitter by up to ~15.6 ms because the timer resolution is never raised",
+   "url": "https://github.com/TrussC-org/TrussC/issues/292",
+   "labels": [
+    "bug",
+    "documentation",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`Node::callAfterAsync` / `callEveryAsync` are documented as precise, frame-independent timers, \"ideal for sequencer clocks and LED/MIDI output timing\". On Windows, the scheduler thread waits with `condition_variable::wait_until`, and nothing in TrussC raises the system timer resolution. Each wait can therefore overshoot by up to one default timer tick (about 15.6 ms), so on Windows these timers jitter about as much as the frame-driven `callAfter` / `callEvery`. macOS and Linux are not affected.",
+   "workaround": ""
+  },
+  {
+   "number": 291,
+   "title": "tcxHap audio: per-frame PCM sample tables, misparsed lpcm v2 / stsz=1 PCM, and A/V drift on long loops",
+   "url": "https://github.com/TrussC-org/TrussC/issues/291",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Three problems in how `HapPlayer` handles the audio track. PCM audio is expanded into one table entry, and one seek + read, per audio frame, which for long files costs hundreds of MB to several GB and a long blocking `load()`. SoundDescription v1/v2 and `lpcm` audio are read with the v0 layout, so, for example, 96 kHz PCM loads as \"3 ch, 1 Hz\". And video and audio run on separate clocks that are never re-synchronised, so they drift apart over long loops. All three are derived from code; none has been checked against real files yet.",
+   "workaround": ""
+  },
+  {
+   "number": 289,
+   "title": "Windows VideoPlayer: frame APIs assume 30 fps instead of the file's frame rate",
+   "url": "https://github.com/TrussC-org/TrussC/issues/289",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On Windows, `getCurrentFrame()`, `getTotalFrames()`, `setFrame()` and `previousFrame()` compute with a hard-coded 30 fps: `frameRate_` is initialised to 30.0f and never assigned. macOS and Linux read the file's real frame rate, so the same code gives different frame numbers on different platforms.",
+   "workaround": ""
+  },
+  {
+   "number": 286,
+   "title": "sokol-shdc is downloaded from sokol-tools-bin master without a checksum; tcxHap fetches hap at master",
+   "url": "https://github.com/TrussC-org/TrussC/issues/286",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "The shader compiler `sokol-shdc` is downloaded from the `master` branch of floooh/sokol-tools-bin and run without any checksum. The download code exists in three separate copies. The vendored sokol headers, on the other hand, are pinned to a specific upstream commit. tcxHap also fetches the Vidvox hap sources with `GIT_TAG master`. As a result:\n- builds are not reproducible;\n- an older TrussC tag built today combines today's shdc output with that tag's pinned `sokol_gfx.h`;\n- whatever binary is on that branch runs on every developer and CI machine.",
+   "workaround": ""
+  },
+  {
+   "number": 285,
+   "title": "release.yml: packages lack bin/data, entitlements, deployment target and symbols; TrussC defaults to main",
+   "url": "https://github.com/TrussC-org/TrussC/issues/285",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`.github/workflows/release.yml` is the reusable workflow that app repositories call to build a macOS DMG, a Windows zip and a Linux tar.gz. For a typical app, the packages it produces are incomplete:\n- none of them contain `bin/data`;\n- the signed macOS app has no entitlements, so camera and microphone access is refused under the hardened runtime;\n- there is no minimum macOS version;\n- no PDB or dSYM is produced.\n\nIt also builds against TrussC `main` unless the caller pins a version, and it runs on floating `-latest` images. No CI job runs it, so breakage goes unnoticed; the Windows leg was broken until #206.",
+   "workaround": ""
+  },
+  {
+   "number": 284,
+   "title": "tcxLua: Lua errors escape as sol::error and terminate the app; callAfterAsync/callEveryAsync run Lua on the scheduler thread",
+   "url": "https://github.com/TrussC-org/TrussC/issues/284",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "A Lua script can take down the host app through tcxLua in two ways:\n\n1. Lua errors (syntax or runtime) are thrown as `sol::error` C++ exceptions out of the calls the examples make from `update()` / `draw()` / `keyPressed()`. Nothing catches them, so the app ends in `std::terminate`. In the bundled `exampleFileReload`, pressing Shift or an arrow key is enough, because `sketch.lua` calls `string.char(key)` and TrussC passes key codes above 255.\n2. The generated bindings expose `Node:callAfterAsync` / `callEveryAsync` to Lua. Their callbacks run on the AsyncScheduler thread, so the same `lua_State` is entered from two threads at once. There is no correct way to use them from Lua.\n\nBoth come down to one policy: code running inside Lua should not be able to crash the host.",
+   "workaround": ""
+  },
+  {
+   "number": 283,
+   "title": "tcxHap: HAP-Q draw ignores transform, color and Fbo size; getPixels() writes out of bounds for sizes not a multiple of 4",
+   "url": "https://github.com/TrussC-org/TrussC/issues/283",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Two problems in `HapPlayer`'s video path, each limited to certain codec variants. HAP-Q (YCoCg) frames are drawn through a custom shader path that ignores the current matrix, `setColor()` and the Fbo size, so HAP-Q only draws correctly when it is untransformed and drawn straight to the window. And `getPixels()` decodes DXT1 / DXT5 / YCoCg / BC7 frames whose width or height is not a multiple of 4 by writing whole 4x4 blocks across row ends and past the end of the buffer (heap overflow).",
+   "workaround": ""
+  },
+  {
+   "number": 282,
+   "title": "VideoPlayer: setLoop/setVolume/setPan set before load() (or before a reload) never reach the backend",
+   "url": "https://github.com/TrussC-org/TrussC/issues/282",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`VideoPlayerBase` stores loop, volume, speed and pan, but forwards them to the platform backend only when the player is already loaded. `load()` creates a fresh backend and never re-applies the stored values. So `setLoop(true)` before `load()` does not loop, and a second `load()` on the same player resets the volume to 1.0 while `getVolume()` still returns the old value. This affects macOS, Windows, Linux, Web and tcxHap's `HapPlayer`.",
+   "workaround": ""
+  },
+  {
+   "number": 278,
+   "title": "tcxMidi: port removal is not detected; isOpen() stays true and sends are silently dropped",
+   "url": "https://github.com/TrussC-org/TrussC/issues/278",
+   "labels": [
+    "bug",
+    "enhancement",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "When a USB-MIDI device is unplugged or a virtual source port goes away, `MidiIn` and `MidiOut` keep reporting `isOpen() == true`. Input stops and output is dropped without any error or log. libremidi offers both port-removal callbacks and an error callback, but tcxMidi subscribes to neither, so an app cannot notice the loss and re-open the port.",
+   "workaround": ""
+  },
+  {
+   "number": 277,
+   "title": "VideoGrabber: capture thread keeps pointing at the moved-from mutex_ / pixelsDirty_ after a move",
+   "url": "https://github.com/TrussC-org/TrussC/issues/277",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`VideoGrabber` is documented as move-only, but moving a grabber after `setup()` leaves the platform capture code holding raw pointers to the moved-from object's `mutex_` and `pixelsDirty_`. The moved-to grabber never sees a new frame, and once the moved-from object is destroyed, the capture thread locks a freed mutex and writes to a freed atomic. Keeping several cameras in a `vector<VideoGrabber>` triggers this when the vector reallocates.",
+   "workaround": ""
+  },
+  {
+   "number": 276,
+   "title": "VideoGrabber: unplug is never reported, Windows shows black frames for unsupported sizes, and Windows uniqueId is an index",
+   "url": "https://github.com/TrussC-org/TrussC/issues/276",
+   "labels": [
+    "bug",
+    "enhancement",
+    "ready",
+    "v0.8.0"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Three device-handling gaps in `VideoGrabber`, mostly in the Windows (Media Foundation) backend. An unplugged camera is not reported on any desktop platform: `isInitialized()` stays `true` and the image freezes. On Windows, when the camera has no native mode at the requested size, `setup()` can return `true` while every frame is dropped, which leaves a black image. Also on Windows, `VideoDeviceInfo::uniqueId` is the enumeration index rather than the stable ID the docs promise, so two identical cameras cannot be told apart, and there is no API to open a camera by ID.",
+   "workaround": ""
+  },
+  {
+   "number": 275,
+   "title": "tcxDepthCamera: grabber thread outlives backend teardown, setup() does not close first, and timeouts roll the frame back",
+   "url": "https://github.com/TrussC-org/TrussC/issues/275",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`DepthCamera` runs its grabber on a `tc::Thread` that only the base-class destructor stops, after the derived backend's members have already been destroyed. The `example-basic` apps of tcxOrbbec and tcxAzureKinect (threaded, no `close()`) take this path on every exit. `setup()` also re-opens the device without stopping a running worker, and the threaded capture loop swaps buffers even when no frame arrived, which rolls the published frame back on timeouts and busy-loops after an unplug. The base class and `PlaybackDepthCamera` are in this repository; the Orbbec and Azure Kinect backends live in tettou771/tcxOrbbec and tettou771/tcxAzureKinect.",
+   "workaround": ""
+  },
+  {
+   "number": 274,
+   "title": "saveJson / saveTextFile / Pixels::save truncate in place and report success on write errors (no atomic save)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/274",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "The save helpers truncate the target file and write straight into it. `saveJson` truncates before it serializes, so a serialization error wipes the existing file and then returns false; a crash or power loss during any save leaves a 0-byte or partial file; and `saveTextFile`, `appendToFile`, `saveJson` and `Pixels::save` return true even when the write fails (disk full, I/O error). For installations that keep calibration or settings in the data folder (tcxQuadWarp, for example), one bad save loses the configuration, and the next start silently falls back to defaults.",
+   "workaround": ""
+  },
+  {
+   "number": 273,
+   "title": "Font, Sound, Pixels::load, Lut3D and setLogFile resolve relative paths against the CWD instead of the data folder",
+   "url": "https://github.com/TrussC-org/TrussC/issues/273",
+   "labels": [
+    "bug",
+    "documentation",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`Image`, `Json`, `Xml` (#129), `VideoPlayer` and the tcFile.h helpers resolve relative paths through `getDataPath()`, i.e. the data folder next to the executable. `Font`, `Sound`, `Pixels::load`, `Environment::loadFromHDR`, `Lut3D` and tcxHap's `HapPlayer` open the path as given, relative to the process working directory, and so does `Logger::setLogFile`. Started from a terminal in `bin/` the difference is easy to miss, but when a macOS `.app` is opened from Finder (CWD `/`), started as a login item, or a Windows exe is started from Task Scheduler with an empty \"Start in\" (CWD `C:\\Windows\\System32`), assets are not found and the log file ends up nowhere or in System32. The docs promise data-folder resolution for fonts and recommend a relative log file name.",
+   "workaround": ""
+  },
+  {
+   "number": 272,
+   "title": "Model addons (tcxObj, tcxGltf, tcxPly) pass ANSI-code-page paths on Windows; non-ASCII model paths fail to load",
+   "url": "https://github.com/TrussC-org/TrussC/issues/272",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "The model-loading addons turn `fs::path` into narrow strings with `path.string()`, which on Windows is the ANSI code page (ACP), and then hand those bytes to code that expects UTF-8 (tinyobjloader) or mix them with UTF-8 names read from the model file (texture URIs, `mtllib`). One non-ASCII character anywhere in the absolute path is enough: a Japanese user name or an OneDrive `デスクトップ` folder above the exe makes `ObjLoader::load()` return false, and characters outside the ACP make `.string()` throw `std::system_error`. tcxPly additionally assigns `getDataPath()` (an `fs::path` since #173) to a `std::string`, which should not compile with MSVC. Core already has `internal::pathToUtf8` / `utf8ToPath` for exactly this; the addons don't use them.",
+   "workaround": ""
+  },
+  {
+   "number": 271,
+   "title": "Custom Shader draws: the stream-buffer overflow check never fires; over 65536 vertices/indices per frame silently corrupts drawing in Release",
+   "url": "https://github.com/TrussC-org/TrussC/issues/271",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "Each custom `Shader` streams its vertices and indices into fixed buffers of 65536 elements. `executeDeferredShaderDraw()` tries to detect overflow by checking `sg_append_buffer()` for a negative return value, but sokol never returns a negative value. When a frame's shader draws exceed the capacity, Release builds log nothing and issue draws over indices/vertices that were never written. Debug builds abort in sokol validation.",
+   "workaround": ""
+  },
+  {
+   "number": 270,
+   "title": "macOS: Fbo::readPixels/copyTo/save call sg_commit() mid-frame and drop the 2D drawn to the screen so far",
+   "url": "https://github.com/TrussC-org/TrussC/issues/270",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "On macOS, `Fbo::readPixels()`, `readPixelsFloat()`, `copyTo()` and `save()` call `sg_commit()` before reading back. Called from `draw()`, this ends sokol's frame in the middle of the app's frame. sokol_gl rewinds, so all 2D drawn to the screen before the call disappears from that frame. If the swapchain pass is open at that point, Debug builds assert. Windows and Linux do not commit here, so the same code behaves differently per platform.",
+   "workaround": ""
+  },
+  {
+   "number": 269,
+   "title": "setMaterial()/setEnvironment() keep raw pointers after the Material/Environment is destroyed (use-after-free on the next lit draw)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/269",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "`setMaterial()` and `setEnvironment()` store raw pointers in the current `WindowContext`, and only `clearMaterial()` / `clearEnvironment()` clear them. If the object is destroyed first (a local `Material`, or an `Environment` owned by a Node or scene that gets destroyed), the next lit mesh draw reads freed memory. `Light` had the same problem and was fixed in #200; `Material` and `Environment` were not covered.",
+   "workaround": ""
+  },
+  {
+   "number": 268,
+   "title": "PBR/point/Shader pipelines ignore the secondary window's swapchain format, and the PBR pipeline is always indexed",
+   "url": "https://github.com/TrussC-org/TrussC/issues/268",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-10-01",
+   "summary": "The GPU mesh pipelines are chosen from a fixed set of properties that doesn't always match what is being drawn. (1) Outside an FBO, the PBR, point and custom `Shader` pipelines are always built for the main window's swapchain, so drawing into a secondary window uses the wrong color format and sample count. (2) The PBR and shadow pipelines are always indexed, but meshes without indices (valid in glTF, common in hand-built meshes) are sent to them. In Debug builds both hit sokol validation and abort. In the default RelWithDebInfo build validation is off, and the result depends on the backend.",
+   "workaround": ""
+  },
+  {
+   "number": 267,
+   "title": "Mesh: GPU buffers are only re-uploaded when the vertex/index count changes, so same-size rebuilds freeze Points and PBR drawing",
+   "url": "https://github.com/TrussC-org/TrussC/issues/267",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "A `Mesh` drawn through a GPU-resident path (Points mode, or PBR when a Material is set and the mesh has normals) only re-uploads its GPU buffers when the vertex or index count changes. None of the mutators mark the buffers dirty. The common openFrameworks pattern of calling `clear()` and re-adding the same number of vertices every frame therefore keeps drawing the first frame's data. Transforms such as `rotateY()` and color changes are ignored the same way.",
+   "workaround": ""
+  },
+  {
+   "number": 266,
+   "title": "Windows: exit() does not run on shutdown, logoff or update restart (WM_QUERYENDSESSION/WM_ENDSESSION unhandled)",
+   "url": "https://github.com/TrussC-org/TrussC/issues/266",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On Windows, when the session ends (shutdown, logoff, a restart for Windows Update, a scheduled `shutdown /r`), a windowed TrussC app is terminated without `App::exit()`, `cleanup()` or the audio shutdown running. Closing the window normally does run them, and macOS already runs them on logout and shutdown. Whatever an app does on exit (save settings, send a DMX blackout, stop a serial device, flush a log) is skipped.",
+   "workaround": ""
+  },
+  {
+   "number": 264,
+   "title": "Node: stale global matrix after reparent, and scale-0 nodes hit-test at the parent's origin",
+   "url": "https://github.com/TrussC-org/TrussC/issues/264",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "This covers two correctness problems in Node's global transform and picking. (1) Moving a node to another parent does not invalidate its cached global matrix. `getGlobalPos()`, `globalToLocal()`, the local mouse position in events and RectNode's clip rectangle keep using the old parent until something in the chain moves. (2) `Mat4::inverted()` returns identity for a singular matrix. A node scaled to 0 (for example at the end of `TweenMod::scaleTo(0)`) therefore keeps catching clicks in a rectangle at its parent's origin. Neither problem crashes, but both produce clicks at the wrong place that are hard to trace.",
+   "workaround": ""
+  },
+  {
+   "number": 263,
+   "title": "Windows TLS trust: tcxTls skips bundled CAs when the ROOT store is partial; tcxCurl/tcxGPT fail hard when revocation checks are unreachable",
+   "url": "https://github.com/TrussC-org/TrussC/issues/263",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "On Windows, HTTPS and wss:// connections from TrussC can fail while the same URL opens in a browser on the same machine. There are two separate causes, one per TLS stack.\n\n1. `TlsClient` (tcxTls, used by wss:// and MQTT over TLS) loads the Windows ROOT store. If even one certificate in it parses, it never loads the bundled Mozilla CAs, so a root that Windows has not fetched yet is not trusted.\n2. tcxCurl's Schannel build checks revocation in hard-fail mode. When the CRL/OCSP servers cannot be reached, every HTTPS request fails. tcxGPT's own curl handles and tcxOpenStreetMap (through `HttpClient`) are affected as well.\n\nBoth come down to a default policy choice, following OS policy versus connecting wherever a browser would, and that choice is worth recording.",
+   "workaround": ""
+  },
+  {
+   "number": 262,
+   "title": "WebSocketClient: reconnecting from onClose is a use-after-free, and a stalled handshake stays Connecting forever",
+   "url": "https://github.com/TrussC-org/TrussC/issues/262",
+   "labels": [
+    "bug",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "Two gaps in `WebSocketClient`'s connect/disconnect lifecycle, outside the Open state that #220 covered:\n\n1. Calling `ws.connect(url)` from an `onClose` listener destroys the `TcpClient` / `TlsClient` whose receive thread is running that callback, and the thread then reads freed memory. This is the most direct way to write auto-reconnect.\n2. If the peer accepts TCP but never completes the TLS handshake (wss://) or never answers the HTTP upgrade (ws:// and wss://), the client stays in `State::Connecting` forever and fires no event. Reconnect logic driven by events never runs.",
+   "workaround": ""
+  },
+  {
+   "number": 261,
+   "title": "TcpClient: send() and connectAsync() can block the main thread indefinitely",
+   "url": "https://github.com/TrussC-org/TrussC/issues/261",
+   "labels": [
+    "bug",
+    "enhancement",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-30",
+   "summary": "`TcpClient::send()` has no timeout. When the peer stops reading, it blocks forever in threaded mode, and in non-threaded mode it spins at 100% CPU. `connectAsync()` joins the previous connect attempt, so calling it again while a connect to an unreachable host is still in flight blocks the caller until the OS gives up (about 21 s on Windows, about 127 s on Linux). `disconnect()` and the destructor wait in the same way. `TcpServer` got a non-blocking `sendAsync()` and an idle send timeout in #214, #215 and #218. The client side was left as a follow-up, and no issue tracks it.",
+   "workaround": ""
+  },
+  {
+   "number": 258,
+   "title": "D3D11: device removal (TDR, driver update) is never detected; the app keeps running with a black or frozen window",
+   "url": "https://github.com/TrussC-org/TrussC/issues/258",
+   "labels": [
+    "bug",
+    "enhancement",
+    "ready"
+   ],
+   "created": "2026-09-29",
+   "updated": "2026-09-29",
+   "summary": "On Windows, nothing in the D3D11 path checks for device removal. After a TDR (GPU timeout recovery), a driver update or a driver reset, `IDXGISwapChain::Present` fails on every frame, but its result is only used for frame pacing. The app keeps running `update()`/`draw()`, logs nothing, and the window stays black or frozen. Anything that only watches whether the process is alive sees a healthy app.",
+   "workaround": ""
+  },
+  {
+   "number": 226,
+   "title": "MCP mouse injection tools skip isMousePressed(), drag delta and held-key modifiers; tc_mouse_click never moves the mouse",
+   "url": "https://github.com/TrussC-org/TrussC/issues/226",
+   "labels": [
+    "bug"
+   ],
+   "created": "2026-09-28",
+   "updated": "2026-09-28",
+   "summary": "The MCP mouse tools in `core/include/tc/utils/tcStandardTools.h` call `events().mouseXxx.notify()` and the app callback directly. They do not reproduce the state updates that the real sokol path (`internal::_event_cb`, `core/include/TrussC.h:2481`) does around those calls. The key tools were brought into line with the real path in 281d0354. The mouse tools were not, so an injected mouse gesture is still not the same as a real one for any app that polls global state or reads drag deltas.",
+   "workaround": ""
+  }
+ ]
+}

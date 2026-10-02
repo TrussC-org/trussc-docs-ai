@@ -98,6 +98,10 @@ export const ADDONS_DIR = process.env.ADDONS_DIR || join(TRUSSC_REPO, 'addons');
 // build stays deterministic/offline (same pattern as the addon registry).
 export const RELEASES_JSON = process.env.RELEASES_JSON || new URL('./releases.json', import.meta.url).pathname;
 export const RELEASES_REPO = process.env.RELEASES_REPO || 'TrussC-org/TrussC';
+// issues: the open `bug` issues (known problems + workarounds), cached the same way
+// by fetch-issues.mjs. A closed issue drops out on the next rebuild.
+export const ISSUES_JSON = process.env.ISSUES_JSON || new URL('./issues.json', import.meta.url).pathname;
+export const ISSUES_REPO = process.env.ISSUES_REPO || RELEASES_REPO;
 
 // The chat widget is a trussc.org site asset (served same-origin by GitHub Pages
 // in prod). The dev server serves this same file so there's one source of truth;
@@ -105,7 +109,8 @@ export const RELEASES_REPO = process.env.RELEASES_REPO || 'TrussC-org/TrussC';
 export const WIDGET_FILE = process.env.WIDGET_FILE || join(SITE_REPO, 'chat-widget.js');
 
 export const CHUNKS = new URL('./chunks.jsonl', import.meta.url).pathname;
-export const EMBEDDED = new URL('./chunks.embedded.json', import.meta.url).pathname;
+// EMBEDDED is overridable so an eval can run the current code against another corpus.
+export const EMBEDDED = process.env.EMBEDDED || new URL('./chunks.embedded.json', import.meta.url).pathname;
 
 // --- Usage stats ------------------------------------------------------------
 // One JSON line per request appended to STATS_LOG (no DB, no deps). Analyze with

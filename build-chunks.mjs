@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, CHUNKS } from './config.mjs';
 
 const require = createRequire(import.meta.url);
@@ -120,13 +121,14 @@ function chunkAddons(registryPath, addonsDir) {
             if (text.trim()) chunks.push({ id: `addon:${a.name}#readme`, source: 'addon', lang: 'common', title: `${a.name} (addon README)`, text: `${a.name}\n\n${text}`, meta });
             continue;
         }
+        const usedIds = new Set();
         for (const sec of sections) {
             let text = sec.text;
             if (text.length > ADDON_README_CAP) text = text.slice(0, ADDON_README_CAP) + '\n\n… (section truncated)';
             // Name the addon inside the text too: a section titled "Usage" says
             // nothing on its own, and the crumb is what makes it retrievable.
             chunks.push({
-                id: `addon:${a.name}#${slugify(sec.crumb)}`,
+                id: sectionId(`addon:${a.name}#`, sec.crumb, usedIds),
                 source: 'addon', lang: 'common',
                 title: `${a.name} > ${sec.crumb} (addon)`,
                 text: `# ${a.name} — ${sec.crumb}\n\n${text}`,
@@ -145,6 +147,24 @@ function chunkAddons(registryPath, addonsDir) {
 // Stable id fragment for a heading crumb ("Joints > Motors" -> "joints-motors")
 function slugify(s) {
     return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'section';
+}
+
+// Unique id for a heading within one document. The slug keeps only ASCII, so a
+// Japanese heading ("概要", "注意事項") comes out empty and falls back to "section",
+// and two headings that differ only in their non-ASCII part collide ("使い方 3: …"
+// and "使い方 3: … > 型バリエーション"). tcxIME had six chunks sharing one id, so
+// trussc_get / pinning could only ever reach the first. Only those cases get a short
+// hash of the full crumb appended; every other id stays exactly what it was.
+function sectionId(prefix, crumb, used) {
+    const slug = slugify(crumb);
+    let id = prefix + slug;
+    const hasAscii = /[a-z0-9]/i.test(crumb);   // no ASCII at all → slugify fell back to "section"
+    if (!hasAscii || used.has(id)) {
+        id = `${prefix}${slug}-${createHash('sha1').update(crumb).digest('hex').slice(0, 6)}`;
+    }
+    for (let n = 2; used.has(id); n++) id = `${prefix}${slug}-${n}`;   // identical headings twice
+    used.add(id);
+    return id;
 }
 
 // --- openFrameworks index: TrussC symbol name -> [of names] ----------------
@@ -625,6 +645,13 @@ function rerankRepr(c) {
     return `${c.title}\n${keep.join('\n')}`.slice(0, 500);
 }
 for (const c of chunks) c.rerankText = rerankRepr(c);
+
+// Ids are how trussc_get, pinning and [[links]] find a chunk; a duplicate makes all
+// but the first unreachable. Say so loudly rather than ship it silently.
+const seenIds = new Map();
+for (const c of chunks) seenIds.set(c.id, (seenIds.get(c.id) || 0) + 1);
+const dupIds = [...seenIds].filter(([, n]) => n > 1);
+if (dupIds.length) console.warn(`  ⚠ ${dupIds.length} duplicate chunk id(s): ${dupIds.map(([id, n]) => `${id} ×${n}`).join(', ')}`);
 
 writeFileSync(CHUNKS, chunks.map((c) => JSON.stringify(c)).join('\n') + '\n');
 console.log(`wrote ${chunks.length} chunks → ${CHUNKS}`);

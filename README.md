@@ -43,6 +43,9 @@ node eval.mjs             # retrieval-quality snapshot over a question set
 ```
 
 ### Sources chunked (`build-chunks.mjs`)
+
+API cards share a 10,000-character notes budget across localized details, related symbols, examples, keywords, snippets and platform notes. Nested member notes share their containing card's budget. The budget counts formatted notes and separators and is enforced while consuming list items and snippet characters; card headers, signatures and descriptions are separate. Longer notes keep their start (with complete snippet fences) and append `(details truncated; see the full reference)` outside the budget. The build summary counts cards with truncated notes.
+
 - **concept** — hand-written half of `TrussC/docs/FOR_AI_ASSISTANT.md` (before `## API Index`), by heading. *This is the place to add high-level knowledge by hand.*
 - **symbol** — every entry in `trussc.org/generated/trussc-api.js` (the same data the reference page renders: signatures, enum values, properties, multilingual prose) joined with `of-mapping.json` (openFrameworks → TrussC).
 - **example** — each example in `examples.json` + the APIs it calls + a `src/tcApp.cpp` excerpt.

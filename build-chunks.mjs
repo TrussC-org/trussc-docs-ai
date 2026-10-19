@@ -185,16 +185,89 @@ function loadOfIndex(path) {
 }
 
 // --- Source: symbols from trussc-api.js (rich) -----------------------------
-function chunkApi(api, ofIdx) {
+function chunkApi(api, ofIdx, stats = { truncatedNotes: 0 }) {
     const chunks = [];
+    // Bound (platform): keep API notes within a retrieval card's prose budget. Overflow truncates with a marker line and is counted in the build summary.
+    // Characters mean UTF-16 code units (String.length / slice); keep equal to
+    // API_NOTES_BUDGET_CHARACTERS in TrussC docs/reference/check.js. That authoring
+    // check caps details per language; this cap covers the whole notes block.
+    const API_NOTES_BUDGET_CHARACTERS = 10000;
+    const truncatedMarker = '(details truncated; see the full reference)';
+    // One budget per card, shared by all locales, references, keywords and snippets
+    // (including nested members). Count formatted characters and note separators;
+    // headers/signatures/descriptions and the overflow marker are outside this cap.
+    const budgets = new WeakMap();
+    const budget = (lines) => {
+        if (!budgets.has(lines)) budgets.set(lines, { used: 0, truncated: false });
+        return budgets.get(lines);
+    };
+    const remaining = (b) => Math.max(0, API_NOTES_BUDGET_CHARACTERS - b.used - (b.used ? 1 : 0));
+    // Consume fragments lazily, before joining lists or formatting long prose.
+    const noteLine = (lines, parts) => {
+        const b = budget(lines);
+        if (b.truncated) return;
+        let text = '', left = remaining(b);
+        for (const part of parts) {
+            text += part.slice(0, left);
+            if (part.length > left) { b.truncated = true; break; }
+            left -= part.length;
+        }
+        if (text) { lines.push(text); b.used += text.length + (b.used ? 1 : 0); }
+    };
+    function* listParts(prefix, items, value = (item) => item) {
+        yield prefix;
+        let first = true;
+        for (const item of items) {
+            if (!first) yield ', ';
+            yield value(item);
+            first = false;
+        }
+    }
     const ofLine = (name) => (ofIdx.has(name) ? `openFrameworks: ${ofIdx.get(name).join(', ')} → use ${name} in TrussC.` : null);
     const deprNote = (dep) => {
         if (!dep) return null;
         const r = typeof dep === 'string' ? dep : dep.reason || '';
         return `⚠ Deprecated: ${r}${dep && dep.replacement ? ` Use ${dep.replacement}.` : ''}`;
     };
-    const push = (id, title, lines, meta) =>
+    const push = (id, title, lines, meta) => {
+        if (budgets.get(lines)?.truncated) { lines.push(truncatedMarker); stats.truncatedNotes++; }
         chunks.push({ id: 'symbol:' + id, source: 'reference', lang: 'cpp', title, text: lines.filter((l) => l != null && l !== '').join('\n'), meta });
+    };
+
+    // Shared function-card prose, also used by types, members and constants.
+    const references = (lines, o) => {
+        if (o.related?.length) noteLine(lines, listParts('Related: ', o.related));
+        if (o.examples?.length) noteLine(lines, listParts('Examples: ', o.examples, (e) => e.name || e));
+    };
+    const notes = (lines, o) => {
+        for (const key of ['details', 'details_ja', 'details_ko']) if (o[key]) noteLine(lines, [o[key]]);
+        const snippet = o.snippet || o.constructor?.snippet;
+        const b = budget(lines);
+        if (snippet && !b.truncated) {
+            // Scan only the prefix that fits, tracking the longest backtick run.
+            // Include both fences in the budget and keep a complete closing fence.
+            const left = remaining(b);
+            let run = 0, maxRun = 0, kept = 0, fenceLength = 3;
+            for (let i = 0; i < Math.min(snippet.length, left); i++) {
+                run = snippet[i] === '`' ? run + 1 : 0;
+                maxRun = Math.max(maxRun, run);
+                const nextFence = Math.max(3, maxRun + 1);
+                if (i + 1 + 2 * nextFence + 5 > left) break;
+                kept = i + 1;
+                fenceLength = nextFence;
+            }
+            if (kept) {
+                const fence = '`'.repeat(fenceLength);
+                noteLine(lines, [`${fence}cpp\n`, snippet.slice(0, kept), `\n${fence}`]);
+            }
+            if (kept < snippet.length) b.truncated = true;
+        }
+        for (const key of ['platformNote', 'platformNote_ja', 'platformNote_ko'])
+            if (o[key]) noteLine(lines, ['Platform: ', o[key]]);
+    };
+    const keywords = (lines, o) => {
+        if (o.keywords?.length) noteLine(lines, listParts('keywords: ', o.keywords));
+    };
 
     // functions — group overloads by name into one card
     const fnGroups = new Map();
@@ -211,12 +284,11 @@ function chunkApi(api, ofIdx) {
             if (!seen.has(s)) { seen.add(s); sigs.push(s); }
         }
         if (sigs.length) lines.push('', 'Signatures:', ...sigs);
-        if (f0.related?.length) lines.push('', `Related: ${f0.related.join(', ')}`);
-        if (f0.examples?.length) lines.push(`Examples: ${f0.examples.map((e) => e.name || e).join(', ')}`);
-        if (f0.details) lines.push('', f0.details);
+        references(lines, f0);
+        notes(lines, f0);
         const dep = g.items.find((x) => x.deprecated)?.deprecated;
         if (deprNote(dep)) lines.push('', deprNote(dep));
-        if (f0.keywords?.length) lines.push(`keywords: ${f0.keywords.join(', ')}`);
+        keywords(lines, f0);
         push(name, name, lines, { kind: 'function', category: g.cat, related: f0.related || [], deprecated: !!dep });
     }
 
@@ -228,10 +300,10 @@ function chunkApi(api, ofIdx) {
         if (t.methods?.length) lines.push('', `Methods: ${t.methods.map((m) => m.name).join(', ')}`);
         if (t.static_methods?.length) lines.push(`Static methods: ${t.static_methods.map((m) => m.name).join(', ')}`);
         if (t.operators?.length) { lines.push('', 'Operators:'); for (const o of t.operators) lines.push(`  ${o.signature || o.cpp}${o.desc ? ` — ${o.desc}` : ''}`); }
-        if (t.related?.length) lines.push('', `Related: ${t.related.join(', ')}`);
-        if (t.examples?.length) lines.push(`Examples: ${t.examples.map((e) => e.name || e).join(', ')}`);
+        references(lines, t);
         if (t.nested?.length) lines.push('', `Nested types: ${t.nested.map((n) => n.name).join(', ')}`);
-        if (t.keywords?.length) lines.push(`keywords: ${t.keywords.join(', ')}`);
+        notes(lines, t);
+        keywords(lines, t);
         push(t.name, t.name, lines, { kind: 'type', related: t.related || [] });
 
         // Nested types and enums get their own card, keyed by the qualified name
@@ -248,8 +320,14 @@ function chunkApi(api, ofIdx) {
                     const sig = typeof sg === 'string' ? { ret: m.return, params: sg } : sg;
                     nl.push(`  ${sig.ret || 'void'} ${n.name}::${m.name}(${sig.params || ''})`);
                 }
+                references(nl, m);
+                notes(nl, m);
+                keywords(nl, m);
             }
             if (n.values?.length) { nl.push('', 'Values:'); for (const v of n.values) nl.push(`  ${n.short}::${v.name}${v.value !== undefined && v.value !== null ? ` = ${v.value}` : ''}${v.desc ? ` — ${v.desc}` : ''}`); }
+            references(nl, n);
+            notes(nl, n);
+            keywords(nl, n);
             push(n.name, n.name, nl, { kind: n.kind === 'enum' ? 'enum' : 'type', owner: t.name });
         }
 
@@ -267,8 +345,11 @@ function chunkApi(api, ofIdx) {
                     ml.push(`  ${sig.ret || 'void'} ${id}(${sig.params || ''})`);
                 }
             }
+            references(ml, m);
+            notes(ml, m);
             if (deprNote(m.deprecated)) ml.push('', deprNote(m.deprecated));
-            push(id, id, ml, { kind, owner: t.name });
+            keywords(ml, m);
+            push(id, id, ml, { kind, owner: t.name, ...(m.related?.length ? { related: m.related } : {}) });
         };
         for (const m of t.methods || []) member(m, 'method', 'method');
         for (const m of t.static_methods || []) member(m, 'static method', 'static');
@@ -285,7 +366,13 @@ function chunkApi(api, ofIdx) {
 
     // macros + constants
     for (const m of api.macros || []) push(m.name, m.name, [`# ${m.name}   (macro)`, ...descBlock(m), m.signature ? `\n${m.signature}` : null], { kind: 'macro' });
-    for (const c of api.constants || []) push(c.name, c.name, [`# ${c.name}   (constant)`, ...descBlock(c), c.value != null ? `Value: ${c.value}` : null], { kind: 'var' });
+    for (const c of api.constants || []) {
+        const lines = [`# ${c.name}   (constant)`, ...descBlock(c), c.value != null ? `Value: ${c.value}` : null];
+        references(lines, c);
+        notes(lines, c);
+        keywords(lines, c);
+        push(c.name, c.name, lines, { kind: 'var' });
+    }
 
     return chunks;
 }
@@ -611,7 +698,8 @@ for (const e of api.enums || []) nameSet.add(e.name);
 
 const concept = chunkForAi(FOR_AI);
 const docs = chunkDocs(DOCS_DIR);
-const symbols = chunkApi(api, ofIdx);
+const apiStats = { truncatedNotes: 0 };
+const symbols = chunkApi(api, ofIdx, apiStats);
 const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
 const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
 const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
@@ -691,6 +779,7 @@ console.log(`wrote ${chunks.length} chunks → ${CHUNKS}`);
 console.log(`  concept (for-ai):     ${concept.length}`);
 console.log(`  doc     (docs/*.md):  ${docs.length}`);
 console.log(`  symbol  (trussc-api): ${symbols.length}  (of-mapping entries: ${ofIdx.size})`);
+console.log(`  API notes truncated: ${apiStats.truncatedNotes} card(s)`);
 console.log(`  example (examples):   ${examples.length}`);
 console.log(`  addon   (registry):   ${addons.length}`);
 console.log(`  release (github):     ${releases.length}`);

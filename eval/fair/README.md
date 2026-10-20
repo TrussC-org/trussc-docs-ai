@@ -49,7 +49,7 @@ Logs and outputs that could quote questions go only to `$FAIR_EVAL_DIR/runs/`. T
 
 The baseline is the accepted corpus's **retrieval output**, not a stored score. Each check:
 1. retrieves with the new corpus;
-2. finds the questions whose retrieved context changed (an unchanged question contributes exactly 0);
+2. finds the questions whose set of retrieved cards changed, compared as a set: the agent gets all 8, and the rubric asks whether the answer is present, so a pure reorder counts as unchanged (an unchanged question contributes exactly 0);
 3. judges the baseline and the candidate retrieval for those questions only, in the same run with the same model;
 4. sums the paired difference (candidate − baseline).
 

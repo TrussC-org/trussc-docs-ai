@@ -97,8 +97,10 @@ def judge(run, rows, name, log, expected):
 
 
 def context(row):
-    # Everything the judge sees for a chunk (judge.py prints title and text).
-    return [(c.get('id'), c.get('title'), c.get('text')) for c in row.get('top', [])]
+    # Everything the judge sees for a chunk (judge.py prints title and text), as a
+    # set: the agent receives all 8 cards and the rubric asks whether the answer is
+    # present, so reordering the same cards doesn't change the judged outcome.
+    return sorted((str(c.get('id')), str(c.get('title')), str(c.get('text'))) for c in row.get('top', []))
 
 
 def drop_candidate():

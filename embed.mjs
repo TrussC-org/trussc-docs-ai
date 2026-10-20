@@ -12,18 +12,60 @@ import { OLLAMA, EMBED_MODEL, CHUNKS, EMBEDDED } from './config.mjs';
 
 const BATCH = 16;   // /api/embed takes an array — batch for throughput
 const FORCE = process.env.EMBED_FORCE === '1';
+// Bound (cache): bge-m3 has a 2,048-token context; Ollama rejects inputs a little over it
+// (400) and silently cuts much longer ones. Cut every input to an estimated budget first.
+// Overflow is truncated and listed in the summary line.
+const TOKEN_BUDGET = Number(process.env.EMBED_TOKEN_BUDGET || 1900);
 
+// Conservative token estimate for bge-m3's XLM-R tokenizer: CJK/kana/hangul ≈ 1 token
+// per character, everything else ≈ 2.5 characters per token (code and identifiers
+// split finely). Returns the text cut at the budget, or the text itself if it fits.
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/;
+function fitBudget(text, budget = TOKEN_BUDGET) {
+    let used = 0;
+    for (let i = 0; i < text.length; i++) {
+        used += CJK.test(text[i]) ? 1 : 0.4;
+        if (used > budget) return text.slice(0, i);
+    }
+    return text;
+}
+
+// The hash keys on the budget too, so changing it re-embeds the inputs it affects.
 const hashOf = (text) =>
-    createHash('sha1').update(`${EMBED_MODEL}\0${text}`).digest('hex').slice(0, 20);
+    createHash('sha1').update(`${EMBED_MODEL}\0${TOKEN_BUDGET}\0${text}`).digest('hex').slice(0, 20);
 
-async function embedBatch(texts) {
+class TooLong extends Error {}
+async function embedRaw(texts) {
     const r = await fetch(`${OLLAMA}/api/embed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
     });
+    if (r.status === 400) {
+        const body = await r.text();
+        if (/context length|input length/i.test(body)) throw new TooLong(body);
+        throw new Error(`embed 400: ${body}`);
+    }
     if (!r.ok) throw new Error(`embed ${r.status}: ${await r.text()}`);
     return (await r.json()).embeddings;
+}
+
+// The estimate rarely overshoots. On a length 400, embed that batch one input at a
+// time and shorten only the failing input (to 90% each try) until it fits.
+async function embedBatch(items) {
+    try { return await embedRaw(items.map((f) => f.sent)); } catch (e) { if (!(e instanceof TooLong)) throw e; }
+    const out = [];
+    for (const f of items) {
+        // Bound (cache): at most 20 shortenings (90% each, down to ~12%). Overflow fails the build with the input's id.
+        for (let tries = 0; ; tries++) {
+            try { out.push((await embedRaw([f.sent]))[0]); break; } catch (e) {
+                if (!(e instanceof TooLong) || tries >= 20) throw new Error(`embed ${f.id}: ${e.message}`);
+                f.sent = f.sent.slice(0, Math.floor(f.sent.length * 0.9));
+                f.truncated = true;
+            }
+        }
+    }
+    return out;
 }
 
 // Cache: hash → vector, recovered from the previous corpus (skipped without vhash,
@@ -46,7 +88,10 @@ const chunks = readFileSync(CHUNKS, 'utf8').trim().split('\n').map((l) => JSON.p
 const flat = [];
 for (let ci = 0; ci < chunks.length; ci++) {
     const texts = [chunks[ci].text, ...(chunks[ci].embedTexts || [])];
-    for (const text of texts) flat.push({ ci, text, hash: hashOf(text) });
+    texts.forEach((text, k) => {
+        const sent = fitBudget(text);
+        flat.push({ ci, id: k ? `${chunks[ci].id}#${k}` : chunks[ci].id, sent, truncated: sent !== text, hash: hashOf(text) });
+    });
 }
 
 const vecs = new Array(flat.length);
@@ -60,11 +105,13 @@ console.log(`${flat.length} vectors: ${hits} cached, ${todo.length} to embed`);
 
 for (let i = 0; i < todo.length; i += BATCH) {
     const slice = todo.slice(i, i + BATCH);
-    const v = await embedBatch(slice.map((idx) => flat[idx].text));
+    const v = await embedBatch(slice.map((idx) => flat[idx]));
     slice.forEach((idx, j) => { vecs[idx] = v[j]; });
     process.stdout.write(`\rembedded ${Math.min(i + BATCH, todo.length)}/${todo.length} vectors`);
 }
 if (todo.length) process.stdout.write('\n');
+const cut = todo.filter((idx) => flat[idx].truncated).map((idx) => flat[idx].id);
+if (cut.length) console.log(`truncated ${cut.length} embed input(s) to ~${TOKEN_BUDGET} tokens: ${cut.slice(0, 40).join(', ')}${cut.length > 40 ? ', …' : ''}`);
 
 for (const c of chunks) { c.vectors = []; c.vhash = []; }
 flat.forEach((f, idx) => { chunks[f.ci].vectors.push(vecs[idx]); chunks[f.ci].vhash.push(f.hash); });

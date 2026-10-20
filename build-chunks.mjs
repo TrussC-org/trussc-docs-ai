@@ -14,7 +14,10 @@ import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES
 
 const require = createRequire(import.meta.url);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const descBlock = (o) => ['desc', 'desc_ja', 'desc_ko'].map((k) => o[k]).filter(Boolean);
+// MCP cards carry English only: the agent reading them translates, ja/ko roughly
+// doubled card size and token cost, and per-language text measured no better on
+// ja questions (fair eval, 2026-10-20). The website keeps all languages.
+const descBlock = (o) => (o.desc ? [o.desc] : []);
 
 // Split markdown into [{crumb, text}] by ## / ### headings (### nested under its ##
 // as "H2 > H3"). Content before the first heading is dropped (same as the original).
@@ -240,7 +243,7 @@ function chunkApi(api, ofIdx, stats = { truncatedNotes: 0 }) {
         if (o.examples?.length) noteLine(lines, listParts('Examples: ', o.examples, (e) => e.name || e));
     };
     const notes = (lines, o) => {
-        for (const key of ['details', 'details_ja', 'details_ko']) if (o[key]) noteLine(lines, [o[key]]);
+        if (o.details) noteLine(lines, [o.details]);
         const snippet = o.snippet || o.constructor?.snippet;
         const b = budget(lines);
         if (snippet && !b.truncated) {
@@ -262,8 +265,7 @@ function chunkApi(api, ofIdx, stats = { truncatedNotes: 0 }) {
             }
             if (kept < snippet.length) b.truncated = true;
         }
-        for (const key of ['platformNote', 'platformNote_ja', 'platformNote_ko'])
-            if (o[key]) noteLine(lines, ['Platform: ', o[key]]);
+        if (o.platformNote) noteLine(lines, ['Platform: ', o.platformNote]);
     };
     const keywords = (lines, o) => {
         if (o.keywords?.length) noteLine(lines, listParts('keywords: ', o.keywords));
@@ -487,7 +489,7 @@ function chunkExamples(jsonPath, srcRoot, nameSet) {
 // renames like end_fbo travel with their type), one per enum. Plus a grouped Tasks
 // chunk (spawn/wait/forever — TrussSketch-only, no C++ twin) and a single constants
 // overview. Title = the bare symbol name, IDENTICAL to the C++ reference title.
-const luaDesc = (o) => [o.desc, o.desc_ja].filter(Boolean);   // en (+ja); ko dropped to keep Lua cards lean
+const luaDesc = (o) => (o.desc ? [o.desc] : []);   // English only, like the C++ cards
 const luaRet = (rt) => (rt && rt !== '(nothing)' && rt !== 'void' && rt !== '' ? ` -> ${rt}` : '');
 const luaSig = (m) => ((m.signatures && m.signatures.length ? m.signatures : ['']).map((s) => `${m.name}(${s})`).join(' | ')) + luaRet(m.return);
 function chunkSketchLua(luaApi) {
@@ -552,7 +554,6 @@ function chunkSketchLua(luaApi) {
             'TrussSketch runs cooperative tasks (coroutines) so you can animate or sequence things over time without blocking draw().', ''];
         for (const f of tasksCat.functions || []) {
             lines.push(`  ${f.name}(${f.params_typed || f.params || ''}) — ${f.desc || ''}`);
-            if (f.desc_ja) lines.push(`      ${f.desc_ja}`);
         }
         lines.push('', 'Inside a task, wait(sec) pauses just that task. forever(fn) repeats fn forever, with an implicit wait(0) each loop so it yields.',
             'keywords: spawn, wait, forever, task, coroutine, async, animation, sequence, タスク, 待つ, 繰り返し');

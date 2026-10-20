@@ -6,11 +6,13 @@
 //              multilingual prose) whose NAMES match the reference page (links resolve)
 //   example  — examples.json + each example's src/tcApp.cpp (APIs used + excerpt)
 //   issue    — open `bug` issues (issues.json, cached by fetch-issues.mjs): summary + workaround
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { FOR_AI, TRUSSC_API, SKETCH_LUA_REF, OF_MAPPING, EXAMPLES_JSON, EXAMPLES_SRC, DOCS_DIR, ADDON_REGISTRY, ADDONS_DIR, RELEASES_JSON, ISSUES_JSON, CHUNKS } from './config.mjs';
+import { addonDirectories, regularPath, withCacheLock } from './addon-cache.mjs';
+import { validateRegistry } from './fetch-addons.mjs';
 
 const require = createRequire(import.meta.url);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -21,7 +23,7 @@ const descBlock = (o) => (o.desc ? [o.desc] : []);
 
 // Split markdown into [{crumb, text}] by ## / ### headings (### nested under its ##
 // as "H2 > H3"). Content before the first heading is dropped (same as the original).
-function splitHeadings(md) {
+function splitHeadings(md, { maxSections = Infinity, onOverflow = () => {} } = {}) {
     const out = [];
     let h2 = '', cur = null;
     const flush = () => {
@@ -32,10 +34,16 @@ function splitHeadings(md) {
         cur = null;
     };
     const clean = (s) => s.replace(/[*`]/g, '').trim();   // drop markdown emphasis/code marks from headings
-    for (const line of md.split('\n')) {
+    // Iterate lazily so a bounded README never materializes its remaining lines.
+    for (const match of md.matchAll(/[^\n]*(?:\n|$)/g)) {
+        const line = match[0].replace(/\n$/, '');
         const m2 = /^## (.+)/.exec(line), m3 = /^### (.+)/.exec(line);
-        if (m2) { flush(); h2 = clean(m2[1]); cur = { h2, heading: h2, body: [] }; }
-        else if (m3) { flush(); cur = { h2, heading: clean(m3[1]), body: [] }; }
+        if (m2 || m3) {
+            flush();
+            if (out.length >= maxSections) { onOverflow(); return out; }
+            if (m2) h2 = clean(m2[1]);
+            cur = { h2, heading: m2 ? h2 : clean(m3[1]), body: [] };
+        }
         else if (cur) cur.body.push(line);
     }
     flush();
@@ -83,22 +91,21 @@ function chunkDocs(docsDir) {
 
 // --- Source: official addon READMEs ----------------------------------------
 // "Official" = present in the registry trussc.org renders. We ingest the README of
-// each one that's also bundled locally, prefixed with the registry metadata
+// each one available bundled locally or in the external cache, with registry metadata
 // (description / category / keywords) so the card retrieves well. Long READMEs are
 // capped (the tail is usually license/build detail).
 const ADDON_README_CAP = 8000;
-function chunkAddons(registryPath, addonsDir) {
-    if (!existsSync(registryPath)) return [];
-    const reg = JSON.parse(readFileSync(registryPath, 'utf8')).addons || [];
+function chunkAddons(reg, addonDirs) {
     const chunks = [];
     const missing = [];
     for (const a of reg) {
-        const meta = { category: a.category || null, url: a.url || null, keywords: a.keywords || [], addon: a.name };
+        const keywords = Array.isArray(a.keywords) ? a.keywords : [];
+        const meta = { category: a.category || null, url: a.url || null, keywords, addon: a.name };
         const head = [
             `# ${a.name}  (official addon — ${a.category || 'addon'})`,
             a.description || null,
             a.author ? `Author: ${a.author}${a.license ? ` · ${a.license}` : ''}` : null,
-            (a.keywords && a.keywords.length) ? `keywords: ${a.keywords.join(', ')}` : null,
+            keywords.length ? `keywords: ${keywords.join(', ')}` : null,
             `Add to a project: \`trusscli addon add ${a.name}\``,
         ].filter(Boolean).join('\n');
 
@@ -107,8 +114,10 @@ function chunkAddons(registryPath, addonsDir) {
         // dropped entirely before) and whatever else follows.
         chunks.push({ id: 'addon:' + a.name, source: 'addon', lang: 'common', title: `${a.name} (addon)`, text: head, meta });
 
-        const readme = join(addonsDir, a.name, 'README.md');
-        if (!existsSync(readme)) { if (!existsSync(join(addonsDir, a.name))) missing.push(a.name); continue; }
+        const admitted = addonDirs.get(a.name);
+        const dir = admitted?.dir;
+        const readme = dir && regularPath(dir, 'README.md');
+        if (!readme || !lstatSync(readme).isFile()) { if (!dir) missing.push(a.name); continue; }
         const body = readFileSync(readme, 'utf8').replace(/\r/g, '');
 
         // Split the README the way docs are split, one chunk per section. A whole
@@ -116,7 +125,11 @@ function chunkAddons(registryPath, addonsDir) {
         // troubleshooting" at once, which matches every question about the addon
         // weakly and none of them strongly — and anything past ADDON_README_CAP was
         // simply discarded (tcxPhysics is 24 kB, three times the cap).
-        const sections = splitHeadings(body);
+        // Bound (security): at most 200 sections per admitted external README.
+        // The content's admitted origin sets the cap, independently of registry
+        // flags. Both README and example ingestion use this same source record.
+        const sections = splitHeadings(body, admitted.capped ? { maxSections: 200,
+            onOverflow: () => console.warn(`Warning: ${a.name} README exceeds 200 sections; remainder skipped`) } : {});
         if (!sections.length) {
             // No ## / ### at all: keep the README whole rather than dropping it,
             // since splitHeadings ignores text before the first heading.
@@ -126,14 +139,14 @@ function chunkAddons(registryPath, addonsDir) {
             if (text.trim()) chunks.push({ id: `addon:${a.name}#readme`, source: 'addon', lang: 'common', title: `${a.name} (addon README)`, text: `${a.name}\n\n${text}`, meta });
             continue;
         }
-        const usedIds = new Set();
+        const usedIds = new Set(), nextSuffix = new Map();
         for (const sec of sections) {
             let text = sec.text;
             if (text.length > ADDON_README_CAP) text = text.slice(0, ADDON_README_CAP) + '\n\n… (section truncated)';
             // Name the addon inside the text too: a section titled "Usage" says
             // nothing on its own, and the crumb is what makes it retrievable.
             chunks.push({
-                id: sectionId(`addon:${a.name}#`, sec.crumb, usedIds),
+                id: sectionId(`addon:${a.name}#`, sec.crumb, usedIds, nextSuffix),
                 source: 'addon', lang: 'common',
                 title: `${a.name} > ${sec.crumb} (addon)`,
                 text: `# ${a.name} — ${sec.crumb}\n\n${text}`,
@@ -142,9 +155,9 @@ function chunkAddons(registryPath, addonsDir) {
         }
     }
     if (missing.length) {
-        console.warn(`  ⚠ ${missing.length} registry addon(s) not cloned into ${addonsDir} — README + examples absent from the corpus:`);
+        console.warn(`  Warning: ${missing.length} registry addon(s) unavailable in bundled sources or external cache — README + examples absent from the corpus:`);
         console.warn(`     ${missing.join(', ')}`);
-        console.warn(`     fix: trusscli addon clone ${missing.join(' ')}`);
+        console.warn('     refresh external sources with node fetch-addons.mjs');
     }
     return chunks;
 }
@@ -160,14 +173,19 @@ function slugify(s) {
 // and "使い方 3: … > 型バリエーション"). tcxIME had six chunks sharing one id, so
 // trussc_get / pinning could only ever reach the first. Only those cases get a short
 // hash of the full crumb appended; every other id stays exactly what it was.
-function sectionId(prefix, crumb, used) {
+function sectionId(prefix, crumb, used, nextSuffix) {
     const slug = slugify(crumb);
     let id = prefix + slug;
     const hasAscii = /[a-z0-9]/i.test(crumb);   // no ASCII at all → slugify fell back to "section"
     if (!hasAscii || used.has(id)) {
         id = `${prefix}${slug}-${createHash('sha1').update(crumb).digest('hex').slice(0, 6)}`;
     }
-    for (let n = 2; used.has(id); n++) id = `${prefix}${slug}-${n}`;   // identical headings twice
+    const base = prefix + slug;
+    if (used.has(id)) {
+        let n = nextSuffix.get(base) || 2;
+        do { id = `${base}-${n++}`; } while (used.has(id));
+        nextSuffix.set(base, n);
+    }
     used.add(id);
     return id;
 }
@@ -430,22 +448,21 @@ function exampleApis(src, nameSet) {
 // so we can split them out later if they prove noisy. Scoped by env ADDON_EXAMPLES
 // ('' = off, 'all', or a comma list of addon names) while we measure.
 const ADDON_EXAMPLES = (process.env.ADDON_EXAMPLES || '').trim();
-function chunkAddonExamples(registryPath, addonsDir, nameSet) {
-    if (!ADDON_EXAMPLES || !existsSync(registryPath)) return [];
+function chunkAddonExamples(reg, addonDirs, nameSet) {
+    if (!ADDON_EXAMPLES) return [];
     const only = ADDON_EXAMPLES === 'all' ? null : new Set(ADDON_EXAMPLES.split(',').map((s) => s.trim()));
-    const reg = JSON.parse(readFileSync(registryPath, 'utf8')).addons || [];
     const lang = (rel) => (rel.endsWith('.glsl') ? 'glsl' : 'cpp');
     const chunks = [];
     for (const a of reg) {
         if (only && !only.has(a.name)) continue;
-        const addonDir = join(addonsDir, a.name);
-        if (!existsSync(addonDir)) continue;
+        const addonDir = addonDirs.get(a.name)?.dir;
+        if (!addonDir) continue;
         let entries;
         try { entries = readdirSync(addonDir, { withFileTypes: true }); } catch { continue; }
         for (const e of entries) {
             if (!e.isDirectory() || !e.name.startsWith('example-')) continue;
-            const srcDir = join(addonDir, e.name, 'src');           // ONLY src/ — never build dirs (Jolt/etc source)
-            if (!existsSync(srcDir)) continue;
+            const srcDir = regularPath(addonDir, e.name, 'src'); // ONLY src/ — never build dirs (Jolt/etc source)
+            if (!srcDir || !lstatSync(srcDir).isDirectory()) continue;
             let srcFiles;
             try { srcFiles = readdirSync(srcDir); } catch { continue; }
             // usage source only: tcApp.* first, then extra headers/impls; main.cpp is window boilerplate → skip
@@ -454,8 +471,8 @@ function chunkAddonExamples(registryPath, addonsDir, nameSet) {
                 .sort((x, y) => (x.startsWith('tcApp') ? -1 : y.startsWith('tcApp') ? 1 : x.localeCompare(y)));
             const files = [];
             for (const rel of want) {
-                const p = join(srcDir, rel);
-                if (existsSync(p)) files.push({ rel, src: readFileSync(p, 'utf8').replace(/\r/g, '') });
+                const p = regularPath(srcDir, rel);
+                if (p && lstatSync(p).isFile()) files.push({ rel, src: readFileSync(p, 'utf8').replace(/\r/g, '') });
             }
             if (!files.length) continue;
             const name = e.name.replace(/^example-/, '');
@@ -728,8 +745,13 @@ const docs = chunkDocs(DOCS_DIR);
 const apiStats = { truncatedNotes: 0 };
 const symbols = chunkApi(api, ofIdx, apiStats);
 const examples = chunkExamples(EXAMPLES_JSON, EXAMPLES_SRC, nameSet);
-const addonExamples = chunkAddonExamples(ADDON_REGISTRY, ADDONS_DIR, nameSet);
-const addons = chunkAddons(ADDON_REGISTRY, ADDONS_DIR);
+// Bound (security): the shared cache lock spans registry loading, admission and
+// every README/example read. Waiters see a complete old or new publication.
+const { addonExamples, addons } = await withCacheLock({}, () => {
+    const registry = existsSync(ADDON_REGISTRY) ? validateRegistry(JSON.parse(readFileSync(ADDON_REGISTRY, 'utf8'))).addons : [];
+    const addonDirs = addonDirectories(registry, ADDONS_DIR);
+    return { addonExamples: chunkAddonExamples(registry, addonDirs, nameSet), addons: chunkAddons(registry, addonDirs) };
+});
 const releases = chunkReleases(RELEASES_JSON);
 const issues = chunkIssues(ISSUES_JSON);
 const sketchLua = chunkSketchLua(luaApi);

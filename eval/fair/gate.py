@@ -45,7 +45,8 @@ RETRIEVE_TIMEOUT = int(os.environ.get('FAIR_EVAL_RETRIEVE_TIMEOUT', '1200'))
 
 
 def say(msg, code):
-    print(f'fair eval: {msg}')
+    sources = os.environ.get('CORPUS_SOURCES', '')
+    print(f'fair eval: {msg}' + (f' sources: {sources}' if sources else ''))
     sys.exit(code)
 
 

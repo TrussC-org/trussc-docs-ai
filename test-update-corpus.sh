@@ -5,12 +5,26 @@
 #   bash test-update-corpus.sh
 set -uo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)/update-corpus.sh"
+GATE_SRC="$(dirname "$SRC")/eval/fair/gate.py"
 fails=0
 ROOT=$(mktemp -d); trap 'rm -rf "$ROOT"' EXIT
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_AUTHOR_NAME=Test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=Test GIT_COMMITTER_EMAIL=test@example.invalid
+git init -q --bare --initial-branch=main "$ROOT/source.git"
+git clone -q "$ROOT/source.git" "$ROOT/author" 2>/dev/null
+echo initial > "$ROOT/author/source"
+git -C "$ROOT/author" add source
+git -C "$ROOT/author" commit -qm initial
+git -C "$ROOT/author" push -q origin main
 
 setup() {   # setup <live: none|bad|COUNT>
   T=$(mktemp -d -p "$ROOT"); mkdir -p "$T/eval/fair"; cp "$SRC" "$T/"
-  echo '' > "$T/fetch-releases.mjs"; echo '' > "$T/fetch-issues.mjs"; echo '' > "$T/build-chunks.mjs"
+  for step in fetch-releases fetch-issues fetch-addons build-chunks; do
+    printf "import { appendFileSync } from 'node:fs'; appendFileSync('log', '%s\\\\n');\n" "$step" > "$T/$step.mjs"
+  done
+  git clone -q "$ROOT/source.git" "$T/TrussC"
+  git clone -q "$ROOT/source.git" "$T/trussc.org"
+  export TRUSSC_REPO="$T/TrussC" SITE_REPO="$T/trussc.org"
   cat > "$T/embed.mjs" <<'JS'
 import { writeFileSync } from 'node:fs';
 writeFileSync(process.env.EMBEDDED_NEXT || 'chunks.embedded.next.json', JSON.stringify(Array.from({ length: Number(process.env.STUB_COUNT) }, () => ({ v: 'new' }))));
@@ -20,7 +34,7 @@ import hashlib, os, sys, time
 if sys.argv[1] == 'check' and os.environ.get('STUB_PAUSE'):
     open('paused', 'w').close()
     while not os.path.exists('resume'): time.sleep(0.05)
-open('log', 'a').write(f"{sys.argv[1]} {sys.argv[2]} {hashlib.sha256(open(sys.argv[2], 'rb').read()).hexdigest()[:12]}\n")
+open('log', 'a').write(f"{sys.argv[1]} {sys.argv[2]} {hashlib.sha256(open(sys.argv[2], 'rb').read()).hexdigest()[:12]} {os.environ.get('CORPUS_SOURCES', '')}\n")
 sys.exit(int(os.environ.get('STUB_GATE', '0')) if sys.argv[1] == 'check' else 0)
 PY
   case "$1" in
@@ -158,5 +172,85 @@ SH
     expect auth-hint "$(grep -c "Hint: rerun with TRUSSC_RESTART_CMD='sudo systemctl restart custom-service'" "$T/out")" "$want"
   fi
 done
+
+echo "sources fast-forward before fetching/building; untracked files are allowed"
+setup 100
+echo untracked > "$TRUSSC_REPO/untracked"
+echo upstream >> "$ROOT/author/source"
+git -C "$ROOT/author" commit -qam upstream
+git -C "$ROOT/author" push -q origin main
+sha=$(git -C "$ROOT/author" rev-parse HEAD)
+code=$(STUB_COUNT=100 run --local)
+expect exit "$code" 0
+expect core-head "$(git -C "$TRUSSC_REPO" rev-parse HEAD)" "$sha"
+expect site-head "$(git -C "$SITE_REPO" rev-parse HEAD)" "$sha"
+expect check-sources "$(grep -c "^check .*TrussC=$sha trussc.org=$sha" "$T/log")" 1
+expect accept-sources "$(grep -c "^accept .*TrussC=$sha trussc.org=$sha" "$T/log")" 1
+expect no-stats "$([ -e "$T/stats.jsonl" ] && echo exists || echo absent)" absent
+
+for which in core site; do
+  for state in dirty detached no-upstream diverged fetch-failed not-a-checkout; do
+    echo "$which source $state blocks before changing live corpus"
+    setup 100
+    if [ "$which" = core ]; then repo=$TRUSSC_REPO; else repo=$SITE_REPO; fi
+    case "$state" in
+      dirty) echo dirty >> "$repo/source" ;;
+      detached) git -C "$repo" checkout -q --detach ;;
+      no-upstream) git -C "$repo" branch --unset-upstream ;;
+      diverged)
+        echo local >> "$repo/source"; git -C "$repo" commit -qam local
+        echo divergence >> "$ROOT/author/source"; git -C "$ROOT/author" commit -qam divergence; git -C "$ROOT/author" push -q origin main ;;
+      fetch-failed) git -C "$repo" remote set-url origin "$ROOT/nonexistent.git" ;;
+      not-a-checkout) rm -rf "$repo/.git" ;;
+    esac
+    code=$(STUB_COUNT=100 run --local)
+    expect exit "$code" 1; expect live "$(live)" old100
+    expect checks "$(n check)" 0; expect restarts "$(n restart)" 0
+    expect fetchers "$(n fetch)" 0; expect builders "$(n build)" 0
+    expect no-next "$(next)" no
+    expect clear-error "$(grep -c 'Stopped; the live corpus is unchanged' "$T/out")" 1
+  done
+done
+
+echo "--no-pull leaves source HEADs alone and records commits, even when fetch is unavailable"
+setup 100
+core_sha=$(git -C "$TRUSSC_REPO" rev-parse HEAD); site_sha=$(git -C "$SITE_REPO" rev-parse HEAD)
+git -C "$TRUSSC_REPO" remote set-url origin "$ROOT/nonexistent.git"
+git -C "$SITE_REPO" remote set-url origin "$ROOT/nonexistent.git"
+code=$(STUB_COUNT=100 run --no-pull --local)
+expect exit "$code" 0
+expect core-head "$(git -C "$TRUSSC_REPO" rev-parse HEAD)" "$core_sha"
+expect check-sources "$(grep -c "^check .*TrussC=$core_sha trussc.org=$site_sha" "$T/log")" 1
+expect accept-sources "$(grep -c "^accept .*TrussC=$core_sha trussc.org=$site_sha" "$T/log")" 1
+expect printed-sources "$(grep -c "corpus sources: TrussC=$core_sha trussc.org=$site_sha" "$T/out")" 1
+
+echo "--no-pull still requires clean source provenance"
+setup 100; echo dirty >> "$TRUSSC_REPO/source"
+code=$(STUB_COUNT=100 run --no-pull)
+expect exit "$code" 1; expect live "$(live)" old100; expect fetchers "$(n fetch)" 0
+
+echo "addon fetch failure is non-fatal"
+setup 100
+echo 'process.exit(1)' >> "$T/fetch-addons.mjs"
+code=$(STUB_COUNT=100 run)
+expect exit "$code" 0; expect builds "$(n build)" 1; expect checks "$(n check)" 1
+
+echo "source defaults resolve as siblings of this checkout"
+setup 100
+mkdir "$T/app"
+mv "$T/update-corpus.sh" "$T/"*.mjs "$T/eval" "$T/app/"
+cp "$T/chunks.embedded.json" "$T/app/"
+code=$(cd "$T/app" && env -u TRUSSC_REPO -u SITE_REPO STUB_COUNT=100 bash ./update-corpus.sh > out 2>&1; echo $?)
+expect default-paths-exit "$code" 0
+
+echo "real gate check and accept lines include source commits (isolated gate state)"
+setup 100
+source_line="TrussC=abc123 trussc.org=def456"
+code=$(FAIR_EVAL_DIR="$ROOT/gate-state" FAIR_EVAL_SKIP=1 CORPUS_SOURCES="$source_line" python3 "$GATE_SRC" check "$T/chunks.embedded.json" > "$T/out" 2>&1; echo $?)
+expect gate-check-exit "$code" 0
+expect gate-check-sources "$(grep -c "fair eval: .*sources: $source_line" "$T/out")" 1
+code=$(FAIR_EVAL_DIR="$ROOT/gate-state" CORPUS_SOURCES="$source_line" python3 "$GATE_SRC" accept "$T/chunks.embedded.json" > "$T/out" 2>&1; echo $?)
+expect gate-accept-exit "$code" 2
+expect gate-accept-sources "$(grep -c "fair eval: .*sources: $source_line" "$T/out")" 1
 
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

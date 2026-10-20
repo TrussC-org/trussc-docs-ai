@@ -72,6 +72,8 @@ npm run build             # = build-chunks + embed
 
 ./update-corpus.sh         # rebuild + check only (→ chunks.embedded.next.json)
 ./update-corpus.sh --local # rebuild, check and deploy on this server — see Deploy
+./update-corpus.sh --no-pull # use local source commits for an offline/dev rebuild
+node fetch-addons.mjs      # refresh registry and sparse external addon cache
 node server.mjs           # http://localhost:8788  (standalone demo.html)
 node ask.mjs "..."        # one-shot CLI Q&A (answer→stdout, sources→stderr)
 node ask-cli.mjs "..."    # HTTP answer + public per-round debug trace
@@ -87,6 +89,7 @@ API cards are English only (the agent reading them translates; the website keeps
 - **concept** — hand-written half of `TrussC/docs/FOR_AI_ASSISTANT.md` (before `## API Index`), by heading. *This is the place to add high-level knowledge by hand.*
 - **symbol** — every entry in `trussc.org/generated/trussc-api.js` (the same data the reference page renders: signatures, enum values, properties, English prose) joined with `of-mapping.json` (openFrameworks → TrussC).
 - **example** — each example in `examples.json` + the APIs it calls + a `src/tcApp.cpp` excerpt.
+- **addon** — registry metadata cards plus available addon READMEs, split by heading. Bundled content in `ADDONS_DIR` takes priority; external addons (`bundled:false`) fall back to the operator's sparse Git cache. `ADDON_EXAMPLES=all` also ingests their immediate `example-*/src/*.{cpp,h,glsl}` files, excluding `main.cpp` (the update script enables this by default).
 - **issue** — the open `bug` issues of TrussC-org/TrussC, one chunk each (title + `## Summary` + `## Workaround`), cached in `issues.json` by `node fetch-issues.mjs` (`update-corpus.sh` runs it). A closed issue drops out on the next rebuild. Fallback retrieval admits an issue only when it ranks among the top k and clears a rerank floor; the model links it as `[[#123]]`.
 
 Source paths default to the sibling-checkout layout (`../TrussC`, `../trussc.org`)
@@ -254,6 +257,7 @@ node test-debug.mjs
 node test-r4.mjs
 node test-r6.mjs
 node test-build-chunks.mjs
+node test-addons.mjs
 node test-collapse.mjs
 node test-resolve-links.mjs
 bash test-update-corpus.sh
@@ -299,13 +303,30 @@ different selected cards against the accepted retrieval baseline.
 
 The corpus (`chunks.embedded.json`) is **generated at deploy time, not kept in git**:
 it is built from the TrussC and trussc.org checkouts on the server. The GitHub caches
-`releases.json` and `issues.json` are not in git either; each rebuild fetches them.
+`releases.json`, `issues.json` and `addon-registry.json` are generated caches too;
+each rebuild refreshes them. See the migration notes below for older tracked files.
 
 **Updating the corpus** after a re-emit or source change, on the server itself:
 
 ```bash
-./update-corpus.sh --local    # fetch → build-chunks → embed → guards → swap → restart → health → accept
+./update-corpus.sh --local    # pull sources → fetch caches → build → embed → guards → swap → restart → health → accept
 ```
+
+Before any fetcher or build runs, both source checkouts must be on branches with
+upstreams and have no tracked local changes (untracked files are allowed). The
+script runs `git fetch` and `git merge --ff-only @{u}` in each. A dirty or detached
+checkout, missing upstream, fetch failure or divergence stops the rebuild with the
+live corpus untouched. It never resets, stashes or checks out these source repos.
+`TRUSSC_REPO` and `SITE_REPO` default to `../TrussC` and `../trussc.org`, relative to
+this repository, with operator-shell environment overrides. Both built commit SHAs
+are printed and passed as `CORPUS_SOURCES` to the gate's check/accept result lines.
+Rebuilds do not write usage events to `stats.jsonl`.
+
+`--no-pull` skips source fetch and merge for offline/development builds, and still
+prints/records each local HEAD commit. The branch/upstream/clean checks still apply.
+Cache refreshes are still attempted
+and remain non-fatal. For a fully offline chunk-only build, run
+`ADDON_EXAMPLES=all node build-chunks.mjs` directly against existing caches.
 
 1. `embed.mjs` writes the new corpus to `chunks.embedded.next.json`; the live file is untouched.
 2. Guards: it stops if the chunk count is more than 5% below the **live** corpus, or if
@@ -355,6 +376,95 @@ to `chunks.embedded.json` before restarting the service. Delete it once the next
 The running server keeps the corpus in memory once loaded (any `/health` or query
 loads it), so it serves normally throughout. The
 next `./update-corpus.sh --local` compares against the restored file.
+
+**Addon registry and external sources.** `fetch-addons.mjs` fetches
+[`registry.json`](https://raw.githubusercontent.com/TrussC-org/trussc-addons/gh-pages/registry.json)
+from the same endpoint as trusscli. The response is read incrementally with a
+2 MiB limit, a 30 s overall timeout and no redirects. It requires an object with an
+`addons` array and drops entries without string `name`/`url` and boolean `bundled`,
+with a warning. Loading considers the first 256 entries and keeps the first valid
+entry for each case-insensitive addon name or cache URL, warning for each later
+duplicate and once for overflow. A successful fetch replaces `addon-registry.json`
+by atomic rename; failure preserves the previous file and tries its registry for
+external sources.
+
+External sources live outside the worktree, in
+`~/.cache/trussc-docs-ai/addons` by default. Set `ADDON_CACHE_DIR` in the operator
+shell to move the cache; use the same setting for fetches and chunk builds. Cache
+subdirectories are keyed by the canonical repository URL. Only plain
+`https://github.com/<owner>/<repo>` URLs (optional `.git`) are accepted; credentials,
+extra paths, queries, fragments and other hosts/protocols are skipped with a warning.
+Each refresh clones into a fresh temporary directory inside the cache, using depth
+1, `--filter=blob:none`, no initial checkout and no submodules. It then explicitly
+fetches `refs/tags/<latest_tag>` when present, otherwise remote `HEAD`, and checks
+out the fetched commit detached. Non-cone sparse patterns materialize only
+`README.md` and the example source files the builder reads. The completed clone
+is published by renaming the old entry to a backup, renaming the completed clone
+into place, then deleting the backup. A failed refresh preserves the old published
+entry; existing Git metadata is never reused. Hooks, credential helpers and
+inherited Git config are disabled. The cache root must be a real directory owned by the current user. Size walks use
+`lstat` and discard entries containing symlinks, including inside `.git`.
+
+Refreshes, including direct fetcher runs in separate worktrees, and chunk builds
+share an atomic cache lock held through registry refresh or all cached content
+reads. The lock records PID, start time and hostname. Waiters retry for up to ten
+minutes, then fail with a clear message. A dead owner on the same host permits
+safe takeover; locks from other hosts are retained. Each Git command's process
+group ID, `ps` start identity and staging path are recorded before Git starts.
+Takeover kills any surviving recorded group only when its identity matches, then
+waits up to two seconds for the entire group to exit before removing staging.
+An identity mismatch (including PID reuse), unavailable identity, failed kill or
+group that does not exit stops takeover with a clear error and retains the lock
+and staging for operator inspection; the mismatched process is left running.
+Interrupted publication backups
+are recovered before readers enter. At refresh start, abandoned `.addon-*` staging
+directories are removed under the lock before calculating remaining budget.
+
+Security bounds are fixed at 64 distinct external entries per run and 120 s for
+all Git steps per addon. Every Git process inherits a hard 64 MiB per-file limit, covering
+packs, objects and working files. While Git runs, the temporary directory's total
+logical size, including `.git`, is polled by Node against a 64 MiB per-addon limit.
+A POSIX shell supervisor independently checks owner liveness and the remaining
+deadline every 0.2 s, even if Node dies or stops. A separate background job uses
+`du -sk` to measure allocated staging bytes, including `.git`, and a bounded
+`find` count rejects more than 20,000 staging entries independently of filenames.
+Scans use any numeric `du` total despite a nonzero exit; five consecutive scans
+without a total fail the refresh. Owner/deadline enforcement
+occurs within one 0.2 s tick; size overshoot can span one scan cycle of writes.
+Node retains its logical-byte checks, including a final check before publication.
+These polling bounds are not a filesystem quota. Before starting an addon, at
+least 64 MiB must remain in the 512 MiB whole-cache budget, including existing entries and Git objects. Timeouts
+and live size overflow kill the entire Git process group; failed temporary clones
+are removed with a `Warning`. Insufficient remaining cache budget skips further
+downloads. The builder checks the size/count bounds again before reading a cache.
+External README expansion stops at 200 sections per addon, omits the remainder and
+prints one warning naming the addon. The admitted content's origin determines this
+cap; bundled content keeps its existing behavior. Heading IDs use per-document
+suffix counters; bundled README output is preserved. Registry metadata cards remain available when
+source content is skipped. Prune unused cache directories from the operator shell
+if the total cache limit is reached. Run manual cache maintenance only when no
+fetcher or chunk builder is active.
+
+`ADDON_REGISTRY_URL` overrides the registry endpoint for operator-shell tests.
+`ADDON_URL_REWRITES` is an optional JSON map from validated GitHub repository URLs
+to local `file://` remotes for offline tests; validation always runs on the original
+registry URL. These settings and the cache are used only by build scripts. The
+service's runtime config, filesystem access and stats behavior are unchanged.
+
+**Migrating a checkout that tracks the addon registry.** Keep a verified copy
+before pulling the change that removes it from Git, then restore it as a cache:
+
+```bash
+cp -p addon-registry.json ../addon-registry.keep.json &&
+  cmp addon-registry.json ../addon-registry.keep.json &&
+  git checkout -- addon-registry.json &&
+  git pull &&
+  cp -p ../addon-registry.keep.json addon-registry.json
+```
+
+If a step fails, keep the copy and restore it before rebuilding. Remove the backup
+after a successful rebuild. This follows the corpus migration above; combine the
+backups before pulling if both migrations apply.
 
 ## Stats
 

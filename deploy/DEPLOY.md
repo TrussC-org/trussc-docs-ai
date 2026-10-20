@@ -34,20 +34,24 @@ sudo mkdir -p "$DEST" && sudo chown "$SVCUSER:$SVCUSER" "$DEST"
 git clone https://github.com/TrussC-org/trussc-docs-ai "$DEST"   # OR: rsync -a --exclude node_modules ./ user@SERVER:"$DEST"/
 ```
 No machine-specific paths are baked in — `config.mjs` resolves everything from env
-vars with sensible defaults, so the running server needs no edits. It serves the
-committed `chunks.embedded.json`; nothing else is required to run.
+vars with sensible defaults, so the running server needs no edits. It serves
+`chunks.embedded.json`, which is not in git: build it on the box (below) or copy one
+built elsewhere (same `bge-m3` model → the embeddings are valid anywhere).
 
-**Rebuilding the corpus (optional).** Only needed if the docs changed and you want
-to regenerate `chunks.embedded.json`. It reads the TrussC core + trussc.org site
+**Building the corpus.** It reads the TrussC core + trussc.org site
 repos. By default `config.mjs` expects them as siblings of this repo
 (`../TrussC`, `../trussc.org`); otherwise point `TRUSSC_REPO` / `SITE_REPO` at them
 (or override the individual `FOR_AI` / `TRUSSC_API` / … vars):
 ```bash
 cd "$DEST"
-TRUSSC_REPO=/path/to/TrussC SITE_REPO=/path/to/trussc.org node build-chunks.mjs && node embed.mjs
+export TRUSSC_REPO=/path/to/TrussC SITE_REPO=/path/to/trussc.org
+# build + check, and install the corpus only if every check passed
+./update-corpus.sh --first-deploy && mv chunks.embedded.next.json chunks.embedded.json
 ```
-> Easiest path: just copy `chunks.embedded.json` over (it's committed) and skip the
-> rebuild — same `bge-m3` model → the embeddings are valid anywhere.
+After the smoke test (step 3) passes, make this corpus the fair eval gate's baseline:
+`python3 eval/fair/gate.py accept chunks.embedded.json`. Once the service runs (step 4),
+update it with `./update-corpus.sh --local` (see the README's Deploy section: guards,
+swap, restart, health check, rollback).
 
 ### 3. Smoke test on the box
 ```bash
@@ -120,9 +124,13 @@ curl -s https://api.trussc.org/ask -d '{"question":"drawRectの使い方は？"}
   there if needed.
 - **Rate limit**: app-level (30 req/min/IP, tune via `RATE_MAX`/`RATE_WIN`). Add a
   Cloudflare WAF rate-limit rule on `api.trussc.org` for an edge layer too.
-- **Updating the corpus**: rebuild (`build-chunks` + `embed`) and
-  `sudo systemctl restart trussc-docs-ai`.
+- **Updating the corpus**: `./update-corpus.sh --local` on the box (rebuild, guards,
+  swap, restart, health check; see the README). `build-chunks` + `embed` alone only
+  write `chunks.embedded.next.json` and change nothing the service serves.
 - **Model swap**: change `GEN_MODEL` / `EMBED_MODEL` in the unit, `ollama pull` it,
-  restart. (Changing the embed model requires re-running `embed.mjs`.)
+  `sudo systemctl daemon-reload`, restart. Changing the embed model also needs a new
+  corpus embedded with it, published together with the restart:
+  `EMBED_MODEL=<new> ./update-corpus.sh --local` (the same model as the unit; the
+  guards check the new corpus with it, and the swap restarts the service onto it).
 - **Endpoints for clients**: widget → `POST /chat` (SSE); CLI/`tchat` → `POST /ask`;
   agents → `POST /search` (raw chunks).

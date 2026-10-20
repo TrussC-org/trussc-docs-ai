@@ -111,6 +111,9 @@ export const WIDGET_FILE = process.env.WIDGET_FILE || join(SITE_REPO, 'chat-widg
 export const CHUNKS = new URL('./chunks.jsonl', import.meta.url).pathname;
 // EMBEDDED is overridable so an eval can run the current code against another corpus.
 export const EMBEDDED = process.env.EMBEDDED || new URL('./chunks.embedded.json', import.meta.url).pathname;
+// embed.mjs writes the rebuilt corpus here; update-corpus.sh swaps it into EMBEDDED only
+// after the count guard and the fair eval gate pass (the live file stays untouched otherwise).
+export const EMBEDDED_NEXT = process.env.EMBEDDED_NEXT || (/\.json$/.test(EMBEDDED) ? EMBEDDED.replace(/\.json$/, '.next.json') : EMBEDDED + '.next');
 
 // --- Usage stats ------------------------------------------------------------
 // One JSON line per request appended to STATS_LOG (no DB, no deps). Analyze with

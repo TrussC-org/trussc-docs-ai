@@ -1,4 +1,4 @@
-// Embed every chunk's text with the Ollama embedding model → chunks.embedded.json.
+// Embed every chunk's text with the Ollama embedding model → chunks.embedded.next.json (update-corpus.sh swaps it in after the guards).
 // Run after build-chunks.mjs.
 //
 // Incremental: the previous chunks.embedded.json doubles as the cache. Each vector
@@ -8,7 +8,7 @@
 // Force a full re-embed with EMBED_FORCE=1.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { OLLAMA, EMBED_MODEL, CHUNKS, EMBEDDED } from './config.mjs';
+import { OLLAMA, EMBED_MODEL, CHUNKS, EMBEDDED, EMBEDDED_NEXT } from './config.mjs';
 
 const BATCH = 16;   // /api/embed takes an array — batch for throughput
 const FORCE = process.env.EMBED_FORCE === '1';
@@ -125,6 +125,7 @@ for (const c of chunks) { c.vectors = []; c.vhash = []; }
 flat.forEach((f, idx) => { chunks[f.ci].vectors.push(vecs[idx]); chunks[f.ci].vhash.push(f.hash); });
 for (const c of chunks) delete c.embedTexts;
 
-writeFileSync(EMBEDDED, JSON.stringify(chunks));
+// The live corpus (EMBEDDED) is only the vector cache; the result goes to EMBEDDED_NEXT.
+writeFileSync(EMBEDDED_NEXT, JSON.stringify(chunks));
 const totalVecs = chunks.reduce((n, c) => n + c.vectors.length, 0);
-console.log(`wrote ${chunks.length} chunks / ${totalVecs} vectors (dim ${chunks[0]?.vectors[0]?.length}) → ${EMBEDDED}`);
+console.log(`wrote ${chunks.length} chunks / ${totalVecs} vectors (dim ${chunks[0]?.vectors[0]?.length}) → ${EMBEDDED_NEXT}`);

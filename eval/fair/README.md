@@ -23,15 +23,15 @@ missing there, the gate fails with exit 2 and says where it looked.
 ## Use
 
 After embedding, `update-corpus.sh` runs two guards and stops before deploying if either fails.
-- **Count guard:** the new chunk count may not be more than 5% below the committed `chunks.embedded.json`. `CORPUS_MAX_SHRINK=1` allows any drop, e.g. for a deliberate cleanup.
-- **Fair eval:** `gate.py check chunks.embedded.json`.
+- **Count guard:** the new chunk count may not be more than 5% below the live `chunks.embedded.json`. `CORPUS_MAX_SHRINK=1` allows any drop, e.g. for a deliberate cleanup. With no live corpus it stops unless `--first-deploy` is given.
+- **Fair eval:** `gate.py check chunks.embedded.next.json` (the new corpus, before the swap).
 
-After a successful deploy it runs `gate.py accept chunks.embedded.json`, which makes that corpus's retrieval output the new baseline. By hand:
+After a successful deploy (for `--local`, after the health check) it runs `gate.py accept chunks.embedded.json`, the same bytes after the swap, which makes that corpus's retrieval output the new baseline. By hand:
 
 ```bash
 python3 eval/fair/gate.py check chunks.embedded.json    # ~3 min; prints one line
 python3 eval/fair/gate.py accept chunks.embedded.json   # baseline := that corpus's passing check (its retrieval)
-FAIR_EVAL_SKIP=1 ./update-corpus.sh myserver            # deploy without the gate (prints SKIPPED)
+FAIR_EVAL_SKIP=1 ./update-corpus.sh --local             # deploy without the gate (prints SKIPPED)
 ```
 
 `accept` only takes a check that passed, for the same corpus file (by SHA-256), and only once. A failed, blocked or incomplete check leaves nothing to accept. Checks and accepts hold a lock in `$FAIR_EVAL_DIR`, and `update-corpus.sh` holds its own lock, so two rebuilds can't mix baselines.

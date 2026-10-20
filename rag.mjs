@@ -215,6 +215,22 @@ function fillQuota(sorted, otherK, exampleK, addonK) {
     return out;
 }
 
+// An inherited-member stub (build-chunks: meta.base, e.g. RectNode::getGlobalPos →
+// Node::getGlobalPos) stands in for its declaring card. The first hit of a member,
+// stub or base, takes that position with the full base card; later hits of the same
+// member drop out, so five inheritors can't fill the results with one method.
+export function collapseInherited(sorted, byId = chunkById) {
+    const seen = new Set(), out = [];
+    for (const c of sorted) {
+        const baseId = c.meta?.base ? 'symbol:' + c.meta.base : c.id;
+        if (seen.has(baseId)) continue;
+        seen.add(baseId);
+        const base = baseId === c.id ? null : byId(baseId);
+        out.push(base ? { ...base, score: c.score, rrf: c.rrf } : c);
+    }
+    return out;
+}
+
 export async function retrieve(question, k = TOP_K, opts = {}) {
     return retrieveMulti([question], k, opts);
 }
@@ -244,7 +260,7 @@ export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
 
     if (!HYBRID) {
         const sorted = applyLangPolicy(dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score })), lang);
-        return finalize(sorted, k, supK, rerankQuery);
+        return finalize(collapseInherited(sorted), k, supK, rerankQuery);
     }
 
     // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
@@ -258,7 +274,7 @@ export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return finalize(applyLangPolicy(fused, lang), k, supK, rerankQuery);
+    return finalize(collapseInherited(applyLangPolicy(fused, lang)), k, supK, rerankQuery);
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the

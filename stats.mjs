@@ -27,3 +27,10 @@ export function logStat(rec) {
   try { appendFileSync(STATS_LOG, JSON.stringify({ ts: new Date().toISOString(), ...rec }) + '\n'); }
   catch (e) { /* swallow — never let logging affect the request */ }
 }
+
+// Explicit fields keep upstream response objects and credentials out of stats.
+export function pipelineStat(result = {}) {
+  const { path, reason, rounds = 0, queries = [], exists, jevMs = 0, haikuMs = 0, haikuCalls = 0, jevEstimatedTokens = 0, retrievals, errorClass, idOnlyCards = [], idOnlyCardsTotal = 0, estInputTokens = [] } = result;
+  return { idOnlyCards, idOnlyCardsTotal, estInputTokens, path, fallbackReason: reason, rounds, queries, exists, jevMs, haikuMs, haikuCalls, jevEstimatedTokens,
+    ...(errorClass ? { errorClass } : {}), ...(retrievals ? { retrievals } : {}) };
+}

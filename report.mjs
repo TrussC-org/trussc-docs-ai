@@ -1,15 +1,18 @@
 // Summarize the usage log (stats.jsonl). No deps — just reads the JSONL.
 //   node report.mjs                 # all-time
+//   node report.mjs --include-debug # include debug requests
 //   node report.mjs 7              # last 7 days
 //   STATS_LOG=/path node report.mjs
 //   EXCLUDE_IP=hash1,hash2 node report.mjs   # drop your own hashed IP(s) to see real users
 import { readFileSync, existsSync } from 'node:fs';
 import { STATS_LOG } from './config.mjs';
 
-const days = Number(process.argv[2] || 0);
+const args = process.argv.slice(2);
+const days = Number(args.find(arg => arg !== '--include-debug') || 0);
 if (!existsSync(STATS_LOG)) { console.log(`no stats yet (${STATS_LOG})`); process.exit(0); }
 
 let rows = readFileSync(STATS_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+if (!args.includes('--include-debug')) rows = rows.filter(r => r.debug !== true);
 if (days > 0) {
   const cutoff = Date.now() - days * 86400000;
   rows = rows.filter((r) => Date.parse(r.ts) >= cutoff);

@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { chunks, expandQuery, retrieveMulti, buildMessages, chatStream, resolveLinks, SYSTEM, PRIMER } from './rag.mjs';
+import { chunks, retrieveMulti, buildMessages, chatStream, resolveLinks, SYSTEM, PRIMER } from './rag.mjs';
 import { TOP_K, GEN_BACKEND, ANTHROPIC_MODEL, GEN_MODEL, EMBEDDED } from './config.mjs';
 
 const QUESTIONS = [
@@ -144,8 +144,7 @@ async function one([tag, q]) {
     const ids = cache[q];
     let retrieved = ids ? ids.map((id) => byId.get(id)).filter(Boolean) : null;
     if (!retrieved || retrieved.length !== ids.length) {
-        const expanded = await expandQuery(q);
-        retrieved = await retrieveMulti([q, expanded], TOP_K);
+        retrieved = await retrieveMulti([q], TOP_K);
         cache[q] = retrieved.map((c) => c.id);
         cacheDirty = true;
     }

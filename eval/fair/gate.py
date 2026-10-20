@@ -138,6 +138,8 @@ def check(emb):
     drop_candidate()
     if os.environ.get('FAIR_EVAL_SKIP') == '1':
         say('SKIPPED (FAIR_EVAL_SKIP=1)', 0)
+    if not os.environ.get('TYPESAFE_API_KEY'):
+        say('FAILED: TYPESAFE_API_KEY is required for deployed Jev retrieval', 3)
     if JUDGE is None:
         say('FAILED: FAIR_EVAL_JUDGE must be jev or luna', 2)
     if not os.path.isfile(QUESTIONS) or os.path.getsize(QUESTIONS) == 0:
@@ -152,7 +154,7 @@ def check(emb):
     snap = os.path.join(run, 'corpus.json')
     shutil.copyfile(emb, snap)
     ret = os.path.join(run, 'retrieval.json')
-    env = dict(os.environ, EMBEDDED=snap, RERANK='1', STATS='0', FAIR_EVAL_DEBUG='1')
+    env = dict(os.environ, EMBEDDED=snap, RERANK='1', RETRIEVAL='jev', STATS='0', FAIR_EVAL_DEBUG='1')
     with open(log, 'a') as lf:
         try:
             rc = subprocess.run(['node', os.path.join(HERE, 'retrieve.mjs'), QUESTIONS, ret],
@@ -162,7 +164,7 @@ def check(emb):
     corpus = sha256(snap)
     os.unlink(snap)
     if rc != 0:
-        say(f'FAILED: retrieval failed or timed out (rerank server or Ollama down?), see {log}', 3)
+        say(f'FAILED: Jev retrieval failed or timed out (check Jev and embedding availability), see {log}', 3)
     try:
         cand_rows = rows_by_id(json.load(open(ret)), ids)
     except (OSError, ValueError):

@@ -16,8 +16,8 @@ export const TOOLS = [{
         'anything about TrussC C++ code to get the REAL API signatures, conventions ' +
         '(TAU not PI, colors are 0–1 floats, `using namespace tc`, include <TrussC.h>), ' +
         'working example code, and addon usage. Results are ranked by hybrid retrieval ' +
-        '(BM25 over names + bge-m3 semantic, fused with RRF) then re-scored by a ' +
-        'cross-encoder reranker, so plain natural-language queries work well. Example ' +
+        '(BM25 over names + bge-m3 semantic, fused with RRF), then selected by Jev. ' +
+        'A cross-encoder reranker with source quotas is the fallback. Example ' +
         'chunks come back TRIMMED by ' +
         'default (header + start of source); pass full:true, or call trussc_get with the ' +
         'chunk id, to get the whole multi-file source. Use a specific natural-language ' +

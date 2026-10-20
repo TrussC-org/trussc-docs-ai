@@ -1,6 +1,8 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
+import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
+import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, transportClass } from './config.mjs';
 import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
@@ -96,7 +98,7 @@ function bundleScore(qvecs, c) {
 // drawCircle vs drawSphere for "draw a circle"). BM25 adds an exact-term signal so a
 // query word that literally appears lifts its chunk. Tokenizer splits camelCase so
 // "circle" matches "drawCircle". CJK isn't tokenized — dense + the English query
-// expansion already cover non-Latin queries (BM25 just adds Latin/identifier precision).
+// embeddings cover non-Latin queries (BM25 adds Latin/identifier precision).
 function tokenize(s) {
     const out = [];
     for (const m of String(s).matchAll(/[A-Za-z][A-Za-z0-9]*|[0-9]{2,}/g)) {
@@ -231,36 +233,92 @@ export function collapseInherited(sorted, byId = chunkById) {
     return out;
 }
 
+// Metadata stays on the array so existing callers and the MCP interface keep working.
+export function retrievalInfo(list) { return list.retrieval || {}; }
+function withRetrieval(list, info) {
+    Object.defineProperty(list, 'retrieval', { value: info, configurable: true });
+    return list;
+}
+// Bound (security): fill the initial RRF pool within JEV_POOL_TOKENS. Overflow stops pool filling and is not counted.
+export function buildPool(sorted, question) {
+    const pool = [];
+    for (const c of sorted) {
+        if (stateTokens(question, [...pool, c]) > JEV_POOL_TOKENS) break;
+        pool.push(c);
+    }
+    return pool;
+}
+// Each query owns an equal share, including its share of state overhead. Fill
+// before deduplication: an overlap keeps its first slot, with no budget transfer.
+// Bound (security): split the configured pool and 32000 per-question budget evenly across query pools. Overflow stops each share and is not counted.
+export function buildRoundPool(pools, question, searchMore) {
+    if (!pools.length) return [];
+    const tokens = cards => stateTokens(question, cards, undefined, searchMore);
+    const base = tokens([]);
+    const dummy = [{ title: '', text: '' }];
+    // Reserve the largest Noul instruction, allowing for cNN labels up to the
+    // total candidate count. State overhead is then shared once across pools.
+    const instructionTokens = perQuestionTokens(question, dummy, undefined, searchMore) - tokens(dummy)
+        + String(pools.reduce((n, pool) => n + pool.length, 0)).length * JEV_TOKENS_PER_CHAR;
+    const budget = Math.min(JEV_POOL_TOKENS, 32000 - instructionTokens);
+    const share = Math.max(0, (budget - base) / pools.length);
+    const slots = [];
+    for (const pool of pools) {
+        const before = tokens(slots);
+        for (const card of pool) {
+            if (tokens([...slots, card]) - before > share) break;
+            slots.push(card);
+        }
+    }
+    const seen = new Set();
+    return slots.filter(card => { if (seen.has(card.id)) return false; seen.add(card.id); return true; });
+}
+async function selectOrFallback(sorted, question, k, supK, opts, roundPools = null) {
+    let selection = { path: 'fallback', reason: 'operator', exists: null, ms: 0, estimatedTokens: 0 };
+    const original = opts.question || question;
+    const pool = roundPools ? buildRoundPool(roundPools, original, opts.searchMore) : buildPool(sorted, original);
+    if (RETRIEVAL !== 'rerank') selection = await selectCards(original, pool, { ip: opts.ip, searchMore: opts.searchMore });
+    const info = { poolSize: pool.length, path: selection.path, reason: selection.reason, ...(selection.errorClass ? { error: 'selection service error', errorClass: selection.errorClass } : {}), exists: selection.exists, jevMs: selection.ms, jevEstimatedTokens: selection.estimatedTokens, jevTokens: selection.tokens ?? selection.estimatedTokens };
+    const picked = selection.path === 'jev' ? selection.picked : await finalize(typeof sorted === 'function' ? sorted() : sorted, k, supK, question);
+    return withRetrieval(picked, info);
+}
 export async function retrieve(question, k = TOP_K, opts = {}) {
-    return retrieveMulti([question], k, opts);
+    return retrieveMulti([question], k, { ...opts, question });
 }
 
-// Multi-query retrieval: embed several query variants and score each chunk by its
-// BEST similarity across them (max-pool over variants AND the chunk's own vector
-// bundle). A chunk that matches ANY variant surfaces, so a casual query + a
-// keyword-expanded query together find the right chunks. Diagnosis: "おとをならすには？"
-// alone retrieves Node noise; adding "音を鳴らす sound play beep" pulls in the real
-// Sound API. Result is then quota-filled (otherK non-example + exampleK examples).
+// Re-search uses independent per-query RRF pools. Other callers and the existing
+// fallback retain max-pooled dense vectors plus fused BM25 query terms.
 export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
     const lang = opts.lang === 'lua' ? 'lua' : 'cpp';   // 'cpp' = default (Lua hidden); 'lua' = sketch (prefer Lua twin)
-    const qs = [...new Set(queries.map((q) => (q || '').trim()).filter(Boolean))];
+    const normalized = (opts.searchMore ? [opts.question, ...opts.searchMore.queries] : queries).map(q => (q || '').trim()).filter(Boolean);
+    const qs = opts.searchMore ? normalized : [...new Set(normalized)];
     const cs = chunks();
     const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
-    const dense = cs.map((c, i) => [i, bundleScore(vecs, c)]);   // [docIdx, cosine] for every chunk
 
     // Supplementary sources scale with the result size: floor((k-1)/2) each → k=4→1,
     // k=8→3. They never crowd a small result, but grow when the caller asks for more.
     const supK = Math.max(0, Math.floor((k - 1) / 2));
 
-    // Rerank query = all variants joined, so on the chat path the English keyword
-    // expansion (already computed) reaches the cross-encoder too — a JP-only query
-    // otherwise scores weakly against the English-dominant chunks. (MCP/search has a
-    // single variant, so this is just the raw query there.)
+    // Fallback reranking sees all variants from search_more, or the raw question
+    // on the first round and on MCP/search.
     const rerankQuery = qs.join(' ');
+
+    if (opts.searchMore) {
+        // RRF is independent for the original question and every gap query. The
+        // legacy fused ranking is computed only if selection needs fallback.
+        const pools = qs.map((q, qi) => rankPool(cs, [vecs[qi]], [q], lang));
+        return selectOrFallback(() => rankPool(cs, vecs, qs, lang), rerankQuery, k, supK, opts, pools);
+    }
+
+    return selectOrFallback(rankPool(cs, vecs, qs, lang), rerankQuery, k, supK, opts);
+}
+
+function rankPool(cs, vecs, qs, lang) {
+    const dense = cs.map((c, i) => [i, bundleScore(vecs, c)]);
 
     if (!HYBRID) {
         const sorted = applyLangPolicy(dense.sort((a, b) => b[1] - a[1]).map(([i, score]) => ({ ...cs[i], score })), lang);
-        return finalize(collapseInherited(sorted), k, supK, rerankQuery);
+        return collapseInherited(sorted);
     }
 
     // Fuse dense + lexical(BM25) by Reciprocal Rank Fusion. Dense ranks every chunk;
@@ -274,7 +332,7 @@ export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
         if (lexRank.has(i)) rrf += 1 / (RRF_K + lexRank.get(i));
         return { ...c, score: denseScore.get(i), rrf };   // report cosine for readability, rank by rrf
     }).sort((a, b) => b.rrf - a.rrf);
-    return finalize(collapseInherited(applyLangPolicy(fused, lang)), k, supK, rerankQuery);
+    return collapseInherited(applyLangPolicy(fused, lang));
 }
 
 // Deterministic "see also" links built from the retrieved chunks (never from the
@@ -412,11 +470,10 @@ const SKETCH_MODE = [
 // primer; prior turns (plain Q/A text) give conversational memory so follow-ups
 // like "then how do I connect by device name?" resolve; only the CURRENT turn
 // carries the freshly-retrieved context (keeps history compact).
-export function buildMessages(question, retrieved, history = [], pageName = null) {
+export function buildMessages(question, retrieved, history = [], pageName = null, contextOverride = null) {
     // Tag each chunk with its [#id] so the model can cite which ones it used (the
-    // @@USED trail). Feed the FULL text — this is a single-turn RAG answer (not an
-    // agentic loop), so completeness beats token thrift; examples come through whole.
-    const context = retrieved.map((c) => `[#${c.id}]\n${c.text || ''}`).join('\n\n---\n\n');
+    // @@USED trail). Hosted generation caps each card independently of Jev.
+    const context = contextOverride ?? retrieved.map((c) => `[#${c.id}]\n${generationText(c)}`).join('\n\n---\n\n');
     const sketchMode = pageName === 'sketch';
     const sys = sketchMode ? `${SYSTEM}\n\n${SKETCH_MODE}\n\n${PRIMER}` : `${SYSTEM}\n\n${PRIMER}`;
     // Page context: the symbol the user is currently looking at. Only use it when the
@@ -452,22 +509,162 @@ async function* streamLines(stream) {
 // Hosted Claude (Anthropic Messages API) streaming. Same text-delta contract as the
 // Ollama path. Anthropic takes the system prompt top-level (not as a message role),
 // so split it out of our messages array. Embeddings are unaffected (still bge-m3).
-async function* anthropicStream(messages, maxTokens = 1536) {   // headroom so the @@USED trail isn't truncated on long answers
-    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-    const msgs = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: maxTokens, system, messages: msgs, stream: true }),
+async function* anthropicStream(messages, maxTokens = 1536) {
+    yield* anthropicRound(messages, false, maxTokens);
+}
+
+const SEARCH_TOOL = {
+    name: 'search_more', description: 'Search the TrussC documentation again for evidence needed to answer the original question.',
+    input_schema: { type: 'object', properties: {
+        message: { type: 'string', maxLength: 300 },
+        queries: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 } },
+    }, required: ['message', 'queries'], additionalProperties: false },
+};
+// Bound (security): allow a 300-character message and 1–3 queries of at most 200 characters each. Overflow forces a tool-free answer and is not counted.
+export function validSearchInput(input) {
+    return input && typeof input.message === 'string' && input.message.trim().length > 0 && input.message.length <= 300
+        && Array.isArray(input.queries) && input.queries.length >= 1 && input.queries.length <= 3
+        && input.queries.every((q) => typeof q === 'string' && q.trim().length > 0 && q.length <= 200);
+}
+export function mergeSelections(previous, fresh) {
+    const byId = new Map();
+    for (const c of [...previous, ...fresh]) {
+        const old = byId.get(c.id);
+        if (!old || (c.p ?? -1) > (old.p ?? -1)) byId.set(c.id, c);
+    }
+    return [...byId.values()].sort((a, b) => (b.p ?? -1) - (a.p ?? -1));
+}
+// Bound (security): cap the serialized request including system, tools and history using the Jev character estimate. Overflow fails generation with input reason and is counted.
+function anthropicPayload(messages, offerTool, maxTokens = 1536) {
+    return { model: ANTHROPIC_MODEL, max_tokens: maxTokens,
+        system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
+        messages: messages.filter(m => m.role !== 'system'), stream: true,
+        ...(offerTool ? { tools: [SEARCH_TOOL] } : {}) };
+}
+function fitsInput(messages, offerTool, reserveChars = 0) {
+    return (JSON.stringify(anthropicPayload(messages, offerTool)).length + reserveChars) * JEV_TOKENS_PER_CHAR <= HAIKU_MAX_INPUT_TOKENS;
+}
+function generationText(card) {
+    const text = card.text || '';
+    if (GEN_BACKEND !== 'anthropic' || text.length <= HAIKU_CARD_CHARS) return text;
+    // Bound (security): cap generation card text including its marker at a complete line. Overflow truncates text and is not counted.
+    const marker = '(truncated; use trussc_get for the full text)';
+    if (HAIKU_CARD_CHARS < marker.length) return '';
+    const prefix = text.slice(0, HAIKU_CARD_CHARS - marker.length);
+    return prefix.slice(0, prefix.lastIndexOf('\n') + 1) + marker;
+}
+class GenerationFailure extends Error {
+    constructor(reason) { super('generation service error'); this.reason = reason; }
+}
+async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
+    const controller = new AbortController();
+    let timer, reader, timedOut = false;
+    const started = Date.now();
+    // Bound (security): one deadline covers construction, connect and every body read even if abort is ignored. Overflow fails generation with timeout reason and is counted.
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => { timedOut = true; controller.abort(); reject(new GenerationFailure('timeout')); }, HAIKU_TIMEOUT_MS);
     });
-    if (!r.ok) throw new Error(`anthropic ${r.status}: ${await r.text()}`);
-    for await (const line of streamLines(r.body)) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const data = s.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        let j; try { j = JSON.parse(data); } catch { continue; }
-        if (j.type === 'content_block_delta' && j.delta?.text) yield j.delta.text;
+    const checkTime = () => { if (Date.now() - started >= HAIKU_TIMEOUT_MS) throw new GenerationFailure('timeout'); };
+    try {
+        const payload = anthropicPayload(messages, offerTool, maxTokens);
+        const body = JSON.stringify(payload);
+        if (body.length * JEV_TOKENS_PER_CHAR > HAIKU_MAX_INPUT_TOKENS) throw new GenerationFailure('input');
+        checkTime();
+        const r = await Promise.race([deadline, fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST', redirect: 'manual', signal: controller.signal,
+            headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' }, body,
+        })]);
+        if (!r.ok) throw new GenerationFailure(r.status >= 300 && r.status < 400 ? 'redirect' : 'http');
+        reader = r.body.getReader();
+        const blocks = new Map(), text = [];
+        let stopped = false, stopReason, inputTokens = null, outputTokens = null;
+        // Bound (security): cap total response bytes and each SSE line/event at min(response cap, 64 KiB). Overflow fails generation with oversize reason and is counted.
+        // Bound (security): cap tool blocks at 8 and each initial/incremental tool JSON at 8 KiB. Overflow fails generation with tool-blocks/tool-input reason and is counted.
+        const maxFrame = Math.min(HAIKU_MAX_RESPONSE_BYTES, 65536), maxToolBytes = 8192, maxBlocks = 8;
+        let bytes = 0, pending = '', eventBytes = 0, dataLines = [];
+        const decoder = new TextDecoder();
+        async function* events() {
+            while (true) {
+                checkTime();
+                const { value, done } = await Promise.race([deadline, reader.read()]);
+                checkTime();
+                if (done) return;
+                bytes += value.byteLength;
+                if (bytes > HAIKU_MAX_RESPONSE_BYTES) throw new GenerationFailure('oversize');
+                pending += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = pending.indexOf('\n')) >= 0) {
+                    const line = pending.slice(0, nl).replace(/\r$/, ''); pending = pending.slice(nl + 1);
+                    if (Buffer.byteLength(line) > maxFrame) throw new GenerationFailure('oversize');
+                    if (!line) {
+                        if (dataLines.length) yield dataLines.join('\n');
+                        dataLines = []; eventBytes = 0;
+                    } else {
+                        eventBytes += Buffer.byteLength(line) + 1;
+                        if (eventBytes > maxFrame) throw new GenerationFailure('oversize');
+                        if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+                    }
+                }
+                if (Buffer.byteLength(pending) > maxFrame) throw new GenerationFailure('oversize');
+            }
+        }
+        for await (const data of events()) {
+            checkTime();
+            if (!data || data === '[DONE]') continue;
+            let ev;
+            try { ev = JSON.parse(data); } catch { throw new GenerationFailure('invalid'); }
+            const usage = ev.type === 'message_start' ? ev.message?.usage : ev.type === 'message_delta' ? ev.usage : null;
+            if (Number.isFinite(usage?.input_tokens) && usage.input_tokens >= 0) inputTokens = usage.input_tokens;
+            if (Number.isFinite(usage?.output_tokens) && usage.output_tokens >= 0) outputTokens = usage.output_tokens;
+            if (ev.type === 'error') throw new GenerationFailure('upstream');
+            if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+                if (blocks.size >= maxBlocks || blocks.has(ev.index)) throw new GenerationFailure('tool-blocks');
+                if (Buffer.byteLength(JSON.stringify(ev.content_block.input ?? {})) > maxToolBytes) throw new GenerationFailure('tool-input');
+                blocks.set(ev.index, { ...ev.content_block, json: '', bytes: 0 });
+            }
+            if (ev.type === 'content_block_delta') {
+                if (ev.delta?.type === 'input_json_delta' && blocks.has(ev.index)) {
+                    const block = blocks.get(ev.index), part = ev.delta.partial_json;
+                    if (typeof part !== 'string') throw new GenerationFailure('invalid');
+                    block.bytes += Buffer.byteLength(part);
+                    if (block.bytes > maxToolBytes) throw new GenerationFailure('tool-input');
+                    block.json += part;
+                }
+                if (ev.delta?.type === 'text_delta') {
+                    if (typeof ev.delta.text !== 'string') throw new GenerationFailure('invalid');
+                    // Tool-enabled rounds wait for the native tool decision.
+                    if (offerTool) text.push(ev.delta.text); else yield ev.delta.text;
+                }
+            }
+            if (ev.type === 'message_delta') stopReason = ev.delta?.stop_reason;
+            if (ev.type === 'message_stop') { stopped = true; break; }
+        }
+        if (!stopped) throw new GenerationFailure('incomplete');
+        if (metrics) {
+            if (inputTokens !== null) metrics.inputTokens = (metrics.inputTokens ?? 0) + inputTokens;
+            if (outputTokens !== null) metrics.outputTokens = (metrics.outputTokens ?? 0) + outputTokens;
+        }
+        if (blocks.size || stopReason === 'tool_use') {
+            if (!offerTool) throw new GenerationFailure('unexpected-tool');
+            if (blocks.size !== 1) return { invalid: true };
+            const tool = [...blocks.values()][0];
+            try { tool.input = tool.json ? JSON.parse(tool.json) : tool.input; } catch { return { invalid: true }; }
+            if (tool.name !== 'search_more' || typeof tool.id !== 'string' || !tool.id || !validSearchInput(tool.input)) return { invalid: true };
+            return { tool };
+        }
+        for (const d of text) yield d;
+        return {};
+    } catch (error) {
+        // Normalize every keyed boundary exception, including native header
+        // validation and body iteration. Never attach the original error/cause.
+        const safe = new Error('generation service error');
+        safe.errorReason = timedOut ? 'timeout' : error instanceof GenerationFailure ? error.reason : 'transport';
+        safe.errorClass = transportClass(error);
+        throw safe;
+    } finally {
+        clearTimeout(timer); controller.abort();
+        // Do not wait for an upstream that ignores cancellation after message_stop.
+        if (reader) { try { Promise.resolve(reader.cancel()).catch(() => {}); } catch { /* cancellation cannot expose an upstream exception */ } }
     }
 }
 
@@ -488,30 +685,6 @@ export async function* chatStream(messages) {
 }
 
 async function collect(stream) { let s = ''; for await (const d of stream) s += d; return s; }
-
-// One-shot, non-streaming generation with thinking off — for tiny fast side-calls
-// (query expansion). Small num_ctx + capped num_predict keep it ~0.3–0.6s.
-async function genQuick(messages, numPredict = 64) {
-    if (GEN_BACKEND === 'anthropic') return collect(anthropicStream(messages, numPredict));
-    const r = await fetch(`${OLLAMA}/api/chat`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: GEN_MODEL, think: false, stream: false, messages, keep_alive: KEEP_ALIVE, options: { num_ctx: 2048, num_predict: numPredict } }),
-    });
-    if (!r.ok) throw new Error(`gen ${r.status}: ${await r.text()}`);
-    return (await r.json()).message?.content || '';
-}
-
-// Rewrite a casual/short/hiragana question into a keyword-rich search query so it
-// matches the (English) reference chunks. Output is one short line; the original
-// language words are kept, plus likely English API/domain terms. Best-effort — on
-// any error returns '' and the caller falls back to the original query alone.
-const EXPAND_SYS = 'You turn a beginner question about the TrussC C++ creative-coding framework (an openFrameworks-like library) into a short search query for a documentation index. Output ONE line of space-separated keywords only — no explanation. Include the likely ENGLISH API names and domain terms (e.g. sound play audio beep; mouse position drawCircle; gradient color lerp), and also keep the key words from the original question. Guess the relevant English terms even if the question is vague.';
-export async function expandQuery(question) {
-    try {
-        const out = await genQuick([{ role: 'system', content: EXPAND_SYS }, { role: 'user', content: question }]);
-        return out.replace(/\s+/g, ' ').trim().slice(0, 200);
-    } catch { return ''; }
-}
 
 // --- Deterministic ground-truth check ---------------------------------------
 // The real symbol set, derived from the corpus itself (no extra file needed on
@@ -552,19 +725,15 @@ function validMembersOf(owner) {
     return [...apiIndex().qualified].filter((q) => q.startsWith(pre)).map((q) => q.slice(pre.length));
 }
 
-// Retrieve with conversational memory (last 2 user turns sharpen the query), merge
-// in the carried-over "pinned" chunks the model flagged on earlier turns, then
+// Retrieve with the raw question, merge in carried-over "pinned" chunks, then
 // assemble the prompt. Shared by answer() and answerStream().
-async function prep(question, history, k, page, pinned = []) {
+async function prep(question, history, k, page, pinned = [], opts = {}) {
     // TrussSketch (trussc.org/sketch) sends page:'sketch' — the Lua playground mode.
     // It steers retrieval to the Lua corpus view, force-pins the Lua gotchas card, and
     // activates the SKETCH_MODE Lua persona in buildMessages.
     const sketchMode = page === 'sketch';
     if (sketchMode) pinned = ['lua:gotchas', ...pinned];   // auto-pin gotchas (deduped by pinSeen below)
-    const recentUser = history.filter((m) => m.role === 'user').slice(-2).map((m) => m.content);
-    const base = [...recentUser, question].join('\n');
-    const expanded = await expandQuery(question);   // keyword-rich variant (English API terms)
-    const fresh = await retrieveMulti([base, expanded], k, { lang: sketchMode ? 'lua' : 'cpp' });
+    const fresh = await retrieve(question, k, { ...opts, lang: sketchMode ? 'lua' : 'cpp' });
 
     // Carried-over importance: resolve the LLM-curated pinned ids (recent-first) to
     // chunks, take the first PIN_K that still exist. They persist across turns so a
@@ -587,7 +756,14 @@ async function prep(question, history, k, page, pinned = []) {
     const pc = pageChunk(page);
     const used = new Set();
     const ordered = [];
-    const add = (c, extra) => { if (c && !used.has(c.id)) { used.add(c.id); ordered.push(extra ? { ...c, ...extra } : c); } };
+    const probabilities = new Map(fresh.filter((c) => typeof c.p === 'number').map((c) => [c.id, c.p]));
+    const add = (c, extra) => {
+        if (c && !used.has(c.id)) {
+            used.add(c.id);
+            // Page/pin priority must not discard the selection probability used by later merges.
+            ordered.push({ ...c, ...extra, ...(probabilities.has(c.id) ? { p: probabilities.get(c.id) } : {}) });
+        }
+    };
     if (pc) add(pc, { score: 1 });
     for (const c of pinnedChunks) add(c);
     for (const c of fresh) add(c);
@@ -598,7 +774,7 @@ async function prep(question, history, k, page, pinned = []) {
     // Sketch mode passes 'sketch' straight through so buildMessages activates the Lua
     // persona (pageChunk('sketch') is null, so it never travels as a reference-page hint).
     const pageName = sketchMode ? 'sketch' : (pc ? pc.title : null);
-    return { retrieved: ordered, links, messages: buildMessages(question, ordered, history, pageName) };
+    return { retrieved: ordered, links, info: retrievalInfo(fresh), pageName, messages: buildMessages(question, ordered, history, pageName) };
 }
 
 // Parse the model's `@@USED:` trail off the end of its answer → { answer, reported }.
@@ -740,18 +916,13 @@ function resolveProse(text, sketchMode) {
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
 // Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
-export async function answer(question, history = [], page = null, pinned = [], k = TOP_K) {
-    const sketchMode = page === 'sketch';
-    const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
-    let { answer: text, reported } = splitUsed(await collect(chatStream(messages)));
-    let corrected = false;
-    const bad = findFabrications(text);
-    if (bad.size) {
-        corrected = true;
-        ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
+export async function answer(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
+    let retrieved = [], links = [], final;
+    for await (const ev of answerStream(question, history, page, pinned, k, opts)) {
+        if (ev.type === 'meta') { retrieved = ev.retrieved; links = ev.links; }
+        if (ev.type === 'final') final = ev;
     }
-    const usedIds = usedIdsOf(reported, text, retrieved);
-    return { retrieved, links, text: resolveLinks(text, sketchMode), corrected, usedIds };
+    return { ...final, retrieved, links };
 }
 
 // Streaming variant for the widget. Yields events:
@@ -762,9 +933,33 @@ export async function answer(question, history = [], page = null, pinned = [], k
 //   { type:'final', text, corrected }   once, at the end (for logging)
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
-export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K) {
+// Bound (security): pack full capped cards by descending p within the serialized input budget. Overflow keeps cards by id only and is counted.
+function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256) {
+    const parts = cards.map(card => shownIds.has(card.id) ? `[#${card.id}] already shown above` : `[#${card.id}]`);
+    if (!fitsInput(render(parts.join('\n\n---\n\n')), offerTool, reserveChars)) return null;
+    const added = [];
+    const priority = cards.map((card, i) => ({ card, i })).sort((a, b) => (b.card.p ?? -1) - (a.card.p ?? -1));
+    for (const { card, i } of priority) {
+        if (shownIds.has(card.id)) continue;
+        const old = parts[i]; parts[i] = `[#${card.id}]\n${generationText(card)}`;
+        if (fitsInput(render(parts.join('\n\n---\n\n')), offerTool, reserveChars)) added.push(card.id);
+        else parts[i] = old;
+    }
+    return { idOnlyCards: cards.filter(card => !shownIds.has(card.id) && !added.includes(card.id)).length, messages: render(parts.join('\n\n---\n\n')), added };
+}
+export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
     const sketchMode = page === 'sketch';
-    const { retrieved, links, messages } = await prep(question, history, k, page, pinned);
+    const prepared = await prep(question, history, k, page, pinned, opts);
+    let { retrieved, links, messages } = prepared;
+    let info = prepared.info;
+    const stats = { rounds: 1, queries: [question], retrievals: [info], haikuMs: 0, haikuCalls: 0 };
+    const traces = [];
+    const startTrace = (queries, picked = retrieved) => {
+        const trace = { queries, picked, info, haikuCalls: 0, idOnlyCards: 0, haiku: { estInputTokens: [], ms: 0, inputTokens: null, outputTokens: null }, message: null };
+        traces.push(trace);
+        return trace;
+    };
+    let trace = startTrace([question]);
     yield { type: 'meta', retrieved, links };
 
     // Stream tokens, but hold back the @@USED trail so it never reaches the user. A
@@ -772,7 +967,99 @@ export async function* answerStream(question, history = [], page = null, pinned 
     // is still caught before any of it is shown.
     const MARK = '@@USED:';
     let full = '', shown = '', emitted = 0, cut = -1;
-    for await (const d of chatStream(messages)) {
+    const generation = GEN_BACKEND === 'anthropic'
+        ? researchAnswer()
+        : chatStream(messages);
+    // Bound (security): allow at most MAX_SEARCH_ROUNDS + 1 Haiku calls including correction and recovery. Overflow fails generation with calls reason and is counted.
+    async function* callHaiku(input, offerTool) {
+        if (stats.haikuCalls >= MAX_SEARCH_ROUNDS + 1) {
+            const error = new Error('generation service error');
+            Object.assign(error, { errorReason: 'calls', errorClass: 'Error', haikuCalls: stats.haikuCalls });
+            throw error;
+        }
+        stats.haikuCalls++; trace.haikuCalls++;
+        trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool)).length * JEV_TOKENS_PER_CHAR);
+        const started = Date.now();
+        try { return yield* anthropicRound(input, offerTool, 1536, trace.haiku); }
+        catch (error) { Object.assign(error, generationCounts()); throw error; }
+        finally {
+            const elapsed = Date.now() - started;
+            stats.haikuMs += elapsed; trace.haiku.ms += elapsed;
+        }
+    }
+    async function* researchAnswer() {
+        const existsHint = () => `Jev answer-exists probability: ${info.exists ?? 'unknown'}. This is only a hint; if low, prefer searching again.`;
+        const finalNote = '\nThis is the final round. Answer now using the available evidence and state any gaps.';
+        messages[0].content += '\nUse search_more only when more evidence is needed. When calling it, provide no answer text. Its message must be short and in the user\'s language.';
+        let noMoreSearch = false;
+        const renderInitial = context => {
+            const user = buildMessages(question, [], [], prepared.pageName, context).at(-1);
+            user.content += `\n\n${existsHint()}`;
+            return [...messages.slice(0, -1), user];
+        };
+        let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1);
+        if (!packed) {
+            // Bound (security): fixed history, system and question must fit the input budget. Overflow drops oldest external turns and disables search and is not counted.
+            noMoreSearch = true;
+            while (!packed && messages.length > 2) {
+                messages.splice(1, 1);
+                packed = packGenerationCards(retrieved, new Set(), renderInitial, false);
+            }
+            packed ??= packGenerationCards(retrieved, new Set(), renderInitial, false, 0);
+        }
+        if (!packed) {
+            const error = new Error('generation service error');
+            Object.assign(error, { errorReason: 'input', errorClass: 'Error', haikuCalls: 0 });
+            throw error;
+        }
+        trace.idOnlyCards = packed.idOnlyCards;
+        messages = packed.messages;
+        const shownIds = new Set(packed.added);
+        async function* forceAnswer() {
+            const final = messages.map(m => ({ ...m }));
+            final[0].content += finalNote;
+            return yield* callHaiku(fitsInput(final, false) ? final : messages, false);
+        }
+        // Bound (security): cap search rounds at MAX_SEARCH_ROUNDS. Overflow forces an answer without tools and is not counted.
+        for (let round = 1; round <= MAX_SEARCH_ROUNDS; round++) {
+            stats.rounds = round;
+            const offerTool = round < MAX_SEARCH_ROUNDS && !noMoreSearch;
+            if (!offerTool && fitsInput([{ ...messages[0], content: messages[0].content + finalNote }, ...messages.slice(1)], false)) messages[0].content += finalNote;
+            const response = yield* callHaiku(messages, offerTool);
+            if (response.invalid) {
+                // Invalid input cannot initiate retrieval; recovery uses the same counter.
+                yield* forceAnswer(); return;
+            }
+            if (!response.tool) return;
+            const { message, queries } = response.tool.input;
+            const assistant = { role: 'assistant', content: [{ type: 'tool_use', id: response.tool.id, name: 'search_more', input: response.tool.input }] };
+            const renderResult = cards => [...messages, assistant, { role: 'user', content: [{ type: 'tool_result', tool_use_id: response.tool.id,
+                content: `Search completed.\n\n${cards}\n\n${existsHint()}\nAnswer the original question using all cards shown above, or search again if needed.` }] }];
+            if (!fitsInput(renderResult(''), false, 256)) { yield* forceAnswer(); return; }
+            trace.message = message;
+            yield { research: { round: round + 1, message, queries } };
+            stats.queries.push(...queries);
+            const fresh = await retrieveMulti([question, ...queries], k, { ...opts, question, searchMore: { message, queries }, lang: sketchMode ? 'lua' : 'cpp' });
+            info = retrievalInfo(fresh); stats.retrievals.push(info);
+            const nextTool = round + 1 < MAX_SEARCH_ROUNDS;
+            packed = packGenerationCards(fresh, shownIds, renderResult, nextTool);
+            if (!packed) {
+                noMoreSearch = true;
+                packed = packGenerationCards(fresh, shownIds, renderResult, false, 0);
+            }
+            if (!packed) { yield* forceAnswer(); return; }
+            messages = packed.messages;
+            for (const id of packed.added) shownIds.add(id);
+            retrieved = mergeSelections(retrieved, fresh);
+            trace = startTrace([question, ...queries], fresh);
+            trace.idOnlyCards = packed.idOnlyCards;
+            links = buildLinks(retrieved);
+            yield { meta: true };
+        }
+    }
+    for await (const d of generation) {
+        if (d?.research) { yield { type: 'research', ...d.research }; continue; }
+        if (d?.meta) { yield { type: 'meta', retrieved, links }; continue; }
         full += d;
         if (cut >= 0) continue;                  // already past the marker — swallow the rest
         const idx = full.indexOf(MARK);
@@ -789,15 +1076,40 @@ export async function* answerStream(question, history = [], page = null, pinned 
 
     let { answer: text, reported } = splitUsed(full);
     const bad = findFabrications(text);
-    if (bad.size) {
-        ({ answer: text, reported } = splitUsed(await collect(chatStream(correctionMessages(messages, text, bad)))));
+    let usedIds;
+    if (bad.size && (GEN_BACKEND !== 'anthropic' || stats.haikuCalls < MAX_SEARCH_ROUNDS + 1)) {
+        let correction = correctionMessages(messages, text, bad);
+        if (GEN_BACKEND === 'anthropic') {
+            // Only supplemental correction turns may shrink; retained native
+            // search history and previously supplied cards remain intact.
+            while (!fitsInput(correction, false)) {
+                const extra = correction.slice(-2).sort((a, b) => b.content.length - a.content.length)[0];
+                if (extra.content.length < 64) {
+                    const error = new Error('generation service error');
+                    Object.assign(error, { errorReason: 'input', errorClass: 'Error', haikuCalls: stats.haikuCalls });
+                    throw error;
+                }
+                // Bound (security): correction additions must fit beside retained native history. Overflow halves supplemental text and is not counted.
+                extra.content = extra.content.slice(0, Math.floor(extra.content.length / 2));
+            }
+        }
+        ({ answer: text, reported } = splitUsed(await collect(GEN_BACKEND === 'anthropic'
+            ? callHaiku(correction, false) : chatStream(correction))));
+        usedIds = usedIdsOf(reported, text, retrieved);
         text = resolveLinks(text, sketchMode);
-        yield { type: 'replace', text };   // fabrication fix (also link-resolved)
+        yield { type: 'replace', text };
     } else {
+        // Collect implicit [[...]] ids before deterministic link resolution, from
+        // the final draft or corrected answer (shared by /ask and /chat).
+        usedIds = usedIdsOf(reported, text, retrieved);
         const resolved = resolveLinks(text, sketchMode);
-        if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }  // had tags/URLs/trail → swap to resolved
+        if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }
         else text = resolved;
     }
-    const usedIds = usedIdsOf(reported, text, retrieved);
-    yield { type: 'final', text, corrected: bad.size > 0, usedIds };
+    function generationCounts() {
+        const idOnlyCards = traces.map(t => t.idOnlyCards);
+        return { haikuCalls: stats.haikuCalls, idOnlyCards, idOnlyCardsTotal: idOnlyCards.reduce((a, b) => a + b, 0),
+            estInputTokens: traces.flatMap(t => t.haiku.estInputTokens) };
+    }
+    yield { type: 'final', ...generationCounts(), text, corrected: bad.size > 0, usedIds, traces, ...stats, ...info, jevMs: stats.retrievals.reduce((n, r) => n + r.jevMs, 0), jevEstimatedTokens: stats.retrievals.reduce((n, r) => n + r.jevEstimatedTokens, 0) };
 }

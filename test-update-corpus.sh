@@ -131,4 +131,32 @@ expect exit "$code" 2; expect checks "$(n check)" 0
 setup 100; code=$(STUB_COUNT=100 TRUSSC_DEPLOY_HOST=somehost run --local)
 expect "env host exit" "$code" 2; expect checks "$(n check)" 0
 
+echo "default restart uses polkit, auth failures hint without sudo fallback"
+for auth in ok 'Access denied' 'Interactive authentication required' 'Authorization failed' unrelated; do
+  setup 100
+  mkdir "$T/bin"
+  cat > "$T/bin/systemctl" <<'SH'
+#!/usr/bin/env bash
+echo "systemctl $*" >> log
+if [ "$STUB_AUTH" != ok ]; then echo "$STUB_AUTH" >&2; exit 1; fi
+SH
+  cat > "$T/bin/sudo" <<'SH'
+#!/usr/bin/env bash
+echo unexpected-sudo >> log
+exit 99
+SH
+  chmod +x "$T/bin/systemctl" "$T/bin/sudo"
+  code=$(cd "$T" && env -u TRUSSC_RESTART_CMD PATH="$T/bin:$PATH" STUB_AUTH="$auth" STUB_COUNT=100 TRUSSC_SERVICE=custom-service TRUSSC_HEALTH_WAIT=0 TRUSSC_HEALTH_CMD="printf '%s' '{\"ok\":true,\"chunks\":100}'" bash ./update-corpus.sh --local > out 2>&1; echo $?)
+  expect "no sudo ($auth)" "$(grep -c unexpected-sudo "$T/log")" 0
+  if [ "$auth" = ok ]; then
+    expect exit "$code" 0
+    expect default-command "$(grep -c '^systemctl restart custom-service$' "$T/log")" 1
+  else
+    expect exit "$code" 1; expect live "$(live)" old100
+    expect rollback-command "$(grep -c '^systemctl restart custom-service$' "$T/log")" 2
+    if [ "$auth" = unrelated ]; then want=0; else want=2; fi
+    expect auth-hint "$(grep -c "Hint: rerun with TRUSSC_RESTART_CMD='sudo systemctl restart custom-service'" "$T/out")" "$want"
+  fi
+done
+
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

@@ -1,50 +1,71 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TrussC docs-chat — demo</title>
+<title>TrussC docs-chat demo</title>
 <style>
-    :root {
-        --color-bg: #0a0a0b; --color-bg-card: #16161a; --color-bg-alt: #111113; --color-border: #27272a;
-        --color-text: #e8e8ed; --color-text-muted: #8b8b93;
-        --color-primary: #6366f1; --color-primary-light: #818cf8; --color-accent: #22d3ee;
-        --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-        --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); height: 100vh; }
-    .page-hint {
-        position: fixed; inset: 0; display: flex; flex-direction: column;
-        align-items: center; justify-content: center; gap: 10px; color: var(--color-text-muted); text-align: center;
-    }
-    .page-hint h1 { color: var(--color-primary-light); font-size: 22px; font-weight: 600; }
-    .page-hint kbd {
-        font-family: var(--font-mono); background: var(--color-bg-card); border: 1px solid var(--color-border);
-        border-bottom-width: 2px; border-radius: 5px; padding: 2px 8px; color: var(--color-text);
-    }
-    .page-hint .sub { font-size: 13px; }
-    .page-hint .offline { color: #d7a657; }
+body { max-width: 850px; margin: 3rem auto; padding: 1rem; background: #111; color: #eee; font: 16px system-ui; }
+form { display: flex; gap: .5rem; } input { flex: 1; } input,button { padding: .8rem; }
+#answer,.filler { white-space: pre-wrap; } .research { color: #a9b1ff; margin-bottom: 1rem; }
+#answer { margin: 1rem 0; } a { color: #a9b1ff; }
 </style>
-</head>
-<body>
-    <div class="page-hint">
-        <h1>TrussC docs-chat</h1>
-        <div>Press <kbd>F1</kbd> to summon the assistant (hidden easter-egg trigger)</div>
-        <div id="status" class="sub">checking server…</div>
-    </div>
-
-    <!-- The widget is the production artifact: it injects its own UI and is
-         health-gated. Same-origin here (the dev server serves both). -->
-    <script defer src="/chat-widget.js"></script>
-
-    <script>
-    // Demo-only: surface server status in the backdrop (the widget gates itself).
-    fetch('/health').then(r => r.json()).then(j => {
-        document.getElementById('status').innerHTML = j.ok
-            ? `server online · ${j.chunks} chunks indexed · press F1`
-            : '<span class="offline">server offline</span>';
-    }).catch(() => { document.getElementById('status').innerHTML = '<span class="offline">server offline</span>'; });
-    </script>
-</body>
+<h1>TrussC docs-chat</h1>
+<p id="status">checking server…</p>
+<form id="form"><input id="question" aria-label="Question" required><button id="send">Send</button></form>
+<div id="research" aria-live="polite"></div>
+<div id="answer" aria-live="polite"></div>
+<div id="links"></div>
+<script>
+// Standalone dev harness. The production site widget is maintained in trussc.org.
+const $ = (id) => document.getElementById(id);
+const lang = (navigator.language || 'en').slice(0, 2);
+const researchLabel = (queries) => ({
+    ja: `🔎 「${queries.join(' / ')}」で再検索中…`,
+    ko: `🔎 「${queries.join(' / ')}」로 다시 검색 중…`,
+    en: `🔎 Searching again for “${queries.join(' / ')}”…`,
+}[lang] || `🔎 Searching again for “${queries.join(' / ')}”…`);
+fetch('/health').then(r => r.json()).then(j => { $('status').textContent = j.ok ? `server online · ${j.chunks} chunks` : 'server offline'; })
+    .catch(() => { $('status').textContent = 'server offline'; });
+$('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if ($('send').disabled) return;
+    $('question').disabled = $('send').disabled = true;
+    $('answer').textContent = ''; $('research').textContent = ''; $('links').textContent = '';
+    let completed = false;
+    function receive(type, data) {
+        if (type === 'research') {
+            const round = document.createElement('div'); round.className = 'research';
+            const filler = document.createElement('div'); filler.className = 'filler'; filler.textContent = data.message;
+            const status = document.createElement('div'); status.textContent = `${data.round}: ${researchLabel(data.queries)}`;
+            round.append(filler, status); $('research').append(round);
+        } else if (type === 'token') $('answer').textContent += data;
+        else if (type === 'replace') $('answer').textContent = data;
+        else if (type === 'links') {
+            $('links').textContent = '';
+            for (const link of data) {
+                const a = document.createElement('a'); a.href = link.url; a.textContent = link.label; a.style.marginRight = '1rem'; $('links').append(a);
+            }
+        } else if (type === 'done') completed = true;
+        else if (type === 'error') throw new Error(data);
+    }
+    try {
+        const response = await fetch('/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: $('question').value }) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const reader = response.body.getReader(), decoder = new TextDecoder(); let pending = '';
+        while (true) {
+            const { done, value } = await reader.read(); if (done) break;
+            pending += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+            let end;
+            while ((end = pending.indexOf('\n\n')) >= 0) {
+                const lines = pending.slice(0, end).split('\n'); pending = pending.slice(end + 2);
+                const type = lines.find(l => l.startsWith('event: '))?.slice(7);
+                const data = lines.filter(l => l.startsWith('data: ')).map(l => l.slice(6)).join('\n');
+                if (type && data) receive(type, JSON.parse(data));
+            }
+        }
+        if (!completed) throw new Error('Stream ended before the answer completed');
+    } catch (error) { $('answer').textContent += `\n${error.message}`; }
+    finally { $('question').disabled = $('send').disabled = false; $('question').focus(); }
+});
+</script>
 </html>

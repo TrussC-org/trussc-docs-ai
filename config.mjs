@@ -122,3 +122,50 @@ export const EMBEDDED_NEXT = process.env.EMBEDDED_NEXT || (/\.json$/.test(EMBEDD
 export const STATS = process.env.STATS !== '0';
 export const STATS_LOG = process.env.STATS_LOG || new URL('./stats.jsonl', import.meta.url).pathname;
 export const STATS_SALT = process.env.STATS_SALT || 'trussc-docs-ai-dev';
+
+// Jev card selection. Credentials are read only from the service environment.
+function numberEnv(name, fallback, { integer = false } = {}) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+        console.warn(`Warning: ${name} must be finite and non-negative; using default`);
+        return fallback;
+    }
+    return integer ? Math.floor(n) : n;
+}
+export const MAX_BODY_BYTES = numberEnv('MAX_BODY_BYTES', 262144, { integer: true });
+export const TYPESAFE_API_KEY = process.env.TYPESAFE_API_KEY || '';
+export const JEV_URL = process.env.JEV_URL || 'https://api.typesafe.ai/v1/systemone';
+export const JEV_MODEL = process.env.JEV_MODEL || 'jev-latest';
+export const JEV_POOL_TOKENS = numberEnv('JEV_POOL_TOKENS', 28000);
+export const JEV_TOKENS_PER_CHAR = numberEnv('JEV_TOKENS_PER_CHAR', 0.4);
+export const JEV_CARD_CHARS = numberEnv('JEV_CARD_CHARS', 2000, { integer: true });
+export const JEV_TIMEOUT_MS = numberEnv('JEV_TIMEOUT_MS', 3000);
+export const JEV_PICK = process.env.JEV_PICK === 'fixed' ? 'fixed' : 'threshold';
+export const JEV_PICK_K = numberEnv('JEV_PICK_K', 8, { integer: true });
+export const JEV_PICK_MIN_P = numberEnv('JEV_PICK_MIN_P', 0.4);
+export const JEV_PICK_MIN = numberEnv('JEV_PICK_MIN', 4, { integer: true });
+export const JEV_PICK_MAX = numberEnv('JEV_PICK_MAX', 16, { integer: true });
+export const JEV_RATE_MAX = numberEnv('JEV_RATE_MAX', 20, { integer: true });
+export const JEV_RATE_WIN_MS = numberEnv('JEV_RATE_WIN_MS', 60000);
+export const JEV_DAILY_TOKENS = numberEnv('JEV_DAILY_TOKENS', 20000000);
+export const RETRIEVAL = process.env.RETRIEVAL === 'rerank' ? 'rerank' : 'jev';
+// Bound (configuration): operator-only search rounds stay within 1..10. Overflow clamps with a warning and is not counted.
+const rounds = numberEnv('MAX_SEARCH_ROUNDS', 3);
+export const MAX_SEARCH_ROUNDS = Math.floor(Math.max(1, Math.min(10, rounds)));
+if (rounds < 1 || rounds > 10) console.warn('Warning: MAX_SEARCH_ROUNDS clamped to 1..10');
+
+// Local limits on hosted generation time, output and paid input; enforced in rag.mjs.
+export const HAIKU_TIMEOUT_MS = numberEnv('HAIKU_TIMEOUT_MS', 60000);
+export const HAIKU_MAX_RESPONSE_BYTES = numberEnv('HAIKU_MAX_RESPONSE_BYTES', 1048576, { integer: true });
+export const HAIKU_CARD_CHARS = numberEnv('HAIKU_CARD_CHARS', 8000, { integer: true });
+export const HAIKU_MAX_INPUT_TOKENS = numberEnv('HAIKU_MAX_INPUT_TOKENS', 24000);
+// Exception messages from keyed transports are never retained. Only known native
+// class names are useful diagnostics; arbitrary upstream names are not trusted.
+export function transportClass(error) {
+    try {
+        const name = error?.constructor?.name;
+        return ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'DOMException', 'AbortError'].includes(name) ? name : 'Error';
+    } catch { return 'Error'; }
+}

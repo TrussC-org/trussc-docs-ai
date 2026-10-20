@@ -19,7 +19,7 @@
 # A failed guard leaves the live corpus untouched. A failed restart or health check, or an
 # interruption after the swap, puts the previous corpus back and restarts again.
 # Roll back by hand to the corpus before the last swap:
-#   mv chunks.embedded.prev.json chunks.embedded.json && sudo systemctl restart trussc-docs-ai
+#   mv chunks.embedded.prev.json chunks.embedded.json && systemctl restart trussc-docs-ai
 #
 # The corpus is built, checked and served from the same checkout, so the runtime code
 # (rag.mjs, server.mjs…) the service restarts with always matches the corpus format.
@@ -61,8 +61,23 @@ LIVE=chunks.embedded.json NEXT=chunks.embedded.next.json PREV=chunks.embedded.pr
 # Pin embed.mjs's cache and output to these files: a caller's EMBEDDED/EMBEDDED_NEXT must
 # never make the embedder write over the live corpus before the guards have run.
 export EMBEDDED="$PWD/$LIVE" EMBEDDED_NEXT="$PWD/$NEXT"
-RESTART="${TRUSSC_RESTART_CMD:-sudo systemctl restart $SVC}"
+RESTART="${TRUSSC_RESTART_CMD:-systemctl restart $SVC}"
 HEALTH="${TRUSSC_HEALTH_CMD:-curl -fsS --max-time 5 http://127.0.0.1:$PORT/health}"
+# Capture stderr in memory; preserve it and never retry with sudo automatically.
+restart_service() {
+  local restart_stderr status
+  if restart_stderr=$(exec sh -c "$RESTART" 2>&1 >&3 3>&-); then
+    [ -z "$restart_stderr" ] || printf '%s\n' "$restart_stderr" >&2
+    return 0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$restart_stderr" >&2
+  if [[ "$restart_stderr" =~ [Aa]ccess[[:space:]]denied|[Ii]nteractive[[:space:]]authentication[[:space:]]required|[Aa]uthentication[[:space:]](is[[:space:]])?required|[Aa]uthorization[[:space:]](failed|required) ]]; then
+    echo "  Hint: rerun with TRUSSC_RESTART_CMD='sudo systemctl restart $SVC'" >&2
+  fi
+  return "$status"
+} 3>&1
 count() { node -e 'try{const a=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log(Array.isArray(a)?a.length:"bad")}catch{console.log("bad")}' "$1"; }
 
 echo "▶ 0/3  fetch release notes (GitHub)…"
@@ -114,7 +129,7 @@ SWAPPED=0; HADLIVE=0
 rollback() {
   if [ "$HADLIVE" = 1 ]; then mv -f "$PREV" "$LIVE"; echo "↩ restored the previous corpus from ${PREV}"
   else rm -f "$LIVE"; echo "↩ removed the new corpus (first deploy: there was none before)"; fi
-  sh -c "$RESTART" || echo "  (the restart after the rollback failed too; check the service by hand)"
+  restart_service || echo "  (the restart after the rollback failed too; check the service by hand)"
 }
 on_exit() {
   local code=$?
@@ -139,8 +154,8 @@ SWAPPED=1
 mv -f "$NEXT" "$LIVE"
 echo "✔ swapped in the new corpus (the previous one is kept as ${PREV})"
 
-echo "▶ restart ${SVC} (sudo — you may be prompted)…"
-if ! sh -c "$RESTART"; then echo "✘ restart failed"; exit 1; fi
+echo "▶ restart ${SVC}…"
+if ! restart_service; then echo "✘ restart failed"; exit 1; fi
 ok=0
 # Bound (realtime): wait at most ten health probes (about 30 s) for the restarted service. Overflow rolls back to the previous corpus and exits non-zero.
 for _ in 1 2 3 4 5 6 7 8 9 10; do

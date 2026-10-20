@@ -22,6 +22,8 @@ Environment=OLLAMA_URL=http://127.0.0.1:11434
 Environment=GEN_MODEL=qwen3.5:4b
 Environment=EMBED_MODEL=bge-m3
 Environment=NUM_CTX=24000
+# Production ranks with the cross-encoder reranker (rerank-server/, 127.0.0.1:8790).
+Environment=RERANK=1
 # 4B (~3.6GB) + bge-m3 (~0.7GB) both fit the 8GB A1000 on GPU with headroom, so
 # embeddings stay on GPU (fast). Set EMBED_ON_CPU=1 only if VRAM gets tight.
 Environment=REF_BASE=https://trussc.org

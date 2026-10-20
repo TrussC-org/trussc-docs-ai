@@ -16,6 +16,12 @@ const FORCE = process.env.EMBED_FORCE === '1';
 // (400) and silently cuts much longer ones. Cut every input to an estimated budget first.
 // Overflow is truncated and listed in the summary line.
 const TOKEN_BUDGET = Number(process.env.EMBED_TOKEN_BUDGET || 1900);
+if (!Number.isInteger(TOKEN_BUDGET) || TOKEN_BUDGET < 100 || TOKEN_BUDGET > 8192) {
+    console.error(`EMBED_TOKEN_BUDGET must be an integer from 100 to 8192 (got "${process.env.EMBED_TOKEN_BUDGET}")`);
+    process.exit(2);
+}
+// Never split a UTF-16 surrogate pair when cutting.
+const cutAt = (text, n) => (n > 0 && n < text.length && /[\ud800-\udbff]/.test(text[n - 1]) ? text.slice(0, n - 1) : text.slice(0, n));
 
 // Conservative token estimate for bge-m3's XLM-R tokenizer: CJK/kana/hangul ≈ 1 token
 // per character, everything else ≈ 2.5 characters per token (code and identifiers
@@ -25,7 +31,7 @@ function fitBudget(text, budget = TOKEN_BUDGET) {
     let used = 0;
     for (let i = 0; i < text.length; i++) {
         used += CJK.test(text[i]) ? 1 : 0.4;
-        if (used > budget) return text.slice(0, i);
+        if (used > budget) return cutAt(text, i);
     }
     return text;
 }
@@ -39,7 +45,9 @@ async function embedRaw(texts) {
     const r = await fetch(`${OLLAMA}/api/embed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
+        // truncate:false makes Ollama reject an overflow (400) instead of silently
+        // cutting it, so an estimate that undershoots still reaches the fallback.
+        body: JSON.stringify({ model: EMBED_MODEL, input: texts, truncate: false }),
     });
     if (r.status === 400) {
         const body = await r.text();
@@ -60,7 +68,7 @@ async function embedBatch(items) {
         for (let tries = 0; ; tries++) {
             try { out.push((await embedRaw([f.sent]))[0]); break; } catch (e) {
                 if (!(e instanceof TooLong) || tries >= 20) throw new Error(`embed ${f.id}: ${e.message}`);
-                f.sent = f.sent.slice(0, Math.floor(f.sent.length * 0.9));
+                f.sent = cutAt(f.sent, Math.floor(f.sent.length * 0.9));
                 f.truncated = true;
             }
         }

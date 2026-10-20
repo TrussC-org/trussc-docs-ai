@@ -38,6 +38,8 @@ ACCEPTED = os.path.join(DIR, 'accepted.json')
 _judge = os.environ.get('FAIR_EVAL_JUDGE', 'jev')
 JUDGE = {'jev': 'judge_jev.py', 'luna': 'judge.py'}.get(_judge)
 MAX_DROP = int(os.environ.get('FAIR_EVAL_MAX_DROP', {'jev': '6', 'luna': '16'}.get(_judge, '16')))
+# Bound (realtime): one judging run may take at most this long (luna needs minutes, Jev seconds). Overflow kills the judge and fails the check with exit 3.
+JUDGE_TIMEOUT = int(os.environ.get('FAIR_EVAL_JUDGE_TIMEOUT', '1800'))
 # Bound (realtime): a retrieval that hangs on Ollama or the reranker is killed after this. Overflow fails the check with exit 3.
 RETRIEVE_TIMEOUT = int(os.environ.get('FAIR_EVAL_RETRIEVE_TIMEOUT', '1200'))
 
@@ -97,8 +99,11 @@ def judge(run, rows, name, log, expected):
     out = os.path.join(run, name + '.json')
     write_json(ret, rows)
     with open(log, 'a') as lf:
-        rc = subprocess.run([sys.executable, os.path.join(HERE, JUDGE), QUESTIONS, ret, out],
-                            stdout=lf, stderr=lf).returncode
+        try:
+            rc = subprocess.run([sys.executable, os.path.join(HERE, JUDGE), QUESTIONS, ret, out],
+                                stdout=lf, stderr=lf, timeout=JUDGE_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
     return grade(out, expected) if rc == 0 else None
 
 
@@ -106,7 +111,7 @@ def context(row):
     # Everything the judge sees for a chunk (judge.py prints title and text), as a
     # set: the agent receives all 8 cards and the rubric asks whether the answer is
     # present, so reordering the same cards doesn't change the judged outcome.
-    return sorted((str(c.get('id')), str(c.get('title')), str(c.get('text'))) for c in row.get('top', []))
+    return sorted({(str(c.get('id')), str(c.get('title')), str(c.get('text'))) for c in row.get('top', [])})
 
 
 def drop_candidate():

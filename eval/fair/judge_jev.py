@@ -52,7 +52,9 @@ QUESTIONS = {
 
 
 def score_of(p):
-    certainty = abs(p - 0.5) * 2
+    # Rounded so a probability exactly on the cutoff (e.g. 0.7 → certainty 0.4) is not
+    # pushed below it by binary floating point.
+    certainty = round(abs(p - 0.5) * 2, 9)
     if certainty < a.threshold:
         return 1, certainty
     return (2 if p >= 0.5 else 0), certainty
@@ -63,6 +65,33 @@ def prob(d, name):
     if type(p) not in (int, float) or not 0 <= p <= 1:
         raise ValueError(f'bad {name} probability')
     return float(p)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    # The request carries the API key: never follow a redirect to another URL with it.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+# Bound (realtime): one request, including reading the whole response, may take at most 120 s. Overflow fails that attempt and is retried, then reported as ungraded.
+REQUEST_DEADLINE = 120
+# Bound (cache): a typed answer is a few hundred bytes; read at most 1 MiB. Overflow fails that attempt and is retried.
+MAX_RESPONSE = 1 << 20
+
+
+def read_bounded(resp, deadline):
+    chunks, size = [], 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError('response deadline')
+        chunk = resp.read1(65536)   # returns what has arrived, so the deadline is checked between packets
+        if not chunk:
+            return b''.join(chunks)
+        size += len(chunk)
+        if size > MAX_RESPONSE:
+            raise ValueError('response too large')
+        chunks.append(chunk)
 
 
 def call(i):
@@ -76,18 +105,16 @@ def call(i):
         req = urllib.request.Request('https://api.typesafe.ai/v1/systemone', data=body, method='POST',
                                      headers={'Authorization': f'Bearer {KEY}', 'Content-Type': 'application/json'})
         try:
-            # Bound (realtime): one request may take at most 120 s; Bound (cache): read at most 1 MiB of response. Overflow fails that attempt and is retried.
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read(1 << 20 | 1)
-            if len(raw) > 1 << 20:
-                raise ValueError('response too large')
+            deadline = time.monotonic() + REQUEST_DEADLINE
+            with OPENER.open(req, timeout=30) as resp:
+                raw = read_bounded(resp, deadline)
             d = json.loads(raw)
             p, m = prob(d, 'covers'), prob(d, 'misleading')
             s, c = score_of(p)
             return {'id': i, 'score': s, 'misleading': m >= 0.5, 'covers_p': p, 'certainty': round(c, 3), 'misleading_p': m}
         except urllib.error.HTTPError as e:
             err = f'HTTP {e.code}'
-            if e.code in (429, 500, 502, 503, 529):
+            if e.code in (429, 500, 502, 503, 529):  # 3xx redirects land here and are not retried
                 time.sleep(2 ** t); continue
             return {'id': i, 'score': None, 'misleading': None, 'error': err}
         except Exception as e:  # network hiccup or malformed answer: retry

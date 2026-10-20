@@ -89,9 +89,13 @@ as the committed `chunks.embedded.json` (clone-and-go) or rebuilt on the box.
 **Updating the corpus** after a re-emit or source change:
 
 ```bash
-./update-corpus.sh <ssh-host>     # build-chunks → embed → scp → systemctl restart
+./update-corpus.sh <ssh-host>     # build-chunks → embed → guards → scp → systemctl restart
 # host/dir/service via TRUSSC_DEPLOY_HOST / TRUSSC_DEPLOY_DIR / TRUSSC_SERVICE
 ```
+
+Before deploying, it stops if the chunk count shrank more than 5% against the committed
+corpus, or if `eval/fair/gate.py` sees a real score drop on a hidden question set kept
+outside this repo (see `eval/fair/README.md`).
 
 ## Stats
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild the RAG corpus from the current sources, then (optionally) deploy it.
+# Rebuild the RAG corpus from the current sources, check it, then (with --local) deploy it
+# on this server. The corpus is generated at deploy time; it is not kept in git.
 #
 # Run this after the API reference is re-emitted (trussc.org/generated/trussc-api.js)
 # or any corpus source changes (FOR_AI_ASSISTANT.md, examples, of-mapping…).
@@ -7,85 +8,149 @@
 # Steps:
 #   0. fetch-*.mjs        refresh the GitHub caches (releases.json, issues.json)
 #   1. build-chunks.mjs   sources → chunks.jsonl
-#   2. embed.mjs          chunks.jsonl → chunks.embedded.json   (bge-m3, ~couple min)
-#   2b. guards            stop if the chunk count shrank >5% vs the committed corpus,
-#                         or if eval/fair/gate.py sees a real score drop (hidden questions)
-#   3. scp                copy the corpus + runtime code to the server
-#   4. restart            so the service reloads it, then accept the score as the baseline
+#   2. embed.mjs          chunks.jsonl → chunks.embedded.next.json   (bge-m3, ~couple min;
+#                         the live chunks.embedded.json is only read as a vector cache)
+#   2b. guards            stop if the chunk count shrank >5% vs the live corpus, or if
+#                         eval/fair/gate.py sees a real score drop (hidden questions)
+#   --local only:
+#   3. swap               live → chunks.embedded.prev.json, next → live (atomic rename)
+#   4. restart + health   the service must come back with the new chunk count
+#   5. accept             the fair eval gate takes the deployed corpus as its baseline
+# A failed guard leaves the live corpus untouched. A failed restart or health check, or an
+# interruption after the swap, puts the previous corpus back and restarts again.
+# Roll back by hand to the corpus before the last swap:
+#   mv chunks.embedded.prev.json chunks.embedded.json && sudo systemctl restart trussc-docs-ai
 #
-# NOTE: the corpus format is coupled to the runtime code (e.g. per-chunk vector
-# bundles in chunks.embedded.json need the matching rag.mjs). So we ship the runtime
-# files (rag.mjs, server.mjs, config.mjs) together with the corpus — never the corpus
-# alone, or a format change would break a server running older code.
+# The corpus is built, checked and served from the same checkout, so the runtime code
+# (rag.mjs, server.mjs…) the service restarts with always matches the corpus format.
 #
-# Deploy target comes from env (kept out of the repo — no host baked in):
-#   TRUSSC_DEPLOY_HOST   ssh host/alias of the server (or pass as $1)
-#   TRUSSC_DEPLOY_DIR    install dir on the server   (default: trussc-docs-ai, rel. to ~)
+#   ./update-corpus.sh                  # rebuild + check only (leaves chunks.embedded.next.json)
+#   ./update-corpus.sh --local          # this checkout IS the server: also swap, restart, health-check
+# Add --first-deploy when there is no live corpus yet (fresh clone): the count guard then
+# has nothing to compare against and says so, instead of passing silently.
+# Settings come from env:
 #   TRUSSC_SERVICE       systemd service name        (default: trussc-docs-ai)
-# If no host is given, it rebuilds locally only and prints the deploy commands.
-#
-#   ./update-corpus.sh                 # rebuild only
-#   ./update-corpus.sh myserver        # rebuild + deploy to ssh host "myserver"
-#   TRUSSC_DEPLOY_HOST=myserver ./update-corpus.sh
+#   TRUSSC_RESTART_CMD / TRUSSC_HEALTH_CMD   override the restart / health check
+#                        (test-update-corpus.sh stubs them)
 set -euo pipefail
 cd "$(dirname "$0")"
-# One rebuild per checkout at a time (lock this script itself): the guards compare
-# against shared baselines and a second run would overwrite the corpus mid-check.
-exec 9<"$(basename "$0")"   # after the cd above, so relative invocations work
+# One rebuild per checkout at a time: the guards compare against shared baselines and a
+# second run would overwrite .next/.prev mid-check. Lock the checkout directory itself,
+# which a git checkout/pull never replaces (unlike this script's own file).
+exec 9<.
 flock -n 9 || { echo "✘ another update-corpus.sh is running in this checkout"; exit 1; }
 
-HOST="${TRUSSC_DEPLOY_HOST:-${1:-}}"
-DIR="${TRUSSC_DEPLOY_DIR:-trussc-docs-ai}"
+LOCAL=0; FIRST=0
+for arg in "$@"; do
+  case "$arg" in
+    --local) LOCAL=1 ;;
+    --first-deploy) FIRST=1 ;;
+    *) echo "✘ unknown argument: $arg"
+       echo "  (deploying to another host is not supported: run ./update-corpus.sh --local on the server)"
+       exit 2 ;;
+  esac
+done
+if [ -n "${TRUSSC_DEPLOY_HOST:-}" ]; then
+  echo "✘ TRUSSC_DEPLOY_HOST is set, but deploying to another host is not supported:"
+  echo "  run ./update-corpus.sh --local on the server (the corpus is checked where it is served)"
+  exit 2
+fi
 SVC="${TRUSSC_SERVICE:-trussc-docs-ai}"
 PORT="${PORT:-8788}"
+LIVE=chunks.embedded.json NEXT=chunks.embedded.next.json PREV=chunks.embedded.prev.json
+# Pin embed.mjs's cache and output to these files: a caller's EMBEDDED/EMBEDDED_NEXT must
+# never make the embedder write over the live corpus before the guards have run.
+export EMBEDDED="$PWD/$LIVE" EMBEDDED_NEXT="$PWD/$NEXT"
+RESTART="${TRUSSC_RESTART_CMD:-sudo systemctl restart $SVC}"
+HEALTH="${TRUSSC_HEALTH_CMD:-curl -fsS --max-time 5 http://127.0.0.1:$PORT/health}"
+count() { node -e 'try{const a=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log(Array.isArray(a)?a.length:"bad")}catch{console.log("bad")}' "$1"; }
 
 echo "▶ 0/3  fetch release notes (GitHub)…"
-node fetch-releases.mjs || echo "  (fetch failed — using the cached releases.json)"
+node fetch-releases.mjs || echo "  (fetch failed — using the existing releases.json, if any)"
 echo "▶ 0/3  fetch open bug issues (GitHub)…"
-node fetch-issues.mjs || echo "  (fetch failed — using the cached issues.json)"
+node fetch-issues.mjs || echo "  (fetch failed — using the existing issues.json, if any)"
 echo "▶ 1/3  build-chunks…"
 # addon examples are part of the standard corpus (override with ADDON_EXAMPLES='')
 ADDON_EXAMPLES="${ADDON_EXAMPLES-all}" node build-chunks.mjs
 echo "▶ 2/3  embed (bge-m3 — this takes a couple of minutes)…"
+rm -f "$NEXT"
 node embed.mjs
-COUNT=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("chunks.embedded.json")).length)')
-echo "✔ corpus rebuilt: ${COUNT} chunks"
-# Count guard: losing many chunks usually means a source repo was missing or stale.
-# CORPUS_MAX_SHRINK=1 allows any drop (e.g. a deliberate cleanup).
-# No committed corpus yet = nothing to compare; an unreadable one blocks.
-if ! TREE=$(git ls-tree HEAD -- chunks.embedded.json); then
-  PREV=bad                      # cannot read HEAD: don't treat that as "no corpus"
-elif [ -n "$TREE" ]; then
-  PREV=$( { git show HEAD:chunks.embedded.json || echo '<unreadable>'; } | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);console.log(Array.isArray(a)?a.length:"bad")}catch{console.log("bad")}})')
+COUNT=$(count "$NEXT")
+echo "✔ corpus rebuilt: ${COUNT} chunks → ${NEXT}"
+
+# Count guard against the LIVE (deployed) corpus: losing many chunks usually means a
+# source repo was missing or stale. CORPUS_MAX_SHRINK=1 allows any drop (a deliberate cleanup).
+# No live corpus blocks unless --first-deploy says so; an unreadable one blocks.
+if [ -e "$LIVE" ]; then
+  LIVECOUNT=$(count "$LIVE")
+elif [ "$FIRST" = 1 ]; then
+  LIVECOUNT=none
 else
-  PREV=none
-fi
-# Bound (cache): a rebuild may lose at most 5% of the committed chunks. Overflow stops the deploy with the count-guard line.
-if ! node -e 'const [n,p,m]=process.argv.slice(1); const N=Number(n), P=Number(p), M=Number(m); const valid=Number.isInteger(N)&&N>=0&&Number.isFinite(M)&&M>=0&&M<=1&&(p==="none"||(Number.isInteger(P)&&P>0)); const ok=valid&&(p==="none"||N>=P*(1-M)); console.log(valid?`count guard: ${N} chunks, committed ${p}, allowed shrink ${M*100}% -> ${ok?"ok":"BLOCKED"}`:`count guard: cannot compare (new ${n}, committed ${p}, CORPUS_MAX_SHRINK ${m}) -> BLOCKED`); process.exit(ok?0:1)' "$COUNT" "$PREV" "${CORPUS_MAX_SHRINK:-0.05}"; then
-  echo "✘ stopped: the chunk count dropped too far (see the line above). Nothing was deployed."
+  echo "✘ stopped: there is no live ${LIVE} to compare the new corpus against."
+  echo "  On a fresh clone, rerun with --first-deploy."
   exit 1
 fi
-echo "▶ 2b/3 fair retrieval eval (hidden questions, Jev judge — a couple of minutes)…"
-if ! python3 eval/fair/gate.py check chunks.embedded.json; then
-  echo "✘ stopped: the fair eval gate did not pass (see the line above). Nothing was deployed."
+# Bound (cache): a rebuild may lose at most 5% of the live chunks. Overflow stops the deploy with the count-guard line.
+if ! node -e 'const [n,p,m]=process.argv.slice(1); const N=Number(n), P=Number(p), M=Number(m); const valid=Number.isInteger(N)&&N>0&&Number.isFinite(M)&&M>=0&&M<=1&&(p==="none"||(Number.isInteger(P)&&P>0)); const ok=valid&&(p==="none"||N>=P*(1-M)); console.log(!valid?`count guard: cannot compare (new ${n}, live ${p}, CORPUS_MAX_SHRINK ${m}) -> BLOCKED`:p==="none"?`count guard: ${N} chunks, no live corpus (--first-deploy) -> ok`:`count guard: ${N} chunks, live ${P}, allowed shrink ${M*100}% -> ${ok?"ok":"BLOCKED"}`); process.exit(ok?0:1)' "$COUNT" "$LIVECOUNT" "${CORPUS_MAX_SHRINK:-0.05}"; then
+  echo "✘ stopped: the chunk count check failed (see the line above). The live corpus is unchanged."
+  exit 1
+fi
+echo "▶ 2b/3 fair retrieval eval (hidden questions — a couple of minutes)…"
+if ! python3 eval/fair/gate.py check "$NEXT"; then
+  echo "✘ stopped: the fair eval gate did not pass (see the line above). The live corpus is unchanged."
   exit 1
 fi
 
-# Runtime files shipped alongside the corpus (kept in lockstep with the format).
-RUNTIME_FILES="chunks.embedded.json rag.mjs server.mjs config.mjs mcp-core.mjs mcp.mjs"
-
-if [ -z "$HOST" ]; then
+if [ "$LOCAL" = 0 ]; then
   echo
-  echo "No deploy host (set TRUSSC_DEPLOY_HOST or pass it as an arg). Rebuilt locally only."
-  echo "To deploy manually:"
-  echo "  scp ${RUNTIME_FILES} <host>:${DIR}/"
-  echo "  ssh -t <host> 'sudo systemctl restart ${SVC}'"
+  echo "Checks passed; nothing deployed (no --local). The new corpus is ${NEXT}."
+  echo "  deploy it on this server:  ./update-corpus.sh --local   (rebuilds and checks again)"
   exit 0
 fi
 
-echo "▶ scp corpus + runtime code → ${HOST}:${DIR}/"
-scp -o BatchMode=yes ${RUNTIME_FILES} "${HOST}:${DIR}/"
-echo "▶ restart ${SVC} on ${HOST} (sudo — you may be prompted)…"
-ssh -t "${HOST}" "sudo systemctl restart ${SVC} && sleep 3 && curl -s localhost:${PORT}/health && echo"
-echo "✔ deployed."
-[ "${FAIR_EVAL_SKIP:-0}" = 1 ] || python3 eval/fair/gate.py accept chunks.embedded.json
+# From the swap until the health check passes, any exit (a failed step, Ctrl-C, SIGTERM)
+# puts the previous state back: the old corpus, or no corpus on a first deploy.
+SWAPPED=0; HADLIVE=0
+rollback() {
+  if [ "$HADLIVE" = 1 ]; then mv -f "$PREV" "$LIVE"; echo "↩ restored the previous corpus from ${PREV}"
+  else rm -f "$LIVE"; echo "↩ removed the new corpus (first deploy: there was none before)"; fi
+  sh -c "$RESTART" || echo "  (the restart after the rollback failed too; check the service by hand)"
+}
+on_exit() {
+  local code=$?
+  trap - EXIT INT TERM HUP
+  if [ "$SWAPPED" = 1 ]; then
+    echo "✘ the deploy did not finish: rolling back"
+    rollback
+    [ "$code" = 0 ] && code=1
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+
+# The new file inherits the live corpus's permissions (the service user may differ from
+# the deployer, whose umask created it); a first deploy makes it world-readable (0644).
+node -e 'const fs=require("fs"); const [n,l]=process.argv.slice(1); fs.chmodSync(n, fs.existsSync(l) ? fs.statSync(l).mode & 0o7777 : 0o644)' "$NEXT" "$LIVE"
+# Swap: keep the live corpus as .prev (hard link), then rename next over live (atomic).
+rm -f "$PREV"
+if [ -e "$LIVE" ]; then ln "$LIVE" "$PREV"; HADLIVE=1; fi
+SWAPPED=1
+mv -f "$NEXT" "$LIVE"
+echo "✔ swapped in the new corpus (the previous one is kept as ${PREV})"
+
+echo "▶ restart ${SVC} (sudo — you may be prompted)…"
+if ! sh -c "$RESTART"; then echo "✘ restart failed"; exit 1; fi
+ok=0
+# Bound (realtime): wait at most ten health probes (about 30 s) for the restarted service. Overflow rolls back to the previous corpus and exits non-zero.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  sleep "${TRUSSC_HEALTH_WAIT:-3}"
+  if body=$(sh -c "$HEALTH" 2>/dev/null) &&
+     node -e 'const b=JSON.parse(process.argv[1]); process.exit(b.ok===true&&b.chunks===Number(process.argv[2])?0:1)' "$body" "$COUNT" 2>/dev/null; then
+    ok=1; break
+  fi
+done
+if [ "$ok" != 1 ]; then echo "✘ health check failed after the restart (want ok and ${COUNT} chunks)"; exit 1; fi
+SWAPPED=0
+echo "✔ deployed: ${SVC} is healthy and serves ${COUNT} chunks."
+[ "${FAIR_EVAL_SKIP:-0}" = 1 ] || python3 eval/fair/gate.py accept "$LIVE"

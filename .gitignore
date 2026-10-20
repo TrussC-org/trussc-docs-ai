@@ -1,7 +1,12 @@
 node_modules/
-# chunks.embedded.json IS committed (runtime artifact → clone-and-go on the server;
-# rebuilding it needs the source repos + Ollama, which the server may not have).
+# the corpus is generated at deploy time by update-corpus.sh (see README), never committed
 chunks.jsonl
+chunks.embedded.json
+chunks.embedded.next.json
+chunks.embedded.prev.json
+# GitHub caches refreshed by fetch-*.mjs on every rebuild (build-chunks skips them if missing)
+releases.json
+issues.json
 # dev/session artifacts
 eval-report.txt
 MORNING.md

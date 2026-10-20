@@ -32,14 +32,16 @@ ollama pull bge-m3        # multilingual (ja/ko/en) embeddings
 
 ```bash
 node build-chunks.mjs     # 3 sources → chunks.jsonl
-node embed.mjs            # chunks.jsonl → chunks.embedded.json (bge-m3, ~couple min)
+node embed.mjs            # chunks.jsonl → chunks.embedded.next.json (bge-m3, ~couple min)
 npm run build             # = build-chunks + embed
 
-./update-corpus.sh [host] # rebuild corpus AND deploy (scp + restart) — see below
+./update-corpus.sh         # rebuild + check only (→ chunks.embedded.next.json)
+./update-corpus.sh --local # rebuild, check and deploy on this server — see Deploy
 node server.mjs           # http://localhost:8788  (demo.html; press F1)
 node ask.mjs "..."        # one-shot CLI Q&A (answer→stdout, sources→stderr)
 node report.mjs [days]    # usage stats summary from stats.jsonl
 node eval.mjs             # retrieval-quality snapshot over a question set
+bash test-update-corpus.sh # update-corpus.sh flow with restart/health/gate stubbed
 ```
 
 ### Sources chunked (`build-chunks.mjs`)
@@ -53,7 +55,8 @@ API cards are English only (the agent reading them translates; the website keeps
 
 Source paths default to the sibling-checkout layout (`../TrussC`, `../trussc.org`)
 and are env-overridable (`TRUSSC_REPO`, `SITE_REPO`, …). The running server needs
-none of them — it serves the committed `chunks.embedded.json`.
+none of them — it serves `chunks.embedded.json`, which `update-corpus.sh` generates
+at deploy time (the corpus is not in git).
 
 ## Server (`server.mjs`)
 
@@ -84,19 +87,63 @@ reveals it, copy/clear buttons, 24h-persisted history (localStorage), and i18n
 ## Deploy
 
 Home GPU box behind a **Cloudflare Tunnel** → `api.trussc.org`. Full runbook in
-`deploy/DEPLOY.md`; systemd unit + tunnel config in `deploy/`. Corpus is shipped
-as the committed `chunks.embedded.json` (clone-and-go) or rebuilt on the box.
+`deploy/DEPLOY.md`; systemd unit + tunnel config in `deploy/`.
 
-**Updating the corpus** after a re-emit or source change:
+The corpus (`chunks.embedded.json`) is **generated at deploy time, not kept in git**:
+it is built from the TrussC and trussc.org checkouts on the server. The GitHub caches
+`releases.json` and `issues.json` are not in git either; each rebuild fetches them.
+
+**Updating the corpus** after a re-emit or source change, on the server itself:
 
 ```bash
-./update-corpus.sh <ssh-host>     # build-chunks → embed → guards → scp → systemctl restart
-# host/dir/service via TRUSSC_DEPLOY_HOST / TRUSSC_DEPLOY_DIR / TRUSSC_SERVICE
+./update-corpus.sh --local    # fetch → build-chunks → embed → guards → swap → restart → health → accept
 ```
 
-Before deploying, it stops if the chunk count shrank more than 5% against the committed
-corpus, or if `eval/fair/gate.py` sees a real score drop on a hidden question set kept
-outside this repo (see `eval/fair/README.md`).
+1. `embed.mjs` writes the new corpus to `chunks.embedded.next.json`; the live file is untouched.
+2. Guards: it stops if the chunk count is more than 5% below the **live** corpus, or if
+   `eval/fair/gate.py` sees a real score drop on a hidden question set kept outside this
+   repo (see `eval/fair/README.md`). With no live corpus it stops unless you pass
+   `--first-deploy`.
+3. Swap: the live corpus is kept as `chunks.embedded.prev.json` and the new one is renamed
+   into place.
+4. `sudo systemctl restart trussc-docs-ai`, then `/health` must report `ok` and the new
+   chunk count within about 30 s. If not — or if the run is interrupted after the swap —
+   it restores `.prev` (on a first deploy: removes the new corpus), restarts again and
+   exits non-zero without accepting the new baseline.
+5. `gate.py accept` makes the deployed corpus the gate's baseline.
+
+Roll back by hand to the corpus before the last swap:
+
+```bash
+mv chunks.embedded.prev.json chunks.embedded.json && sudo systemctl restart trussc-docs-ai
+```
+
+Without `--local`, `./update-corpus.sh` only rebuilds and checks (the result stays in
+`chunks.embedded.next.json`). Deploying to another host is not supported: the guards
+compare against the live corpus and the swap must happen where the service reads it,
+so run `--local` on the server itself (`TRUSSC_SERVICE` names the systemd service).
+
+**Migrating a checkout that has the committed corpus.** Older checkouts track
+`chunks.embedded.json`, `releases.json` and `issues.json`. Production rebuilds have
+modified them in place, so `git pull` refuses to merge or, once the local edits are
+gone, deletes them. Keep a verified copy of the corpus first; each step runs only if
+the one before it succeeded:
+
+```bash
+cp -p chunks.embedded.json ../chunks.embedded.keep.json &&
+  cmp chunks.embedded.json ../chunks.embedded.keep.json &&
+  git checkout -- chunks.embedded.json releases.json issues.json &&
+  git pull &&
+  cp -p ../chunks.embedded.keep.json chunks.embedded.json   # the live corpus again, now untracked
+```
+
+If any step fails, the copy in `../chunks.embedded.keep.json` is still there; copy it back
+to `chunks.embedded.json` before restarting the service. Delete it once the next
+`--local` run has passed.
+
+The running server keeps the corpus in memory once loaded (any `/health` or query
+loads it), so it serves normally throughout. The
+next `./update-corpus.sh --local` compares against the restored file.
 
 ## Stats
 

@@ -104,3 +104,23 @@ test('nested member notes share the nested card budget and count once', () => {
     assert.equal(stats.truncatedNotes, 1);
     assert.equal(result[1].text.split('\n').slice(1).join('\n'), 'a'.repeat(5000) + '\n' + 'b'.repeat(4999) + '\n' + marker);
 });
+test('inherited members become short stubs pointing at the declaring card', () => {
+    const result = cards({ types: [
+        { name: 'Base', methods: [{ name: 'shared', desc: 'Long shared prose.', details: 'Details.', signatures: [{ ret: 'Vec3', params: '' }] }] },
+        { name: 'Derived', methods: [{ name: 'shared', inherited: 'Base', desc: 'Long shared prose.', details: 'Details.', signatures: [{ ret: 'Vec3', params: '' }] }, { name: 'own', desc: 'Own.' }] },
+    ] });
+    const byId = Object.fromEntries(result.map(c => [c.id, c]));
+    assert.ok(byId['symbol:Base::shared'].text.includes('Long shared prose.'));
+    const stub = byId['symbol:Derived::shared'];
+    assert.equal(stub.text, '# Derived::shared   (method of Derived, inherited from Base)\n`Derived::shared` — inherited from `Base::shared`. See that card for details.\nSignatures:\n  Vec3 Derived::shared()');
+    assert.deepEqual(stub.meta, { kind: 'method', owner: 'Derived', inherited: 'Base', base: 'Base::shared' });
+    assert.ok(byId['symbol:Derived::own'].text.includes('Own.'));
+});
+test('an inherited member keeps its full card when the declaring card is not emitted', () => {
+    const result = cards({ types: [
+        { name: 'Derived', methods: [{ name: 'shared', inherited: 'Outer::Base', desc: 'Only copy of this prose.' }] },
+    ] });
+    const card = result.find(c => c.id === 'symbol:Derived::shared');
+    assert.ok(card.text.includes('Only copy of this prose.'));
+    assert.equal(card.meta.base, undefined);
+});

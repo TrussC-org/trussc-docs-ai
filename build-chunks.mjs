@@ -294,6 +294,14 @@ function chunkApi(api, ofIdx, stats = { truncatedNotes: 0 }) {
         push(name, name, lines, { kind: 'function', category: g.cat, related: f0.related || [], deprecated: !!dep });
     }
 
+    // Member cards emitted in full (declared, not inherited). An inherited member
+    // becomes a stub only when its declaring card is one of these; otherwise (nested
+    // or filtered base) it keeps its full card so no prose is lost.
+    const fullMembers = new Set();
+    for (const t of api.types || [])
+        for (const m of (t.methods || []).concat(t.static_methods || []))
+            if (!m.inherited) fullMembers.add(`${t.name}::${m.name}`);
+
     // types — overview card + granular per-method/static cards
     for (const t of api.types || []) {
         const lines = [`# ${t.name}   (type)`, ofLine(t.name), ...descBlock(t)];
@@ -335,6 +343,24 @@ function chunkApi(api, ofIdx, stats = { truncatedNotes: 0 }) {
 
         const member = (m, kindLabel, kind) => {
             const id = `${t.name}::${m.name}`;
+            // A member copied from a public base (emit-web tags it `inherited`) gets a
+            // short stub: the name stays searchable, but the full card lives once, on
+            // the declaring type, instead of one near-identical copy per inheritor.
+            if (m.inherited && fullMembers.has(`${m.inherited}::${m.name}`)) {
+                const base = `${m.inherited}::${m.name}`;
+                const sl = [`# ${id}   (${kindLabel} of ${t.name}, inherited from ${m.inherited})`,
+                    `\`${id}\` — inherited from \`${base}\`. See that card for details.`];
+                if (m.signatures?.length) {
+                    sl.push('', 'Signatures:');
+                    for (const s of m.signatures) {
+                        const sig = typeof s === 'string' ? { ret: m.return, params: s } : s;
+                        sl.push(`  ${sig.ret || 'void'} ${id}(${sig.params || ''})`);
+                    }
+                }
+                stats.inheritedStubs = (stats.inheritedStubs || 0) + 1;
+                push(id, id, sl, { kind, owner: t.name, inherited: m.inherited, base });
+                return;
+            }
             const ml = [`# ${id}   (${kindLabel} of ${t.name})`, ofLine(id), ...descBlock(m)];
             // Overloads carry their own return type. They used to share the
             // member's single `return`, so an overload set that disagreed was

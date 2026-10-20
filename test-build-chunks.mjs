@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 const source = readFileSync(new URL('./build-chunks.mjs', import.meta.url), 'utf8');
 const ctx = {};
-vm.runInNewContext(`const descBlock = o => ['desc','desc_ja','desc_ko'].map(k => o[k]).filter(Boolean);\n${source.slice(source.indexOf('function chunkApi('), source.indexOf('// --- Source: examples'))}\nglobalThis.chunkApi = chunkApi;`, ctx);
+vm.runInNewContext(`const descBlock = o => (o.desc ? [o.desc] : []);\n${source.slice(source.indexOf('function chunkApi('), source.indexOf('// --- Source: examples'))}\nglobalThis.chunkApi = chunkApi;`, ctx);
 const cards = (api, stats) => JSON.parse(JSON.stringify(ctx.chunkApi({ categories: [], types: [], constants: [], ...api }, new Map(), stats)));
 const fields = { details: 'English details', details_ja: '日本語の詳細', details_ko: '한국어 설명', related: ['Target'], keywords: ['lookup'], snippet: 'use("```");', platformNote: 'platform', platformNote_ja: '環境', platformNote_ko: '환경' };
 test('function, type, method, static, nested type and constant cards share all notes', () => {
@@ -17,7 +17,9 @@ test('function, type, method, static, nested type and constant cards share all n
     const result = cards(api);
     assert.equal(result.length, 6);
     for (const c of result) {
-        for (const text of ['English details', '日本語の詳細', '한국어 설명', 'Related: Target', 'keywords: lookup', 'Platform: platform', 'Platform: 環境', 'Platform: 환경', '````cpp\nuse("```");\n````']) assert.ok(c.text.includes(text), `${c.id}: ${text}`);
+        for (const text of ['English details', 'Related: Target', 'keywords: lookup', 'Platform: platform', '````cpp\nuse("```");\n````']) assert.ok(c.text.includes(text), `${c.id}: ${text}`);
+        // MCP cards are English only.
+        for (const text of ['日本語の詳細', '한국어 설명', '環境', '환경']) assert.ok(!c.text.includes(text), `${c.id}: ${text}`);
     }
 });
 test('fieldless cards retain their exact existing text and metadata', () => {
@@ -70,7 +72,7 @@ test('continuous backticks fit both fences into the notes budget', () => {
     assert.equal(truncated, marker);
     assert.ok(open.length + snippet.length + close.length + 2 <= 10000);
 });
-test('all locales and note fields share one budget, with exact-limit notes unchanged', () => {
+test('note fields share one budget, with exact-limit notes unchanged; ja/ko are left out', () => {
     const stats = { truncatedNotes: 0 };
     const exact = cards({ types: [{ name: 'Type', details: 'a'.repeat(10000) }] }, stats)[0];
     assert.equal(exact.text, '# Type   (type)\n' + 'a'.repeat(10000));
@@ -80,11 +82,13 @@ test('all locales and note fields share one budget, with exact-limit notes uncha
         snippet: 'use();', platformNote: 'Linux', platformNote_ja: '環境', platformNote_ko: '환경', keywords: ['k'.repeat(100000)],
     };
     const text = cards({ types: [{ name: 'Type', ...fields }] }, stats)[0].text.split('\n').slice(1).join('\n');
-    assert.ok(text.startsWith('Related: Target\nExamples: Example\nEnglish\n日本語\n한국어\n```cpp\nuse();\n```\nPlatform: Linux\nPlatform: 環境\nPlatform: 환경\nkeywords: '));
+    assert.ok(text.startsWith('Related: Target\nExamples: Example\nEnglish\n```cpp\nuse();\n```\nPlatform: Linux\nkeywords: '));
     assert.equal(text.length, 10000 + 1 + marker.length);
     assert.ok(text.endsWith('\n' + marker));
     assert.equal(stats.truncatedNotes, 1);
-    for (const key of ['details_ja', 'details_ko', 'platformNote', 'platformNote_ja', 'platformNote_ko', 'related']) {
+    for (const key of ['details_ja', 'details_ko', 'platformNote_ja', 'platformNote_ko'])
+        assert.equal(cards({ types: [{ name: 'Type', [key]: 'a'.repeat(100000) }] })[0].text, '# Type   (type)', key);
+    for (const key of ['platformNote', 'related']) {
         const value = key === 'related' ? ['a'.repeat(100000)] : 'a'.repeat(100000);
         const card = cards({ types: [{ name: 'Type', [key]: value }] })[0];
         assert.ok(card.text.endsWith('\n' + marker), key);

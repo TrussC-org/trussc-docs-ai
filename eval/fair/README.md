@@ -10,7 +10,7 @@ fair. So the set is **not in this repo**: it lives in a local, non-git directory
 
 | File | Where | What |
 | --- | --- | --- |
-| `retrieve.mjs` | here | step 1, no LLM: top-8 retrieval per question from one corpus (local bge-m3 + reranker) |
+| `retrieve.mjs` | here | step 1, no LLM: per question, exactly what `trussc_search` returns to the agent (the same `retrieve(query, 8)`, top 8, MCP text: full reference cards, examples cut to a head excerpt), with local bge-m3 + reranker |
 | `judge.py` | here | step 2, cheap: batched grading with Codex (`gpt-6-luna`, low effort, 5 questions per call, retries on 429). Each question scores 0/1/2 against its reference answer, plus a `misleading` flag |
 | `gate.py` | here | runs both, compares with the last accepted score, prints one line, and exits non-zero on a real drop |
 | `questions.json` | `$FAIR_EVAL_DIR` | the hidden set (80 questions, ja/en) |
@@ -69,6 +69,8 @@ After that fix:
 - The paired difference on identical inputs, with all 80 questions treated as changed, peaked at **2 points**.
 - The mean of two paired differences was at most 1.
 - Individual questions still flip between 1 and 2 (all four runs agree on 66/80), but the flips largely cancel in the sum.
+
+Re-measured on 2026-10-20 after the judge started seeing exactly the agent's view (top 8, MCP text): 4 runs scored 133, 130, 133 and 130, a paired difference of at most **3**. The judge's input per question shrank by about 57%.
 
 The gate blocks when the paired drop exceeds **max(2 × observed paired noise, floor of 6) = 6 points**. The floor applies, because a 4-run sample understates rare swings. Override it with `FAIR_EVAL_MAX_DROP`.
 

@@ -44,10 +44,10 @@ node eval.mjs             # retrieval-quality snapshot over a question set
 
 ### Sources chunked (`build-chunks.mjs`)
 
-API cards share a 10,000-character notes budget across localized details, related symbols, examples, keywords, snippets and platform notes. Nested member notes share their containing card's budget. The budget counts formatted notes and separators and is enforced while consuming list items and snippet characters; card headers, signatures and descriptions are separate. Longer notes keep their start (with complete snippet fences) and append `(details truncated; see the full reference)` outside the budget. The build summary counts cards with truncated notes.
+API cards are English only (the agent reading them translates; the website keeps every language). They share a 10,000-character notes budget across details, related symbols, examples, keywords, snippets and platform notes. Nested member notes share their containing card's budget. The budget counts formatted notes and separators and is enforced while consuming list items and snippet characters; card headers, signatures and descriptions are separate. Longer notes keep their start (with complete snippet fences) and append `(details truncated; see the full reference)` outside the budget. The build summary counts cards with truncated notes.
 
 - **concept** — hand-written half of `TrussC/docs/FOR_AI_ASSISTANT.md` (before `## API Index`), by heading. *This is the place to add high-level knowledge by hand.*
-- **symbol** — every entry in `trussc.org/generated/trussc-api.js` (the same data the reference page renders: signatures, enum values, properties, multilingual prose) joined with `of-mapping.json` (openFrameworks → TrussC).
+- **symbol** — every entry in `trussc.org/generated/trussc-api.js` (the same data the reference page renders: signatures, enum values, properties, English prose) joined with `of-mapping.json` (openFrameworks → TrussC).
 - **example** — each example in `examples.json` + the APIs it calls + a `src/tcApp.cpp` excerpt.
 - **issue** — the open `bug` issues of TrussC-org/TrussC, one chunk each (title + `## Summary` + `## Workaround`), cached in `issues.json` by `node fetch-issues.mjs` (`update-corpus.sh` runs it). A closed issue drops out on the next rebuild. Retrieval admits an issue only when it ranks among the top k and clears a rerank floor; the model links it as `[[#123]]`.
 
@@ -78,7 +78,8 @@ reveals it, copy/clear buttons, 24h-persisted history (localStorage), and i18n
 
 `OLLAMA_URL`, `GEN_MODEL` (qwen3.5:4b), `EMBED_MODEL` (bge-m3), `TOP_K`, `NUM_CTX`,
 `KEEP_ALIVE` (model VRAM residency; `-1`=forever), `THINK`, `REF_BASE`,
-`STATS`/`STATS_LOG`/`STATS_SALT` (usage logging), `EMBED_ON_CPU`.
+`STATS`/`STATS_LOG`/`STATS_SALT` (usage logging), `EMBED_ON_CPU`,
+`EMBED_TOKEN_BUDGET` (default 1900: `embed.mjs` cuts each input to about this many bge-m3 tokens, under the model's 2,048-token context, and lists the cut inputs; if Ollama still rejects one, only that input is shortened and retried. Changing it re-embeds the inputs it affects).
 
 ## Deploy
 

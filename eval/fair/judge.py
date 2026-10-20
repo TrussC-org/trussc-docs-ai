@@ -11,8 +11,8 @@ ap.add_argument('questions'); ap.add_argument('retrieval'); ap.add_argument('out
 ap.add_argument('--model', default='gpt-6-luna'); ap.add_argument('--effort', default='low')
 # Bound (realtime): five questions per call and two calls at a time keep prompts cheap and stay under shared rate limits. Overflow just takes more calls and is not reported.
 ap.add_argument('--batch', type=int, default=5); ap.add_argument('--jobs', type=int, default=2)
-# Bound (cache): long chunks are cut so a batch prompt stays small and cheap. Overflow truncates the chunk text and is not reported.
-ap.add_argument('--chars', type=int, default=2500, help='max characters kept per retrieved chunk')
+# Bound (cache): the judge sees what the agent sees (retrieve.mjs stores the MCP text); this only guards against a runaway chunk, far above the ~10k-character card cap. Overflow truncates the chunk text and is not reported.
+ap.add_argument('--chars', type=int, default=20000, help='max characters kept per retrieved chunk')
 ap.add_argument('--timeout', type=int, default=300, help='seconds per Codex call')
 a = ap.parse_args()
 Q = {q['id']: q for q in json.load(open(a.questions))}

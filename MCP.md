@@ -4,13 +4,15 @@
 as a single tool, **`trussc_search`**. It is a thin proxy over the `/search` endpoint:
 
 ```
-query → bge-m3 embedding → cosine over the corpus → the most relevant chunks
+query → dense + BM25 → RRF pool → Jev probabilities → selected cards
 ```
 
 **No generation** happens here — `/search` does retrieval only. The calling agent
 (Claude Code, Claude Desktop, Cursor, …) reads the returned chunks and writes the
-answer/code with its own model. So sharing this widely costs only the box's bge
-compute, never hosted-generation tokens.
+answer/code with its own model. Search uses local embedding compute and one hosted Jev selection request, with no
+Haiku answer call. All HTTP search endpoints share the per-IP Jev call window and
+daily token budget. Missing credentials, upstream failure, or usage bounds use the
+existing reranker/quota fallback; `RETRIEVAL=rerank` selects fallback directly.
 
 There are two ways to connect: **remote** (just a URL, nothing to install — the
 recommended way to share) or **stdio** (run `mcp.mjs` locally).
@@ -65,7 +67,7 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 ## Tools & behaviour
 
 - **`trussc_search(query, k?, full?, lang?)`** — ranked by hybrid retrieval (BM25 over
-  names + bge-m3 semantic, RRF-fused). Example chunks come back **trimmed** by default
+  names + bge-m3 semantic, RRF-fused), then selected by Jev probabilities. Quotas apply only on fallback. Example chunks come back **trimmed** by default
   (header + start of source) to keep the result light; pass `full: true` for whole text.
   `k` is the **max total results** (default 8, clamped 1–20). Each result shows `cos`
   (cosine) and `rrf` (fused rank score) so the ordering is legible.

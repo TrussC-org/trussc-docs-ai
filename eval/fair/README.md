@@ -10,7 +10,7 @@ fair. So the set is **not in this repo**: it lives in a local, non-git directory
 
 | File | Where | What |
 | --- | --- | --- |
-| `retrieve.mjs` | here | step 1, no LLM: per question, exactly what `trussc_search` returns to the agent (the same `retrieve(query, 8)`, top 8, MCP text: full reference cards, examples cut to a head excerpt), with local bge-m3 + reranker |
+| `retrieve.mjs` | here | step 1, no LLM: per question, exactly what `trussc_search` returns to the agent (the same `retrieve(query, 8)`, top 8, MCP text: full reference cards, examples cut to a head excerpt), with local bge-m3 + Jev selection (requires `TYPESAFE_API_KEY` in the environment; refuses fallback) |
 | `judge_jev.py` | here | step 2, the default judge: TypeSafe Jev answers two yes/no questions per question. **covers**: do the cards contain the reference answer's facts? **misleading**: do they contradict it? Score 1 if the covers certainty \|p−0.5\|×2 is below 0.4 (Jev unsure), else 2 if p ≥ 0.5, else 0. The key is read from `~/.config/jev/key` (or `$JEV_KEY_FILE`) and is never printed or stored |
 | `judge.py` | here | the older judge (`FAIR_EVAL_JUDGE=luna`): batched grading with Codex (`gpt-6-luna`, low effort). Same 0/1/2 + `misleading` output |
 | `gate.py` | here | runs both, compares with the last accepted score, prints one line, and exits non-zero on a real drop |
@@ -36,8 +36,9 @@ FAIR_EVAL_SKIP=1 ./update-corpus.sh --local             # deploy without the gat
 
 `accept` only takes a check that passed, for the same corpus file (by SHA-256), and only once. A failed, blocked or incomplete check leaves nothing to accept. Checks and accepts hold a lock in `$FAIR_EVAL_DIR`, and `update-corpus.sh` holds its own lock, so two rebuilds can't mix baselines.
 
-The gate needs the local services that retrieval uses (Ollama for bge-m3 and the
-rerank server), and the Jev key (or `codex` with `FAIR_EVAL_JUDGE=luna`) for judging. Exit codes:
+The gate needs Ollama for bge-m3 and `TYPESAFE_API_KEY` in the environment for Jev
+retrieval. The retrieval batch paces calls under its per-IP window and fails rather
+than measuring fallback output. Judging separately needs the Jev key (or `codex` with `FAIR_EVAL_JUDGE=luna`) for judging. Exit codes:
 - 0: ok, or no comparable baseline yet;
 - 1: score dropped;
 - 2: question set missing, or nothing to accept;

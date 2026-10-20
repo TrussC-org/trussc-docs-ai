@@ -1,10 +1,20 @@
 // Run with: node test-resolve-links.mjs
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-// Keep this standalone test on the local corpus and the default public URLs,
-// even when the shell has production configuration overrides.
-process.env.EMBEDDED = fileURLToPath(new URL('./chunks.embedded.json', import.meta.url));
+// Tiny synthetic corpus: generated production data is absent in standalone clones.
+const dir = mkdtempSync(join(tmpdir(), 'docsai-links-'));
+process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
+process.env.EMBEDDED = join(dir, 'corpus.json');
+writeFileSync(process.env.EMBEDDED, JSON.stringify([
+    { id: 'symbol:drawCircle', title: 'drawCircle', source: 'reference', meta: { kind: 'function' } },
+    { id: 'symbol:setColor', title: 'setColor', source: 'reference', meta: { kind: 'function' } },
+    { id: 'symbol:Node::removeMod', title: 'Node::removeMod', source: 'reference', meta: { kind: 'method', owner: 'Node' } },
+    { id: 'issue:123', title: 'Known issue', source: 'issue', meta: { number: 123, url: 'https://github.com/TrussC-org/TrussC/issues/123' } },
+    { id: 'concept:coordinates', title: 'Coordinates', source: 'concept' },
+]));
 process.env.REF_BASE = 'https://trussc.org';
 const { chunks, resolveLinks } = await import('./rag.mjs');
 

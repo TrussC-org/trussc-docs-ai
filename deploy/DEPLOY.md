@@ -82,7 +82,7 @@ cp deploy/cloudflared-config.yml deploy/cloudflared-config.local.yml
 committed.
 
 **Secrets are the exception: keep them out of the repo directory entirely.**
-`ANTHROPIC_API_KEY` and `STATS_SALT` belong only in the installed unit under
+`TYPESAFE_API_KEY`, `ANTHROPIC_API_KEY` and `STATS_SALT` belong only in the installed unit under
 `/etc/systemd/system/`, and that file should be root-only — systemd does not
 need it world-readable, and the default `cp` leaves it at 644:
 
@@ -134,3 +134,22 @@ curl -s https://api.trussc.org/ask -d '{"question":"drawRectの使い方は？"}
   guards check the new corpus with it, and the swap restarts the service onto it).
 - **Endpoints for clients**: widget → `POST /chat` (SSE); CLI/`tchat` → `POST /ask`;
   agents → `POST /search` (raw chunks).
+
+Jev retrieval is enabled by default. The owner must add `TYPESAFE_API_KEY` to the
+installed service environment and provide it to the operator's corpus-check process.
+The fair retrieval script refuses missing credentials or fallback results. Keep
+`RERANK=1` and the reranker available for fallback; use `RETRIEVAL=rerank` for the
+operator kill switch. Set `GEN_BACKEND=anthropic` for native Haiku search rounds
+(`MAX_SEARCH_ROUNDS=3` by default); Ollama answers remain single stage.
+
+For owner one-time setup, follow the ordered list in README.md: configure the
+installed unit's `Environment=` / `EnvironmentFile=`, pull, restart, check `/health`
+and confirm `ask-cli --json` reports `debug.rounds[].path: "jev"`.
+The service user can run `systemctl restart trussc-docs-ai` via polkit.
+`update-corpus.sh` defaults to that command and uses it for rollback too. If stderr
+reports an authorization failure, it prints a hint to rerun with
+`TRUSSC_RESTART_CMD='sudo systemctl restart trussc-docs-ai'`; it never escalates
+silently. Installing/editing a system unit and daemon-reload still require sudo.
+The gate reads the operator shell environment, not the service environment:
+export `TYPESAFE_API_KEY` in that shell using README.md's hidden `read -r -s`
+prompt, and unset it afterwards. Do not put the value in history or the repository.

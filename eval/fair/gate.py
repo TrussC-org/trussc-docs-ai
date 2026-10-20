@@ -15,7 +15,8 @@ The question set and reference answers are NOT in this repo (whoever writes the
 reference prose must not see them). They live in a local, non-git directory:
   FAIR_EVAL_DIR        default ~/TrussC-dev/docs-eval/fair  (needs questions.json)
 Runs, scores, logs and the accepted baseline are written there too, never into the repo.
-  FAIR_EVAL_MAX_DROP   allowed paired drop in score points (default 16; README.md "Threshold")
+  FAIR_EVAL_MAX_DROP   allowed paired drop in score points (default 6 with Jev, 16 with luna; README.md "Threshold")
+  FAIR_EVAL_JUDGE      jev (default, TypeSafe Jev; key in ~/.config/jev/key or $JEV_KEY_FILE) or luna (Codex)
   FAIR_EVAL_SKIP=1     skip the gate for one run (prints a warning)
 
 Exit codes: 0 ok, 1 score dropped, 2 question set missing / nothing to accept,
@@ -31,7 +32,14 @@ CANDIDATE = os.path.join(DIR, 'candidate.json')
 # The baseline is ONE file (metadata + retrieval rows), replaced atomically, so it can
 # never pair one corpus's metadata with another corpus's retrieval.
 ACCEPTED = os.path.join(DIR, 'accepted.json')
-MAX_DROP = int(os.environ.get('FAIR_EVAL_MAX_DROP', '16'))
+# The judge: TypeSafe Jev by default (owner decision, 2026-10-20); FAIR_EVAL_JUDGE=luna
+# selects the older Codex judge (gpt-6-luna). Each judge has its own measured threshold
+# (README.md "Threshold"); FAIR_EVAL_MAX_DROP overrides it.
+_judge = os.environ.get('FAIR_EVAL_JUDGE', 'jev')
+JUDGE = {'jev': 'judge_jev.py', 'luna': 'judge.py'}.get(_judge)
+MAX_DROP = int(os.environ.get('FAIR_EVAL_MAX_DROP', {'jev': '6', 'luna': '16'}.get(_judge, '16')))
+# Bound (realtime): one judging run may take at most this long (luna needs minutes, Jev seconds). Overflow kills the judge and fails the check with exit 3.
+JUDGE_TIMEOUT = int(os.environ.get('FAIR_EVAL_JUDGE_TIMEOUT', '1800'))
 # Bound (realtime): a retrieval that hangs on Ollama or the reranker is killed after this. Overflow fails the check with exit 3.
 RETRIEVE_TIMEOUT = int(os.environ.get('FAIR_EVAL_RETRIEVE_TIMEOUT', '1200'))
 
@@ -91,14 +99,19 @@ def judge(run, rows, name, log, expected):
     out = os.path.join(run, name + '.json')
     write_json(ret, rows)
     with open(log, 'a') as lf:
-        rc = subprocess.run([sys.executable, os.path.join(HERE, 'judge.py'), QUESTIONS, ret, out],
-                            stdout=lf, stderr=lf).returncode
+        try:
+            rc = subprocess.run([sys.executable, os.path.join(HERE, JUDGE), QUESTIONS, ret, out],
+                                stdout=lf, stderr=lf, timeout=JUDGE_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
     return grade(out, expected) if rc == 0 else None
 
 
 def context(row):
-    # Everything the judge sees for a chunk (judge.py prints title and text).
-    return [(c.get('id'), c.get('title'), c.get('text')) for c in row.get('top', [])]
+    # Everything the judge sees for a chunk (judge.py prints title and text), as a
+    # set: the agent receives all 8 cards and the rubric asks whether the answer is
+    # present, so reordering the same cards doesn't change the judged outcome.
+    return sorted({(str(c.get('id')), str(c.get('title')), str(c.get('text'))) for c in row.get('top', [])})
 
 
 def drop_candidate():
@@ -125,6 +138,8 @@ def check(emb):
     drop_candidate()
     if os.environ.get('FAIR_EVAL_SKIP') == '1':
         say('SKIPPED (FAIR_EVAL_SKIP=1)', 0)
+    if JUDGE is None:
+        say('FAILED: FAIR_EVAL_JUDGE must be jev or luna', 2)
     if not os.path.isfile(QUESTIONS) or os.path.getsize(QUESTIONS) == 0:
         say(f'FAILED: question set not found at {QUESTIONS} '
             '(set FAIR_EVAL_DIR, or FAIR_EVAL_SKIP=1 to deploy without the gate)', 2)

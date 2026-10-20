@@ -65,7 +65,7 @@ if ! node -e 'const [n,p,m]=process.argv.slice(1); const N=Number(n), P=Number(p
   echo "✘ stopped: the chunk count dropped too far (see the line above). Nothing was deployed."
   exit 1
 fi
-echo "▶ 2b/3 fair retrieval eval (hidden questions, cheap judge — a few minutes)…"
+echo "▶ 2b/3 fair retrieval eval (hidden questions, Jev judge — a couple of minutes)…"
 if ! python3 eval/fair/gate.py check chunks.embedded.json; then
   echo "✘ stopped: the fair eval gate did not pass (see the line above). Nothing was deployed."
   exit 1

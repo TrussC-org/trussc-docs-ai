@@ -6,7 +6,7 @@
 # or any corpus source changes (FOR_AI_ASSISTANT.md, examples, of-mapping…).
 #
 # Steps:
-#   0. fetch-*.mjs        refresh the GitHub caches (releases.json, issues.json)
+#   0. fast-forward sources, then fetch-*.mjs refresh the GitHub caches
 #   1. build-chunks.mjs   sources → chunks.jsonl
 #   2. embed.mjs          chunks.jsonl → chunks.embedded.next.json   (bge-m3, ~couple min;
 #                         the live chunks.embedded.json is only read as a vector cache)
@@ -40,11 +40,12 @@ cd "$(dirname "$0")"
 exec 9<.
 flock -n 9 || { echo "✘ another update-corpus.sh is running in this checkout"; exit 1; }
 
-LOCAL=0; FIRST=0
+LOCAL=0; FIRST=0; NO_PULL=0
 for arg in "$@"; do
   case "$arg" in
     --local) LOCAL=1 ;;
     --first-deploy) FIRST=1 ;;
+    --no-pull) NO_PULL=1 ;;
     *) echo "✘ unknown argument: $arg"
        echo "  (deploying to another host is not supported: run ./update-corpus.sh --local on the server)"
        exit 2 ;;
@@ -80,10 +81,40 @@ restart_service() {
 } 3>&1
 count() { node -e 'try{const a=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log(Array.isArray(a)?a.length:"bad")}catch{console.log("bad")}' "$1"; }
 
+# Operator-shell work only: the service never fetches sources or accesses the cache.
+# These defaults match config.mjs; resolve overrides after cd, just as the builder does.
+export TRUSSC_REPO="${TRUSSC_REPO:-$PWD/../TrussC}" SITE_REPO="${SITE_REPO:-$PWD/../trussc.org}"
+source_error() { echo "✘ source $1: $2. Stopped; the live corpus is unchanged." >&2; exit 1; }
+preflight_source() {
+  local label=$1 repo=$2 status
+  [ "$(git -C "$repo" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] || source_error "$label" "not a git checkout ($repo)"
+  git -C "$repo" symbolic-ref -q HEAD >/dev/null || source_error "$label" 'detached HEAD; a branch is required'
+  git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 || source_error "$label" 'branch has no upstream'
+  status=$(git -C "$repo" status --porcelain --untracked-files=no) || source_error "$label" 'cannot inspect tracked changes'
+  [ -z "$status" ] || source_error "$label" 'tracked local changes; commit or remove them before rebuilding'
+}
+preflight_source TrussC "$TRUSSC_REPO"
+preflight_source trussc.org "$SITE_REPO"
+if [ "$NO_PULL" = 0 ]; then
+  for repo in "$TRUSSC_REPO" "$SITE_REPO"; do
+    echo "▶ fast-forward source: $repo"
+    git -C "$repo" fetch || source_error "$repo" 'git fetch failed'
+    git -C "$repo" merge --ff-only '@{u}' || source_error "$repo" 'upstream is not fast-forwardable (git merge --ff-only failed)'
+  done
+else
+  echo '▶ --no-pull: using local source commits (no fetch or merge)'
+fi
+TRUSSC_COMMIT=$(git -C "$TRUSSC_REPO" rev-parse --verify HEAD) || source_error TrussC 'cannot resolve HEAD'
+SITE_COMMIT=$(git -C "$SITE_REPO" rev-parse --verify HEAD) || source_error trussc.org 'cannot resolve HEAD'
+export CORPUS_SOURCES="TrussC=$TRUSSC_COMMIT trussc.org=$SITE_COMMIT"
+echo "▶ corpus sources: $CORPUS_SOURCES"
+
 echo "▶ 0/3  fetch release notes (GitHub)…"
 node fetch-releases.mjs || echo "  (fetch failed — using the existing releases.json, if any)"
 echo "▶ 0/3  fetch open bug issues (GitHub)…"
 node fetch-issues.mjs || echo "  (fetch failed — using the existing issues.json, if any)"
+echo "▶ 0/3  fetch addon registry and external addon sources…"
+node fetch-addons.mjs || echo "  (fetch failed — using the existing addon registry/cache, if any)"
 echo "▶ 1/3  build-chunks…"
 # addon examples are part of the standard corpus (override with ADDON_EXAMPLES='')
 ADDON_EXAMPLES="${ADDON_EXAMPLES-all}" node build-chunks.mjs

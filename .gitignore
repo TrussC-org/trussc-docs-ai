@@ -7,6 +7,7 @@ chunks.embedded.prev.json
 # GitHub caches refreshed by fetch-*.mjs on every rebuild (build-chunks skips them if missing)
 releases.json
 issues.json
+addon-registry.json
 # dev/session artifacts
 eval-report.txt
 MORNING.md

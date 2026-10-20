@@ -116,3 +116,11 @@ test('inherited members become short stubs pointing at the declaring card', () =
     assert.deepEqual(stub.meta, { kind: 'method', owner: 'Derived', inherited: 'Base', base: 'Base::shared' });
     assert.ok(byId['symbol:Derived::own'].text.includes('Own.'));
 });
+test('an inherited member keeps its full card when the declaring card is not emitted', () => {
+    const result = cards({ types: [
+        { name: 'Derived', methods: [{ name: 'shared', inherited: 'Outer::Base', desc: 'Only copy of this prose.' }] },
+    ] });
+    const card = result.find(c => c.id === 'symbol:Derived::shared');
+    assert.ok(card.text.includes('Only copy of this prose.'));
+    assert.equal(card.meta.base, undefined);
+});

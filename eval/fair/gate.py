@@ -15,7 +15,7 @@ The question set and reference answers are NOT in this repo (whoever writes the
 reference prose must not see them). They live in a local, non-git directory:
   FAIR_EVAL_DIR        default ~/TrussC-dev/docs-eval/fair  (needs questions.json)
 Runs, scores, logs and the accepted baseline are written there too, never into the repo.
-  FAIR_EVAL_MAX_DROP   allowed paired drop in score points (default 6; README.md "Threshold")
+  FAIR_EVAL_MAX_DROP   allowed paired drop in score points (default 16; README.md "Threshold")
   FAIR_EVAL_SKIP=1     skip the gate for one run (prints a warning)
 
 Exit codes: 0 ok, 1 score dropped, 2 question set missing / nothing to accept,
@@ -31,7 +31,7 @@ CANDIDATE = os.path.join(DIR, 'candidate.json')
 # The baseline is ONE file (metadata + retrieval rows), replaced atomically, so it can
 # never pair one corpus's metadata with another corpus's retrieval.
 ACCEPTED = os.path.join(DIR, 'accepted.json')
-MAX_DROP = int(os.environ.get('FAIR_EVAL_MAX_DROP', '6'))
+MAX_DROP = int(os.environ.get('FAIR_EVAL_MAX_DROP', '16'))
 # Bound (realtime): a retrieval that hangs on Ollama or the reranker is killed after this. Overflow fails the check with exit 3.
 RETRIEVE_TIMEOUT = int(os.environ.get('FAIR_EVAL_RETRIEVE_TIMEOUT', '1200'))
 

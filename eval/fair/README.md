@@ -13,7 +13,7 @@ fair. So the set is **not in this repo**: it lives in a local, non-git directory
 | `retrieve.mjs` | here | step 1, no LLM: per question, exactly what `trussc_search` returns to the agent (the same `retrieve(query, 8)`, top 8, MCP text: full reference cards, examples cut to a head excerpt), with local bge-m3 + reranker |
 | `judge.py` | here | step 2, cheap: batched grading with Codex (`gpt-6-luna`, low effort, 5 questions per call, retries on 429). Each question scores 0/1/2 against its reference answer, plus a `misleading` flag |
 | `gate.py` | here | runs both, compares with the last accepted score, prints one line, and exits non-zero on a real drop |
-| `questions.json` | `$FAIR_EVAL_DIR` | the hidden set (80 questions, ja/en) |
+| `questions.json` | `$FAIR_EVAL_DIR` | the hidden held-out set (168 questions, ja/en) |
 | `runs/`, `candidate.json`, `accepted.json` | `$FAIR_EVAL_DIR` | per-run retrieval, scores and logs, and the baseline (one file: the accepted corpus's retrieval output plus its hashes). Never committed |
 
 `FAIR_EVAL_DIR` defaults to `~/TrussC-dev/docs-eval/fair`. If `questions.json` is
@@ -57,21 +57,16 @@ Judge drift between days cancels, and noise scales with how much actually change
 
 ## Threshold
 
-The judge is a cheap model, so the same input doesn't always get the same score. Measured on 2026-10-20 by grading one retrieval output several times (80 questions, max 160).
+The judge is a cheap model, so the same input doesn't always get the same score.
 
-First pass:
-- 3 runs scored 135, 137 and 132 (spread 5).
-- Checking the 10 questions that split against the source showed every reference was correct; the references mixed required facts with extra detail.
-- Those references were split into "Required" and "Optional detail", and the rubric now says optional detail never lowers a score.
+**Current set** (since 2026-10-20): 168 held-out questions, max 336 points.
+- The set was written from source by a separate generator and kept away from everyone who writes reference prose.
+- Questions testing the same fact as a question writers can see were removed.
+- Grading one retrieval output 4 times gave 171, 170, 172 and 164. The paired difference on identical inputs, with all 168 questions treated as changed (the worst case), peaked at **8 points**.
+- The gate blocks when the paired drop exceeds **max(2 × 8, the old 6-point floor scaled to this set's size ≈ 13) = 16 points**.
+- In practice only the questions whose retrieval changed are judged, so the noise of a real comparison is usually smaller.
+- Override it with `FAIR_EVAL_MAX_DROP`.
 
-After that fix:
-- 4 runs scored 134, 132, 133 and 133: a spread of **2**.
-- The paired difference on identical inputs, with all 80 questions treated as changed, peaked at **2 points**.
-- The mean of two paired differences was at most 1.
-- Individual questions still flip between 1 and 2 (all four runs agree on 66/80), but the flips largely cancel in the sum.
-
-Re-measured on 2026-10-20 after the judge started seeing exactly the agent's view (top 8, MCP text): 4 runs scored 133, 130, 133 and 130, a paired difference of at most **3**. The judge's input per question shrank by about 57%.
-
-The gate blocks when the paired drop exceeds **max(2 × observed paired noise, floor of 6) = 6 points**. The floor applies, because a 4-run sample understates rare swings. Override it with `FAIR_EVAL_MAX_DROP`.
+**History:** the first 80-question set measured a paired noise of 2–3 points out of 160, so its threshold was 6. That set is retired to the improvement pool, since its questions became visible to writers.
 
 When `questions.json` changes, its hash no longer matches the baseline. The gate then judges the candidate alone and reports it without comparing, until the next `accept`.

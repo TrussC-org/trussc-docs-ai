@@ -14,11 +14,12 @@ export function cardState(question, pool, cfg = config, searchMore = null) {
 export function stateTokens(question, pool, cfg = config, searchMore = null) {
     return JSON.stringify(cardState(question, pool, cfg, searchMore)).length * cfg.JEV_TOKENS_PER_CHAR;
 }
-const noul = (instructions) => ({ type: 'noul', instructions, criteria: { true: 'Yes', false: 'No' } });
+const noul = (instructions, criteria = { true: 'Yes', false: 'No' }) => ({ type: 'noul', instructions, criteria });
 function questionsFor(state) {
     const gap = state.search_more ? ' Focus on the gap described by state.search_more.message and state.search_more.queries.' : '';
     return { ...Object.fromEntries(state.cards.map(c => [c.card, noul(`Does card ${c.card} in state.cards contain information needed to answer state.question?${gap}`)])),
-        exists: noul(`Do the cards in state.cards together contain the answer to state.question?${gap}`) };
+        exists: noul(`Do the cards in state.cards together contain all the information needed to answer every part of state.question correctly, without guessing?${gap}`,
+            { true: 'Yes: every part of the question can be answered from the cards', false: 'No: at least one part of the question is missing from the cards or would have to be guessed' }) };
 }
 export function perQuestionTokens(question, pool, cfg = config, searchMore = null) {
     const state = cardState(question, pool, cfg, searchMore);

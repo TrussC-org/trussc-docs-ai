@@ -24,6 +24,19 @@ try {
     assert.equal(req.opts.redirect, 'manual'); assert.equal(req.opts.headers.authorization, `Bearer ${secret}`);
     assert.equal(body.state.cards[0].card, 'c1'); assert.equal(body.state.cards[0].text.length, 2000);
     assert.equal(body.questions.c1.type, 'noul'); assert.equal(body.questions.exists.type, 'noul');
+    const instructions = 'Do the cards in state.cards together contain all the information needed to answer every part of state.question correctly, without guessing?';
+    const criteria = { true: 'Yes: every part of the question can be answered from the cards', false: 'No: at least one part of the question is missing from the cards or would have to be guessed' };
+    assert.equal(body.questions.exists.instructions, instructions);
+    assert.deepEqual(body.questions.exists.criteria, criteria);
+    assert.equal(body.questions.c1.instructions, 'Does card c1 in state.cards contain information needed to answer state.question?');
+    assert.deepEqual(body.questions.c1.criteria, { true: 'Yes', false: 'No' });
+    await s.selectCards('question', pool, { searchMore: { message: 'Missing details', queries: ['details'] } });
+    const round2 = JSON.parse(requests.at(-1).opts.body);
+    const gap = ' Focus on the gap described by state.search_more.message and state.search_more.queries.';
+    assert.equal(round2.questions.exists.instructions, instructions + gap);
+    assert.deepEqual(round2.questions.exists.criteria, criteria);
+    assert.equal(round2.questions.c1.instructions, body.questions.c1.instructions + gap);
+    assert.deepEqual(round2.questions.c1.criteria, { true: 'Yes', false: 'No' });
     r = await selector({ JEV_PICK_MIN_P: 1 }).selectCards('q', pool); assert.equal(r.picked.length, 4);
     r = await selector({ JEV_PICK_MIN_P: 0 }).selectCards('q', pool); assert.equal(r.picked.length, 16);
     r = await selector({ JEV_PICK: 'fixed', JEV_PICK_K: 8 }).selectCards('q', pool); assert.equal(r.picked.length, 8); assert.equal(r.picked[0].id, 'id19');
@@ -72,11 +85,12 @@ try {
     assert.equal((await selector().selectCards('q', [])).reason, 'pool');
     assert.equal((await selector({}, async () => response([.1])).selectCards('q', pool.slice(0, 1))).picked.length, 1);
     // Env validation warnings never echo invalid values, including credential-like input.
-    const saved = Object.fromEntries(['JEV_POOL_TOKENS', 'JEV_PICK_K', 'MAX_SEARCH_ROUNDS', 'JEV_PICK_MIN_P', 'JEV_CARD_CHARS', 'JEV_DAILY_TOKENS', 'HAIKU_TIMEOUT_MS', 'HAIKU_MAX_RESPONSE_BYTES', 'HAIKU_CARD_CHARS', 'HAIKU_MAX_INPUT_TOKENS'].map(k => [k, process.env[k]]));
+    const saved = Object.fromEntries(['JEV_POOL_TOKENS', 'JEV_PICK_K', 'MAX_SEARCH_ROUNDS', 'JEV_PICK_MIN_P', 'JEV_CARD_CHARS', 'JEV_DAILY_TOKENS', 'JEV_SEARCH_HINT_BELOW', 'HAIKU_TIMEOUT_MS', 'HAIKU_MAX_RESPONSE_BYTES', 'HAIKU_CARD_CHARS', 'HAIKU_MAX_INPUT_TOKENS'].map(k => [k, process.env[k]]));
     try {
         for (const name of Object.keys(saved)) delete process.env[name];
         const defaults = await import('./config.mjs?test=defaults');
         assert.equal(defaults.JEV_DAILY_TOKENS, 20000000);
+        assert.equal(defaults.JEV_SEARCH_HINT_BELOW, .7);
         assert.equal(defaults.HAIKU_TIMEOUT_MS, 60000); assert.equal(defaults.HAIKU_MAX_RESPONSE_BYTES, 1048576);
         assert.equal(defaults.HAIKU_CARD_CHARS, 8000); assert.equal(defaults.HAIKU_MAX_INPUT_TOKENS, 24000);
         assert.equal(defaults.MAX_SEARCH_ROUNDS, 3); assert.equal(defaults.JEV_PICK_MIN_P, .4);
@@ -93,6 +107,11 @@ try {
         process.env.JEV_POOL_TOKENS = 'Infinity'; process.env.MAX_SEARCH_ROUNDS = '0';
         cfg = await import('./config.mjs?test=lower');
         assert.equal(cfg.JEV_POOL_TOKENS, 28000); assert.equal(cfg.MAX_SEARCH_ROUNDS, 1);
+        for (const [i, [raw, expected]] of [['', .7], ['NaN', .7], ['Infinity', .7], ['-1', .7], ['2', 1], ['0', 0], ['1', 1], ['.42', .42], [secret, .7]].entries()) {
+            process.env.JEV_SEARCH_HINT_BELOW = raw;
+            cfg = await import(`./config.mjs?test=hint-${i}`);
+            assert.equal(cfg.JEV_SEARCH_HINT_BELOW, expected);
+        }
     } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
 
     assert(!output.join('\n').includes(secret), 'credential leaked to output');

@@ -144,7 +144,7 @@ try {
     }
     res = await request('/ask', { question: 'circle', debug: true, rounds: mode === 'max1' ? 10 : 1 }); assert.equal(res.status, 200, res.data);
     const result = JSON.parse(res.data);
-    const rounds = ['max3', 'default'].includes(mode) ? 3 : mode === 'tool' ? 2 : 1;
+    const rounds = mode === 'max3' ? 3 : mode === 'default' ? 4 : mode === 'tool' ? 2 : 1;
     assert.equal(result.rounds, rounds);
     assertTrace(result.debug, rounds);
     assert.equal(statRows().at(-1).debug, true);

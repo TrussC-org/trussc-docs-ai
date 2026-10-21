@@ -93,7 +93,7 @@ try {
         assert.equal(defaults.JEV_SEARCH_HINT_BELOW, .7);
         assert.equal(defaults.HAIKU_TIMEOUT_MS, 60000); assert.equal(defaults.HAIKU_MAX_RESPONSE_BYTES, 1048576);
         assert.equal(defaults.HAIKU_CARD_CHARS, 8000); assert.equal(defaults.HAIKU_MAX_INPUT_TOKENS, 24000);
-        assert.equal(defaults.MAX_SEARCH_ROUNDS, 3); assert.equal(defaults.JEV_PICK_MIN_P, .4);
+        assert.equal(defaults.MAX_SEARCH_ROUNDS, 4); assert.equal(defaults.JEV_PICK_MIN_P, .4);
         assert.equal(defaults.JEV_POOL_TOKENS, 28000); assert.equal(defaults.JEV_CARD_CHARS, 2000);
         const threshold = createSelector({ cfg: { ...base, JEV_PICK_MIN_P: defaults.JEV_PICK_MIN_P }, fetchImpl: async () => response(ps) });
         assert.equal((await threshold.selectCards('q', pool)).picked.length, 12);

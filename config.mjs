@@ -50,10 +50,11 @@ export const THINK = process.env.THINK === '1';
 // lower hallucination, faster, better JA fluency; A/B against the 4B). Only the
 // GENERATION call switches; embeddings always stay on Ollama/bge-m3 (the corpus is
 // embedded with it). When 'anthropic', set ANTHROPIC_API_KEY in the env; the model
-// defaults to Haiku 4.5 (override with ANTHROPIC_MODEL).
+// defaults to Haiku 5.5 at effort low (owner 2026-10-21; override with ANTHROPIC_MODEL
+// and HAIKU_EFFORT, e.g. ANTHROPIC_MODEL=claude-haiku-4-5-20251001 for the 4.5 path).
 export const GEN_BACKEND = process.env.GEN_BACKEND || 'ollama';
 export const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
-export const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+export const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-5-5';
 
 // Base URL for "see also" reference links. '' = site-relative (once embedded in
 // trussc.org). Default to the live site so the standalone demo's links are clickable.
@@ -156,7 +157,8 @@ export const JEV_RATE_WIN_MS = numberEnv('JEV_RATE_WIN_MS', 60000);
 export const JEV_DAILY_TOKENS = numberEnv('JEV_DAILY_TOKENS', 20000000);
 export const RETRIEVAL = process.env.RETRIEVAL === 'rerank' ? 'rerank' : 'jev';
 // Bound (configuration): operator-only search rounds stay within 1..10. Overflow clamps with a warning and is not counted.
-const rounds = numberEnv('MAX_SEARCH_ROUNDS', 3);
+export const DEFAULT_MAX_SEARCH_ROUNDS = 4;
+const rounds = numberEnv('MAX_SEARCH_ROUNDS', DEFAULT_MAX_SEARCH_ROUNDS);
 export const MAX_SEARCH_ROUNDS = Math.floor(Math.max(1, Math.min(10, rounds)));
 if (rounds < 1 || rounds > 10) console.warn('Warning: MAX_SEARCH_ROUNDS clamped to 1..10');
 
@@ -166,10 +168,13 @@ export const HAIKU_MAX_RESPONSE_BYTES = numberEnv('HAIKU_MAX_RESPONSE_BYTES', 10
 export const HAIKU_CARD_CHARS = numberEnv('HAIKU_CARD_CHARS', 8000, { integer: true });
 export const HAIKU_MAX_INPUT_TOKENS = numberEnv('HAIKU_MAX_INPUT_TOKENS', 24000);
 export const EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
-// Bound (configuration): operator-only effort is an allowed level or unset (model default); invalid values warn and use the default.
+// Bound (configuration): operator-only effort is an allowed level; unset means DEFAULT_HAIKU_EFFORT and an empty value
+// means the model's own default. Invalid values warn and use DEFAULT_HAIKU_EFFORT. Only effort-capable models receive it.
+export const DEFAULT_HAIKU_EFFORT = 'low';
 const effort = process.env.HAIKU_EFFORT;
-export const HAIKU_EFFORT = EFFORT_LEVELS.includes(effort) ? effort : undefined;
-if (effort && !HAIKU_EFFORT) console.warn('Warning: HAIKU_EFFORT must be low|medium|high|xhigh|max; using model default');
+export const HAIKU_EFFORT = effort === undefined ? DEFAULT_HAIKU_EFFORT : effort === '' ? undefined
+    : EFFORT_LEVELS.includes(effort) ? effort : DEFAULT_HAIKU_EFFORT;
+if (effort && !EFFORT_LEVELS.includes(effort)) console.warn(`Warning: HAIKU_EFFORT must be low|medium|high|xhigh|max; using ${DEFAULT_HAIKU_EFFORT}`);
 // Bound (configuration): operator-only thinking is off or unset (model default); invalid values warn and use the default.
 const thinking = process.env.HAIKU_THINKING;
 export const HAIKU_THINKING = thinking === 'off' ? thinking : undefined;

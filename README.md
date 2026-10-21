@@ -37,7 +37,9 @@ stays intact. Each subsequent turn appends the returned assistant `tool_use` and
 user `tool_result` for its id, containing that round's selected cards and exists
 hint. Repeated cards use `[#id] already shown above` references instead of repeating
 their text. Used-card tracking and links span all rounds' cards. The
-last round has no tool; `MAX_SEARCH_ROUNDS=3` allows two re-searches.
+last round has no tool; the default `MAX_SEARCH_ROUNDS=4` allows three re-searches.
+When accumulated cards fill `HAIKU_MAX_INPUT_TOKENS`, searching stops earlier and the
+next call answers without the tool.
 `MAX_SEARCH_ROUNDS` bounds search rounds. Total Haiku calls per request are
 hard-capped at `MAX_SEARCH_ROUNDS + 1`, including one fabrication-correction call
 and any invalid-tool recovery. Stats and debug report numeric `haikuCalls`. Invalid tool
@@ -209,17 +211,17 @@ change and a server restart; requests cannot override it.
 | `JEV_RATE_MAX` | `20` | Jev calls per IP per sliding window |
 | `JEV_RATE_WIN_MS` | `60000` | Sliding window duration |
 | `JEV_DAILY_TOKENS` | `20000000` | Per-process daily token budget, resetting at local midnight |
-| `MAX_SEARCH_ROUNDS` | `3` | Search rounds, clamped to 1–10; total Haiku calls at most this value + 1 |
+| `MAX_SEARCH_ROUNDS` | `4` | Search rounds, clamped to 1–10; total Haiku calls at most this value + 1 |
 | `GEN_BACKEND` | `ollama` | `anthropic` enables native search rounds |
 | `ANTHROPIC_API_KEY` | unset | Haiku credential, environment only |
-| `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Answer model |
-| `HAIKU_EFFORT` | unset (model default) | Optional `low`, `medium`, `high`, `xhigh`, or `max`; sent as `output_config.effort` only for supported models (currently Haiku 5.5). Invalid values warn and use the model default. Haiku 5.5 defaults to medium. |
+| `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Answer model. Set `claude-haiku-4-5-20251001` for the Haiku 4.5 path (no effort, 1536 max tokens, unchanged prompt). |
+| `HAIKU_EFFORT` | `low` | `low`, `medium`, `high`, `xhigh`, or `max`; sent as `output_config.effort` only for supported models (currently Haiku 5.5). An empty value omits it so the model default applies (medium for Haiku 5.5). Invalid values warn and use `low`. |
 | `HAIKU_THINKING` | unset (model default) | Optional `off` sends `thinking: {"type":"disabled"}` for adaptive models only. Requires effort high or below (Haiku 5.5's default medium is allowed); xhigh/max and manual thinking budgets are rejected before retrieval or requests. Invalid values warn and use the model default. Haiku 4.5 already defaults to thinking off, so its payload stays unchanged. |
 | `HAIKU_ADAPTIVE_MAX_TOKENS` | `8192` | Total output token allowance for adaptive models, including thinking; integer clamped to 1536..32768. Haiku 4.5 and unknown models retain 1536 (plus any internal manual thinking budget). |
 | `HAIKU_TIMEOUT_MS` | `60000` | Overall generation deadline, covering connect and the entire streamed response |
 | `HAIKU_MAX_RESPONSE_BYTES` | `1048576` | Incremental streamed-body byte cap; individual SSE lines/events also capped at min(this value, 64 KiB) |
 | `HAIKU_CARD_CHARS` | `8000` | Generation text cap per card, including truncation marker; separate from Jev's text cap |
-| `HAIKU_MAX_INPUT_TOKENS` | `24000` | Whole serialized generation request estimate, using `JEV_TOKENS_PER_CHAR` |
+| `HAIKU_MAX_INPUT_TOKENS` | `24000` | Whole serialized generation request estimate, using `JEV_TOKENS_PER_CHAR` (×1.25 for Haiku 5.5, whose tokenizer counts more tokens for the same text) |
 
 New numeric settings reject non-finite or negative values with a warning and use
 the default. Counts are floored. Jev estimates per-question state plus instruction
@@ -483,4 +485,4 @@ Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report aggregates
 (volume, distinct visitors, p50/p95, top questions/APIs/categories, by day).
 
-Offline model/effort, thinking-off and base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md), including per-call usage and latency measurements. These internal options are unavailable over HTTP. The production model default remains Haiku 4.5; Haiku 5.5 uses adaptive thinking by default and rejects manual thinking budgets.
+Offline model/effort, thinking-off and base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md), including per-call usage and latency measurements. These internal options are unavailable over HTTP. The production model default is Haiku 5.5 at effort low; it uses adaptive thinking by default and rejects manual thinking budgets. Haiku 5.5 also gets one extra system-prompt rule allowing clearly implied facts when the answer names the evidence (it otherwise declines to state what the cards only imply); Haiku 4.5's prompt is unchanged.

@@ -10,7 +10,7 @@ overrides still apply; no HTTP server is started. Stats are forced off.
 ```sh
 node eval/answers/run-variants.mjs questions.json base.json --variant base
 node eval/answers/run-variants.mjs questions.json filler.json --variant filler --filler 300
-node eval/answers/run-variants.mjs questions.json thinking.json --variant thinking --thinking 1024 --ids ids.txt
+node eval/answers/run-variants.mjs questions.json thinking.json --variant thinking --thinking 1024 --ids ids.txt --model claude-haiku-4-5-20251001
 node eval/answers/run-variants.mjs questions.json haiku55.json --variant base --model claude-haiku-5-5
 node eval/answers/run-variants.mjs questions.json haiku55-high.json --variant base --model claude-haiku-5-5 --effort high
 node eval/answers/run-variants.mjs questions.json haiku55-off.json --variant base --model claude-haiku-5-5 --thinking-off
@@ -25,9 +25,10 @@ question and at completion; a crash leaves completed rows available. A fresh run
 replaces earlier results rather than resuming them.
 
 `--model` overrides `ANTHROPIC_MODEL` in process; without it the environment or
-the unchanged Haiku 4.5 default applies. `--effort` overrides `HAIKU_EFFORT` and
-accepts low, medium, high, xhigh or max. With neither set, effort is omitted and
-the model default applies (medium for Haiku 5.5). Explicit `--effort` requires
+the Haiku 5.5 default applies. `--effort` overrides `HAIKU_EFFORT` and
+accepts low, medium, high, xhigh or max. With neither set, the `HAIKU_EFFORT`
+default (`low`) applies; set `HAIKU_EFFORT=` (empty) to omit effort and use the
+model default (medium for Haiku 5.5). Explicit `--effort` requires
 an effort-capable model. `--variant thinking` requires a manual-thinking model
 and fails before retrieval on Haiku 5.5, including with `--thinking 0`.
 

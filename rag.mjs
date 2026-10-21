@@ -539,13 +539,21 @@ export function mergeSelections(previous, fresh) {
 // Explicit model prefixes only: unknown snapshots get neither thinking nor effort.
 // Keep this table small; add a family only after its API capabilities are verified.
 const MODEL_CAPABILITIES = [
-    ['claude-haiku-4-5', { manual: true, adaptive: false, effort: false }],
-    ['claude-haiku-5-5', { manual: false, adaptive: true, effort: true }],
+// tokenScale: multiplies JEV_TOKENS_PER_CHAR for this model's input estimate. Haiku 5.5's tokenizer
+// counts about 1.28x Haiku 4.5's tokens for the same text (median; max 2.06x, owner eval 2026-10-21),
+// so 1.25 keeps the default 0.4 estimate near par (0.5). The 24k input cap is a cost bound, so a
+// modest undercount on outliers is acceptable.
+// impliedEvidence: the model declines to state what the cards only imply, so it gets
+// IMPLIED_EVIDENCE_RULE (owner eval 2026-10-21; Haiku 4.5 already infers from examples).
+    ['claude-haiku-4-5', { manual: true, adaptive: false, effort: false, impliedEvidence: false, tokenScale: 1 }],
+    ['claude-haiku-5-5', { manual: false, adaptive: true, effort: true, impliedEvidence: true, tokenScale: 1.25 }],
 ];
+const IMPLIED_EVIDENCE_RULE = "If the cards don't state something directly but an example or related card clearly implies it, you may say so, naming the evidence (e.g. 'the example keeps the data in static storage, so registration likely keeps a pointer'). This never allows naming an API that is not shown in the context.";
 export function modelCapabilities(model) {
     return MODEL_CAPABILITIES.find(([prefix]) => model === prefix || model.startsWith(prefix + '-'))?.[1]
-        ?? { manual: false, adaptive: false, effort: false };
+        ?? { manual: false, adaptive: false, effort: false, impliedEvidence: false, tokenScale: 1 };
 }
+const generationTokensPerChar = model => JEV_TOKENS_PER_CHAR * modelCapabilities(model).tokenScale;
 // Internal experiments only; never derive these options from HTTP input.
 export function validateVariants(opts = {}) {
     // Bound (configuration): filler periods stay within 0..4096; invalid values fail before retrieval.
@@ -587,12 +595,12 @@ function anthropicPayload(messages, offerTool, variants = validateVariants()) {
         ...(budget ? { thinking: { type: 'enabled', budget_tokens: budget } } : {}),
         ...(variants.thinking === 'off' && capabilities.adaptive ? { thinking: { type: 'disabled' } } : {}),
         ...(variants.effort !== undefined && capabilities.effort ? { output_config: { effort: variants.effort } } : {}),
-        system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
+        system: [...messages.filter(m => m.role === 'system').map(m => m.content), ...(capabilities.impliedEvidence ? [IMPLIED_EVIDENCE_RULE] : [])].join('\n\n'),
         messages: messages.filter(m => m.role !== 'system'), stream: true,
         ...(offerTool ? { tools: [SEARCH_TOOL] } : {}) };
 }
 function fitsInput(messages, offerTool, reserveChars = 0, variants = validateVariants()) {
-    return (JSON.stringify(anthropicPayload(messages, offerTool, variants)).length + reserveChars) * JEV_TOKENS_PER_CHAR <= HAIKU_MAX_INPUT_TOKENS;
+    return (JSON.stringify(anthropicPayload(messages, offerTool, variants)).length + reserveChars) * generationTokensPerChar(variants.model) <= HAIKU_MAX_INPUT_TOKENS;
 }
 function generationText(card) {
     const text = card.text || '';
@@ -618,7 +626,7 @@ async function* anthropicRound(messages, offerTool, metrics, variants = validate
     try {
         const payload = anthropicPayload(messages, offerTool, variants);
         const body = JSON.stringify(payload);
-        if (body.length * JEV_TOKENS_PER_CHAR > HAIKU_MAX_INPUT_TOKENS) throw new GenerationFailure('input');
+        if (body.length * generationTokensPerChar(variants.model) > HAIKU_MAX_INPUT_TOKENS) throw new GenerationFailure('input');
         checkTime();
         const r = await Promise.race([deadline, fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST', redirect: 'manual', signal: controller.signal,
@@ -1055,7 +1063,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
             throw error;
         }
         stats.haikuCalls++; trace.haikuCalls++;
-        trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool, variants)).length * JEV_TOKENS_PER_CHAR);
+        trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool, variants)).length * generationTokensPerChar(variants.model));
         const callIndex = trace.haiku.inputTokens.push(null) - 1;
         const usage = {};
         const call = { ttftMs: null, totalMs: 0, inputTokens: null, outputTokens: null, thinkingTokens: null };

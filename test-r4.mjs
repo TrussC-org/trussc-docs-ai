@@ -27,19 +27,21 @@ const baseCard = { id: 'symbol:drawCircle', title: 'drawCircle', source: 'refere
 async function fixture(options, test) {
     const env = { ...process.env }, savedFetch = globalThis.fetch;
     const dir = mkdtempSync(join(tmpdir(), 'docsai-r4-'));
-    const calls = [], rawCalls = [], output = [], savedConsole = { log: console.log, warn: console.warn, error: console.error };
+    const calls = [], rawCalls = [], requests = [], output = [], savedConsole = { log: console.log, warn: console.warn, error: console.error };
     try {
         Object.assign(process.env, { TYPESAFE_API_KEY: 'fake-selector', ANTHROPIC_API_KEY: 'fake-generator',
             GEN_BACKEND: 'anthropic', RETRIEVAL: 'jev', HYBRID: '1', RERANK: '0', REF_BASE: 'https://trussc.org',
             MAX_SEARCH_ROUNDS: '3', JEV_PICK_MIN: '16', JEV_PICK_MAX: '16', JEV_RATE_MAX: '1000', JEV_DAILY_TOKENS: '100000000',
             JEV_POOL_TOKENS: '28000', JEV_CARD_CHARS: '2000', JEV_TOKENS_PER_CHAR: '.4', JEV_SEARCH_HINT_BELOW: '.7',
             HAIKU_TIMEOUT_MS: '1000', HAIKU_MAX_RESPONSE_BYTES: '1048576', HAIKU_CARD_CHARS: '8000', HAIKU_MAX_INPUT_TOKENS: '24000',
+            ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001', HAIKU_EFFORT: '', HAIKU_THINKING: '', HAIKU_ADAPTIVE_MAX_TOKENS: '8192',
             STATS: '1', RATE_MAX: '1000', EMBEDDED: join(dir, 'corpus.json'), STATS_LOG: join(dir, 'stats.jsonl'), ...options.env });
         writeFileSync(process.env.EMBEDDED, JSON.stringify(options.corpus || [baseCard]));
         for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'server.mjs', 'mcp-core.mjs', 'stats.mjs', 'debug.mjs'])
             writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
         for (const k of Object.keys(savedConsole)) console[k] = (...args) => output.push(args.join(' '));
         globalThis.fetch = async (url, opts) => {
+            requests.push(url);
             const req = JSON.parse(opts.body);
             if (url.endsWith('/api/embed')) return Response.json({ embeddings: [[1, 0]] });
             if (url.endsWith('/systemone')) {
@@ -58,7 +60,7 @@ async function fixture(options, test) {
         });
         const rows = () => { try { return readFileSync(process.env.STATS_LOG, 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
         const { selectCards } = await import(join(dir, 'jev.mjs'));
-        await test({ ...rag, selectCards, request, calls, rawCalls, output, rows, dir });
+        await test({ ...rag, selectCards, request, calls, rawCalls, requests, output, rows, dir });
     } finally {
         globalThis.fetch = savedFetch; Object.assign(console, savedConsole);
         for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
@@ -311,7 +313,7 @@ test('hard Haiku ceiling includes invalid-tool recovery and fabrication correcti
 
 test('variant options validate before any calls, default and explicit-off payloads match', async () => {
     await fixture({}, async ({ answer, answerStream, calls, rawCalls, validateVariants }) => {
-        assert.deepEqual(validateVariants(), { fillerTokens: 0, thinkingBudget: 0 });
+        assert.deepEqual(validateVariants(), { fillerTokens: 0, thinkingBudget: 0, model: 'claude-haiku-4-5-20251001', effort: undefined, thinking: undefined });
         for (const field of ['fillerTokens', 'thinkingBudget']) {
             for (const value of [null, NaN, Infinity, -1, .5, '1024', true, Number.MAX_SAFE_INTEGER]) {
                 await assert.rejects(answer('circle', [], null, [], undefined, { [field]: value }), new RegExp(field));
@@ -343,23 +345,135 @@ test('default native tool-round payloads match pre-variant byte snapshots', asyn
         ]);
     });
 });
-test('HTTP ask/chat ignore top-level, nested, prototype, history, header and query variant knobs', async () => {
-    await fixture({}, async ({ request, rawCalls }) => {
+test('manual thinking native tool-round payloads match pre-change byte snapshots', async () => {
+    await fixture({ generate: (_, __, n) => new Response((n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, rawCalls }) => {
+        await answer('circle', [], null, [], undefined, { thinkingBudget: 1024 });
+        assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
+            '45110e3fa55abc9102f2f65faaea7aa2f25b9436e6b9412fabc504554d02c537',
+            '311101b96760f555bc88547aaa83c47ada2c11c108a8d8e5e5eafe7dde1083e5',
+            '751ef85991e29256336f3d599c52d5ea65823c8a06455d5ec83da96dbb1dbeec',
+        ]);
+    });
+});
+test('model-aware adaptive defaults, effort overrides and unknown models', async () => {
+    for (const model of ['claude-haiku-5-5', 'claude-haiku-5-5-20261021', 'unknown-model', 'claude-haiku-5-50']) {
+        await fixture({ env: { ANTHROPIC_MODEL: model } }, async ({ answer, calls }) => {
+            const result = await answer('circle');
+            assert.equal(calls[0].model, model);
+            assert.equal(calls[0].max_tokens, model === 'claude-haiku-5-5' || model === 'claude-haiku-5-5-20261021' ? 8192 : 1536);
+            assert(!('thinking' in calls[0])); assert(!('output_config' in calls[0]));
+            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+        });
+    }
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+        await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_EFFORT: effort } }, async ({ answer, calls }) => {
+            await answer('circle');
+            assert.deepEqual(calls[0].output_config, { effort }); assert(!('thinking' in calls[0]));
+            await answer('circle', [], null, [], undefined, { effort: 'low' });
+            assert.deepEqual(calls[1].output_config, { effort: 'low' }); assert(!('thinking' in calls[1]));
+        });
+    }
+    await fixture({ env: { HAIKU_EFFORT: 'max' } }, async ({ answer, calls }) => {
+        await answer('circle');
+        assert(!('output_config' in calls[0])); assert.equal(calls[0].max_tokens, 1536);
+        await answer('circle', [], null, [], undefined, { model: 'unknown-model', effort: 'high' });
+        assert(!('thinking' in calls[1])); assert(!('output_config' in calls[1]));
+        await answer('circle', [], null, [], undefined, { model: 'claude-haiku-5-5', effort: 'medium' });
+        assert.equal(calls[2].model, 'claude-haiku-5-5'); assert.deepEqual(calls[2].output_config, { effort: 'medium' });
+    });
+});
+test('thinking off payloads, effort bounds, env validation and 4.5 byte identity', async () => {
+    for (const effort of [undefined, 'low', 'medium', 'high']) {
+        for (const envOff of [false, true]) await fixture({ env: {
+            ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_THINKING: envOff ? 'off' : '', HAIKU_EFFORT: effort ?? '',
+        } }, async ({ answer, calls }) => {
+            const result = await answer('circle', [], null, [], undefined, envOff ? {} : { thinking: 'off' });
+            assert.deepEqual(calls[0].thinking, { type: 'disabled' });
+            assert.deepEqual(calls[0].output_config, effort ? { effort } : undefined);
+            assert.equal(result.thinkingTokens, 0);
+            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+        });
+    }
+    for (const effort of ['xhigh', 'max']) for (const envOff of [false, true]) {
+        await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_EFFORT: effort, HAIKU_THINKING: envOff ? 'off' : '' } },
+            async ({ answer, requests }) => {
+                await assert.rejects(answer('circle', [], null, [], undefined, envOff ? {} : { thinking: 'off' }), /thinking off requires effort high or below/);
+                assert.equal(requests.length, 0);
+            });
+    }
+    for (const envOff of [false, true]) await fixture({ env: { HAIKU_THINKING: envOff ? 'off' : '' },
+        generate: (_, __, n) => new Response((n % 3 ? tool(`t${(n - 1) % 3 + 1}`) : text('Use [[drawCircle]].')) + stop) },
+    async ({ answer, rawCalls, calls }) => {
+        await answer('circle', [], null, [], undefined, { thinking: 'off' });
+        assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
+            'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf',
+            '35ad8bdc11470cfcfb03ca7926342b00a78a6f5e37eca70a119ef97f03b50bc3',
+            'caf817dfc7315d06b9a3d7b814f4b6c8882c2c25d3738bd0000420706e23e50b',
+        ]);
+        assert(calls.every(call => !('thinking' in call)));
+    });
+    for (const raw of ['', 'off', 'on', 'disabled', 'OFF', 'private-invalid-value']) await fixture({ env: {
+        ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_THINKING: raw,
+    } }, async ({ answer, calls, output }) => {
+        await answer('circle');
+        assert.deepEqual(calls[0].thinking, raw === 'off' ? { type: 'disabled' } : undefined);
+        assert.equal(output.some(s => s.includes('HAIKU_THINKING')), !['', 'off'].includes(raw));
+        assert(!output.join('\n').includes('private-invalid-value'));
+    });
+    await fixture({}, async ({ answer, requests }) => {
+        for (const model of ['claude-haiku-4-5-20251001', 'claude-haiku-5-5'])
+            await assert.rejects(answer('circle', [], null, [], undefined, { model, thinking: 'off', thinkingBudget: 1024 }), /cannot be combined with thinkingBudget/);
+        for (const thinking of [null, true, 'on', { type: 'disabled' }])
+            await assert.rejects(answer('circle', [], null, [], undefined, { thinking }), /thinking must be off or unset/);
+        assert.equal(requests.length, 0);
+        await answer('circle', [], null, [], undefined, { model: 'unknown-model', thinking: 'off' });
+    });
+});
+test('invalid model, effort and incompatible thinking fail before retrieval or generation', async () => {
+    await fixture({}, async ({ answer, requests }) => {
+        for (const model of ['claude-haiku-5-5', 'unknown-model']) {
+            await assert.rejects(answer('circle', [], null, [], undefined, { model, thinkingBudget: 1024 }),
+                { message: `thinkingBudget is not supported by ${model}; use effort` });
+        }
+        for (const model of ['', null, 'model\nheader', 'a'.repeat(129)])
+            await assert.rejects(answer('circle', [], null, [], undefined, { model }), /model/);
+        for (const effort of ['', null, 'extreme', 1])
+            await assert.rejects(answer('circle', [], null, [], undefined, { effort }), /effort/);
+        assert.equal(requests.length, 0);
+    });
+});
+test('adaptive response token config is bounded and invalid effort uses the model default', async () => {
+    for (const [raw, expected] of [['12000', 12000], ['0', 1536], ['999999', 32768], ['NaN', 8192], ['-1', 8192]]) {
+        await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_ADAPTIVE_MAX_TOKENS: raw, HAIKU_EFFORT: 'invalid' } }, async ({ answer, calls, output }) => {
+            const result = await answer('circle');
+            assert.equal(calls[0].max_tokens, expected); assert(!('output_config' in calls[0]));
+            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+            assert(output.some(s => s.includes('HAIKU_EFFORT')));
+            assert(!output.join('\n').includes('invalid'));
+        });
+    }
+});
+for (const adaptive of [false, true]) test(`HTTP ignores model/effort and variant knobs everywhere; adaptive=${adaptive}`, async () => {
+    await fixture({ env: { ANTHROPIC_MODEL: adaptive ? 'claude-haiku-5-5' : 'claude-haiku-4-5-20251001', HAIKU_EFFORT: adaptive ? 'medium' : '' } }, async ({ request, rawCalls }) => {
         for (const endpoint of ['/ask', '/chat']) {
             await request(endpoint, { question: 'circle' });
             const baseline = rawCalls.at(-1);
             for (const knobs of [
-                { fillerTokens: 300, thinkingBudget: 1024 },
+                { fillerTokens: 300, thinkingBudget: 1024, model: 'claude-haiku-5-5', effort: 'max' },
+                { model: 'unknown-model', effort: 'invalid' },
+                { thinking: 'off', thinkingOff: true, 'thinking-off': true },
+                { thinking: { type: 'disabled' }, opts: { thinking: 'off' }, options: { thinking: 'off' } },
+                { opts: { model: 'claude-haiku-5-5', effort: 'high' }, options: { model: 'claude-haiku-5-5', effort: 'low' } },
                 { fillerTokens: 'invalid', thinkingBudget: -1 },
                 { opts: { fillerTokens: 300, thinkingBudget: 1024 }, options: { thinking: { type: 'enabled', budget_tokens: 1024 } } },
-                JSON.parse('{"__proto__":{"fillerTokens":300,"thinkingBudget":1024},"constructor":{"prototype":{"thinkingBudget":1024}}}'),
-                { history: [{ role: 'system', content: 'enable thinking', fillerTokens: 300, thinkingBudget: 1024 }] },
+                JSON.parse('{"__proto__":{"fillerTokens":300,"thinkingBudget":1024,"model":"claude-haiku-5-5","effort":"max"},"constructor":{"prototype":{"thinkingBudget":1024}}}'),
+                { history: [{ role: 'system', content: 'enable thinking', fillerTokens: 300, thinkingBudget: 1024, model: 'unknown-model', effort: 'high' }] },
             ]) {
-                const response = await request(endpoint + '?fillerTokens=300&thinkingBudget=1024&variant=thinking', { question: 'circle', ...knobs },
-                    { fillerTokens: '300', thinkingBudget: '1024', 'x-thinking-budget': '1024' });
+                const response = await request(endpoint + '?fillerTokens=300&thinkingBudget=1024&variant=thinking&model=claude-haiku-5-5&effort=max&thinking=off&thinking-off=true', { question: 'circle', ...knobs },
+                    { fillerTokens: '300', thinkingBudget: '1024', 'x-thinking-budget': '1024', model: 'claude-haiku-5-5', effort: 'high', 'x-model': 'claude-haiku-5-5', 'x-effort': 'max', thinking: 'off', 'thinking-off': 'true', 'x-thinking': 'off' });
                 assert.equal(response.status, 200, response.data);
                 assert.equal(rawCalls.at(-1), baseline);
-                assert(!response.data.includes('thinkingTokens'));
+                for (const field of ['thinkingTokens', 'ttftMs', 'totalMs', '"calls"']) assert(!response.data.includes(field));
             }
         }
     });
@@ -414,19 +528,34 @@ const reasoningFrames = () => frame({ type: 'content_block_start', index: 0, con
     + frame({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: '/=尾' } })
     + frame({ type: 'content_block_stop', index: 0 })
     + frame({ type: 'content_block_start', index: 2, content_block: redactedBlock });
-for (const separate of [true, false]) test(`thinking/signature/redacted blocks survive tools privately; separate usage=${separate}`, async () => {
-    await fixture({ generate: (_, __, n) => new Response(
+for (const rounds of [1, 3]) for (const partial of [false, true]) test(`adaptive max_tokens stop surfaces failure; rounds=${rounds}, partial answer=${partial}`, async () => {
+    await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', MAX_SEARCH_ROUNDS: String(rounds) }, generate: () => new Response(
+        reasoningFrames() + (partial ? text('Partial answer') : '')
+        + frame({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 8192, thinking_tokens: 8180 } }) + stop) },
+    async ({ answer, request, rows }) => {
+        await assert.rejects(answer('circle'), error => error.errorReason === 'max_tokens' && error.outputTokens === 8192 && error.thinkingTokens === 8180);
+        const ask = await request('/ask');
+        assert.equal(ask.status, 500); assert.match(ask.data, /generation service error/);
+        const chat = await request('/chat');
+        assert.match(chat.data, /event: error/); assert(!chat.data.includes('event: done'));
+        assert.equal(rows().at(-1).errorReason, 'max_tokens');
+        assert(!JSON.stringify(rows()).includes('PRIVATE reasoning'));
+    });
+});
+for (const adaptive of [false, true]) for (const separate of [true, false]) test(`thinking/signature/redacted blocks survive tools privately; adaptive=${adaptive}, separate usage=${separate}`, async () => {
+    await fixture({ env: { ANTHROPIC_MODEL: adaptive ? 'claude-haiku-5-5' : 'claude-haiku-4-5-20251001' }, generate: (_, __, n) => new Response(
         frame({ type: 'message_start', message: { usage: { input_tokens: 90 + n, output_tokens: 1 } } })
         + reasoningFrames() + (n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].'))
         + frame({ type: 'message_delta', usage: { output_tokens: 110 + n, ...(separate ? { thinking_tokens: 100 } : {}) } }) + stop) },
-        async ({ answerStream, calls }) => {
+        async ({ answerStream, calls, request, rows, output }) => {
             const events = [];
-            for await (const event of answerStream('circle', [], null, [], undefined, { thinkingBudget: 1024 })) events.push(event);
+            for await (const event of answerStream('circle', [], null, [], undefined, adaptive ? {} : { thinkingBudget: 1024 })) events.push(event);
             const result = events.at(-1);
             assert.equal(result.rounds, 3); assert.equal(result.haikuCalls, 3);
             for (const [i, call] of calls.entries()) {
-                assert.deepEqual(call.thinking, { type: 'enabled', budget_tokens: 1024 });
-                assert.equal(call.max_tokens, 1536 + 1024);
+                if (adaptive) { assert(!('thinking' in call)); assert(!('output_config' in call)); }
+                else assert.deepEqual(call.thinking, { type: 'enabled', budget_tokens: 1024 });
+                assert.equal(call.max_tokens, adaptive ? 8192 : 1536 + 1024);
                 for (const field of ['tool_choice', 'temperature', 'top_k']) assert(!(field in call));
                 if (i) {
                     for (const assistant of call.messages.filter(m => m.role === 'assistant')) {
@@ -445,7 +574,60 @@ for (const separate of [true, false]) test(`thinking/signature/redacted blocks s
             assert(!JSON.stringify(events).includes('PRIVATE reasoning'));
             assert(!JSON.stringify(events).includes('signed+'));
             assert(!JSON.stringify(events).includes('opaque+'));
+            await request('/ask');
+            for (const privateText of ['PRIVATE reasoning', 'signed+', 'opaque+']) {
+                assert(!JSON.stringify(rows()).includes(privateText));
+                assert(!output.join('\n').includes(privateText));
+            }
         });
+});
+for (const [rounds, allowedRounds] of [[1, 1], [1, 3], [3, 3]]) test(`TTFT ignores thinking/empty text and latency calls align across ${rounds}/${allowedRounds} rounds`, async () => {
+    const savedNow = Date.now;
+    let now = 10000;
+    const observations = [];
+    try {
+        Date.now = () => now;
+        await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', MAX_SEARCH_ROUNDS: String(allowedRounds) },
+            jev: () => { now += 20; return Response.json({ answers: { 'symbol:drawCircle': { noul: .9 }, exists: { noul: .9 } } }); },
+            generate: (_, __, n) => {
+                const observation = { start: now }; observations.push(observation);
+                const chunks = [
+                    frame({ type: 'message_start', message: { usage: { input_tokens: n * 100 } } }) + reasoningFrames(),
+                    text(''),
+                    text(n < rounds ? 'Discarded tool preamble' : 'Use [[drawCircle]].'),
+                    (n < rounds ? tool(`latency${n}`) : '') + frame({ type: 'message_delta', usage: { output_tokens: n * 10, thinking_tokens: n } }) + stop,
+                ];
+                let index = 0;
+                return new Response(new ReadableStream({ pull(controller) {
+                    now += 10;
+                    if (index === 2 && n === rounds) observation.textAt = now;
+                    if (index === 3) observation.end = now;
+                    if (index < chunks.length) controller.enqueue(new TextEncoder().encode(chunks[index++]));
+                    else controller.close();
+                } }, { highWaterMark: 0 }));
+            },
+        }, async ({ answerStream, request, rows }) => {
+            const started = now;
+            let visibleAt, result;
+            for await (const event of answerStream('circle')) {
+                if (event.type === 'delta' && visibleAt === undefined) visibleAt = now;
+                if (event.type === 'final') result = event;
+            }
+            assert.equal(result.calls.length, rounds);
+            for (const [i, call] of result.calls.entries()) {
+                assert.deepEqual(call, { ttftMs: i + 1 < rounds ? null : 30, totalMs: 40,
+                    inputTokens: (i + 1) * 100, outputTokens: (i + 1) * 10, thinkingTokens: i + 1 });
+                assert.equal(call.totalMs, observations[i].end - observations[i].start);
+            }
+            assert.equal(result.ttftMs, visibleAt - started);
+            assert.equal(result.totalMs, rounds * 40);
+            assert.equal(result.ttftMs, rounds * 60 - (allowedRounds > rounds ? 0 : 10), 'row TTFT includes retrieval and buffered tool decisions');
+            const response = await request('/chat');
+            for (const field of ['ttftMs', 'totalMs', '\"calls\"', 'thinkingTokens']) {
+                assert(!response.data.includes(field)); assert(!JSON.stringify(rows()).includes(field));
+            }
+        });
+    } finally { Date.now = savedNow; }
 });
 for (const separatelyReported of [true, false]) test(`recovery aligns per-call usage and mixed thinking accounting: ${separatelyReported}`, async () => {
     await fixture({ generate: (_, __, n) => new Response(
@@ -462,10 +644,32 @@ for (const separatelyReported of [true, false]) test(`recovery aligns per-call u
             assert.equal(result.traces[0].haiku.inputTokensTotal, 101);
             assert.equal(result.inputTokens, 101); assert.equal(result.outputTokens, 27);
             assert.equal(result.thinkingTokens, separatelyReported ? 19 : 'included in outputTokens');
+            assert.equal(result.calls.length, 2);
+            assert.deepEqual(result.calls.map(call => call.inputTokens), [101, null]);
+            assert.deepEqual(result.calls.map(call => call.outputTokens), [12, 15]);
+            assert.deepEqual(result.calls.map(call => call.thinkingTokens), [9, separatelyReported ? 10 : null]);
+            assert.equal(result.calls[0].ttftMs, null); assert(result.calls[1].ttftMs >= 0);
+            assert.equal(result.totalMs, result.calls.reduce((sum, call) => sum + call.totalMs, 0));
         });
 });
-for (const mode of ['total', 'line', 'event', 'tool-json', 'tool-blocks']) test(`thinking keeps existing stream ${mode} cap`, async () => {
-    await fixture({ env: { HAIKU_MAX_RESPONSE_BYTES: mode === 'total' ? '1200' : '1048576' }, generate: () => {
+for (const rounds of ['1', '3']) test(`hidden @@USED metadata is not counted as an answer token (MAX_SEARCH_ROUNDS=${rounds})`, async () => {
+    // Metadata-only reply, with the marker split across deltas.
+    await fixture({ env: { MAX_SEARCH_ROUNDS: rounds }, generate: () => new Response(text('\n@@US') + text('ED: symbol:drawCircle') + stop) },
+        async ({ answer }) => {
+            const result = await answer('circle');
+            assert.equal(result.answer ?? result.text ?? '', '');
+            assert.equal(result.ttftMs, null);
+            assert(result.calls.every(call => call.ttftMs === null), 'metadata-only call has no first answer token');
+        });
+    // Real answer text followed by the marker still counts.
+    await fixture({ env: { MAX_SEARCH_ROUNDS: rounds }, generate: () => new Response(text('Use [[drawCircle]].') + text('\n@@USED: symbol:drawCircle') + stop) },
+        async ({ answer }) => {
+            const result = await answer('circle');
+            assert(result.calls.at(-1).ttftMs >= 0);
+        });
+});
+for (const adaptive of [false, true]) for (const mode of ['total', 'line', 'event', 'tool-json', 'tool-blocks']) test(`thinking keeps existing stream ${mode} cap; adaptive=${adaptive}`, async () => {
+    await fixture({ env: { ANTHROPIC_MODEL: adaptive ? 'claude-haiku-5-5' : 'claude-haiku-4-5-20251001', HAIKU_MAX_RESPONSE_BYTES: mode === 'total' ? '1200' : '1048576' }, generate: () => {
         let content = reasoningFrames();
         if (mode === 'total' || mode === 'line') content += frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'x'.repeat(mode === 'total' ? 1400 : 65536) } });
         if (mode === 'event') content += ': ' + 'x'.repeat(40000) + '\n: ' + 'x'.repeat(40000) + '\n\n';
@@ -473,7 +677,7 @@ for (const mode of ['total', 'line', 'event', 'tool-json', 'tool-blocks']) test(
         if (mode === 'tool-blocks') for (let i = 3; i < 12; i++) content += frame({ type: 'content_block_start', index: i, content_block: { type: 'tool_use', id: `t${i}`, name: 'search_more', input: {} } });
         return new Response(content + stop);
     } }, async ({ answer }) => {
-        await assert.rejects(answer('circle', [], null, [], undefined, { thinkingBudget: 1024 }), e => e.errorReason === (mode.startsWith('tool-') ? mode === 'tool-json' ? 'tool-input' : 'tool-blocks' : 'oversize'));
+        await assert.rejects(answer('circle', [], null, [], undefined, adaptive ? {} : { thinkingBudget: 1024 }), e => e.errorReason === (mode.startsWith('tool-') ? mode === 'tool-json' ? 'tool-input' : 'tool-blocks' : 'oversize'));
     });
 });
 test('variant runner validates args and missing keys without calls or credential output', async () => {
@@ -493,15 +697,48 @@ test('variant runner validates args and missing keys without calls or credential
             const child = runNode([runner, ...args], process.env, dir);
             assert.equal(child.status, 1, JSON.stringify(child)); assert.match(child.stderr,  /Missing required environment variable: TYPESAFE_API_KEY/, JSON.stringify(child));
             assert(!child.stderr.includes(process.env.ANTHROPIC_API_KEY));
-            for (const extra of [['--variant', 'other'], ['--filler', '-1'], ['--thinking', '3'], ['--thinking', '16385'], ['--filler', '4097'], ['--filler', '1.5'], ['--key', 'dummy']]) {
+            for (const extra of [['--variant', 'other'], ['--filler', '-1'], ['--thinking', '3'], ['--thinking', '16385'], ['--filler', '4097'], ['--filler', '1.5'], ['--key', 'dummy'], ['--model', 'bad model'], ['--effort', 'extreme'], ['--thinking-off', '--thinking-off'], ['--thinking-off', 'true'], ['--thinking-off', '--thinking', '0']]) {
                 await assert.rejects(main([...args, ...extra]));
             }
             assert.equal(calls.length, 0); assert(!output.join('\n').includes('dummy-generator-value'));
         } finally { Object.assign(process.env, env); }
     });
 });
-for (const variant of ['base', 'filler', 'thinking']) test(`variant runner CLI writes schema, subset and incremental atomic results: ${variant}`, async () => {
-    await fixture({}, async ({ dir }) => {
+test('runner rejects incompatible model options before calls or output replacement', async () => {
+    await fixture({}, async ({ dir, requests }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), out = join(dir, 'out.json');
+        writeFileSync(questions, JSON.stringify([{ id: 'q1', question: 'circle' }]));
+        writeFileSync(out, 'keep existing output');
+        for (const extra of [[], ['--thinking', '0']]) {
+            await assert.rejects(main([questions, out, '--variant', 'thinking', '--model', 'claude-haiku-5-5', ...extra]),
+                /thinkingBudget is not supported by claude-haiku-5-5; use effort/);
+        }
+        for (const effort of ['xhigh', 'max']) {
+            await assert.rejects(main([questions, out, '--variant', 'base', '--model', 'claude-haiku-5-5', '--effort', effort, '--thinking-off']), /thinking off requires effort high or below/);
+        }
+        await assert.rejects(main([questions, out, '--variant', 'thinking', '--thinking-off']), /cannot be combined/);
+        for (const model of ['claude-haiku-4-5-20251001', 'unknown-model']) {
+            await assert.rejects(main([questions, out, '--variant', 'base', '--model', model, '--effort', 'high']), /effort is not supported/);
+        }
+        assert.equal(requests.length, 0); assert.equal(readFileSync(out, 'utf8'), 'keep existing output');
+    });
+});
+for (const [variant, modelArg, effort, envModel, envEffort, thinkingOff] of [
+    ['base'], ['filler'], ['thinking'],
+    ['base', 'claude-haiku-4-5-20251001'], ['base', 'claude-haiku-4-5-20251001', undefined, undefined, undefined, true],
+    ...[undefined, 'low', 'high'].map(effort => ['base', 'claude-haiku-5-5', effort, undefined, undefined, true]),
+    ['base', 'claude-haiku-5-5', 'high'], ['filler', 'claude-haiku-5-5'],
+    ['base', undefined, 'medium', 'claude-haiku-5-5'],
+    ['base', undefined, undefined, 'claude-haiku-5-5', 'low'],
+    ['base', 'claude-haiku-5-5', 'high', undefined, 'low'],
+]) test(`variant runner CLI writes rows: ${variant}, ${modelArg ?? envModel ?? '4.5'}, ${effort ?? envEffort ?? 'default'}`, async () => {
+    const expectedModel = modelArg ?? envModel ?? 'claude-haiku-4-5-20251001';
+    const expectedEffort = effort ?? envEffort;
+    await fixture({ env: { ...(envModel ? { ANTHROPIC_MODEL: envModel } : {}), HAIKU_EFFORT: envEffort ?? '' } }, async ({ dir }) => {
         const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
         const runner = join(runnerDir, 'run-variants.mjs');
         writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
@@ -519,31 +756,44 @@ globalThis.fetch=async (url, options)=>{
  if(url.endsWith('/systemone'))return Response.json({answers:{...Object.fromEntries(req.state.cards.map(c=>[c.card,{noul:.9}])),exists:{noul:.9}}});
  assert.equal(url,'https://api.anthropic.com/v1/messages');calls++;
  assert.equal(process.env.STATS,'0');
- if(${JSON.stringify(variant)}==='thinking')assert.deepEqual(req.thinking,{type:'enabled',budget_tokens:1024});else assert(!req.thinking);
+ assert.equal(req.model,${JSON.stringify(expectedModel)});
+ assert.deepEqual(req.output_config,${expectedEffort ? JSON.stringify({effort: expectedEffort}) : 'undefined'});
+ assert.equal(req.max_tokens,${expectedModel === 'claude-haiku-5-5' ? 8192 : variant === 'thinking' ? 2560 : 1536});
+ if(${JSON.stringify(variant)}==='thinking')assert.deepEqual(req.thinking,{type:'enabled',budget_tokens:1024});else if(${!!thinkingOff && expectedModel === 'claude-haiku-5-5'})assert.deepEqual(req.thinking,{type:'disabled'});else assert(!req.thinking);
  assert.equal(req.messages.at(-1).content.endsWith('\\n'+Array(300).fill('.').join(' ')),${variant === 'filler'});
  if(calls===2 && process.env.STUB_CRASH==='1')process.exit(7);
  if(calls===2 && process.env.STUB_ERROR==='1')throw Error(process.env.ANTHROPIC_API_KEY);
- return new Response(frame({type:'message_start',message:{usage:{input_tokens:101}}})+frame({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Use [[drawCircle]].'}})+frame({type:'message_delta',usage:{output_tokens:17}})+frame({type:'message_stop'}));
+ return new Response(frame({type:'message_start',message:{usage:{input_tokens:101}}})+frame({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Use [[drawCircle]].'}})+frame({type:'message_delta',usage:{output_tokens:17,${expectedModel === 'claude-haiku-5-5' && effort === 'medium' ? 'thinking_tokens:5' : ''}}})+frame({type:'message_stop'}));
 };`);
-        const run = extras => runNode(['--import', preload, runner, questions, out, '--variant', variant, '--ids', ids],
+        const run = extras => runNode(['--import', preload, runner, questions, out, '--variant', variant, '--ids', ids,
+            ...(modelArg ? ['--model', modelArg] : []), ...(effort ? ['--effort', effort] : []), ...(thinkingOff ? ['--thinking-off'] : [])],
             { ...process.env, STATS: '1', STUB_ERROR: '0', STUB_CRASH: '0', ...extras }, dir);
         let child = run({}); assert.equal(child.status, 0, child.stderr);
         const results = JSON.parse(readFileSync(out, 'utf8'));
         assert.equal(results.length, 2);
         assert.deepEqual(results.map(row => row.id), ['a', 2]);
         for (const result of results) {
-            assert.deepEqual(Object.keys(result).sort(), ['id','variant','answer','rounds','haikuCalls','inputTokensPerCall','inputTokens','outputTokens','thinkingTokens','ms'].sort());
-            assert.equal(result.variant, variant); assert.equal(result.rounds, 1); assert.equal(result.haikuCalls, 1);
+            assert.deepEqual(Object.keys(result).sort(), ['id','variant','model','effort','answer','rounds','haikuCalls','inputTokensPerCall','inputTokens','outputTokens','thinkingTokens','calls','ttftMs','totalMs','ms'].sort());
+            assert.equal(result.variant, variant); assert.equal(result.model, expectedModel); assert.equal(result.effort, expectedEffort ?? 'default'); assert.equal(result.rounds, 1); assert.equal(result.haikuCalls, 1);
             assert.deepEqual(result.inputTokensPerCall, [101]);
             assert.equal(result.inputTokens, 101); assert.equal(result.outputTokens, 17);
-            assert.equal(result.thinkingTokens, variant === 'thinking' ? 'included in outputTokens' : 0);
+            assert.equal(result.thinkingTokens, expectedModel === 'claude-haiku-5-5' && effort === 'medium' ? 5 : variant === 'thinking' || (expectedModel === 'claude-haiku-5-5' && !thinkingOff) ? 'included in outputTokens' : 0);
             assert(result.answer.includes('drawCircle')); assert(result.ms >= 0);
+            assert.equal(result.calls.length, 1);
+            assert.deepEqual(Object.keys(result.calls[0]).sort(), ['ttftMs','totalMs','inputTokens','outputTokens','thinkingTokens'].sort());
+            assert.equal(result.calls[0].inputTokens, 101); assert.equal(result.calls[0].outputTokens, 17);
+            assert.equal(result.calls[0].thinkingTokens, expectedModel === 'claude-haiku-5-5' && effort === 'medium' ? 5 : null);
+            assert(result.calls[0].ttftMs >= 0); assert(result.calls[0].ttftMs <= result.calls[0].totalMs);
+            assert(result.ttftMs >= result.calls[0].ttftMs); assert(result.ttftMs <= result.ms);
+            assert.equal(result.totalMs, result.calls[0].totalMs);
         }
         assert(!existsSync(join(dir, 'stats.jsonl')));
         child = run({ STUB_CRASH: '1' }); assert.equal(child.status, 7, child.stderr);
         assert.equal(JSON.parse(readFileSync(out, 'utf8')).length, 1);
         child = run({ STUB_ERROR: '1' }); assert.equal(child.status, 1, child.stderr);
         const failure = JSON.parse(readFileSync(out, 'utf8'))[1]; assert.equal(failure.error, 'answer failed');
+        assert.equal(failure.calls.length, 1); assert.equal(failure.calls[0].ttftMs, null); assert.equal(failure.ttftMs, null);
+        assert.equal(failure.totalMs, failure.calls[0].totalMs);
         const allOutput = child.stdout + child.stderr + readFileSync(out, 'utf8');
         assert(!allOutput.includes(process.env.ANTHROPIC_API_KEY)); assert(!allOutput.includes(process.env.TYPESAFE_API_KEY));
         assert(!existsSync(join(dir, 'stats.jsonl')));
@@ -593,6 +843,10 @@ for (const consumer of ['answer', 'answerStream', 'runner']) {
             assert.deepEqual(failure.inputTokensPerCall, [101, 202]);
             assert.equal(failure.inputTokens, 303); assert.equal(failure.outputTokens, 51);
             assert.equal(failure.thinkingTokens, 15);
+            assert.equal(failure.calls.length, 2); assert.equal(failure.ttftMs, null);
+            assert.deepEqual(failure.calls.map(call => call.inputTokens), [101, 202]);
+            assert.deepEqual(failure.calls.map(call => call.thinkingTokens), [5, 10]);
+            assert.equal(failure.totalMs, failure.calls.reduce((sum, call) => sum + call.totalMs, 0));
         });
     });
     test(`completed Haiku usage survives correction-packing failure: ${consumer}`, async () => {

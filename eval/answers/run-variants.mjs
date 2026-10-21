@@ -4,7 +4,7 @@ import { dirname, basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
-const usage = 'Usage: node eval/answers/run-variants.mjs <questions.json> <out.json> --variant base|filler|thinking [--filler 300] [--thinking 1024] [--ids file]';
+const usage = 'Usage: node eval/answers/run-variants.mjs <questions.json> <out.json> --variant base|filler|thinking [--filler 300] [--thinking 1024] [--thinking-off] [--ids file] [--model id] [--effort low|medium|high|xhigh|max]';
 // Bound (configuration): each questions/ids input is a regular file read through one descriptor, at most 4 MiB before parsing.
 const MAX_INPUT_FILE_BYTES = 4 * 1024 * 1024;
 // Bound (configuration): mirror server.mjs's 8000 UTF-16 code-unit question limit before retrieval.
@@ -39,10 +39,15 @@ function readInput(path, name) {
 function argumentsFor(args) {
     if (args.length < 4 || args[0].startsWith('--') || args[1].startsWith('--')) throw new Error(usage);
     const options = {};
-    for (let i = 2; i < args.length; i += 2) {
+    for (let i = 2; i < args.length;) {
         const name = args[i], value = args[i + 1];
-        if (!['--variant', '--filler', '--thinking', '--ids'].includes(name) || !value || value.startsWith('--') || name in options) throw new Error(usage);
+        if (name === '--thinking-off') {
+            if (name in options) throw new Error(usage);
+            options[name] = true; i++; continue;
+        }
+        if (!['--variant', '--filler', '--thinking', '--ids', '--model', '--effort'].includes(name) || !value || value.startsWith('--') || name in options) throw new Error(usage);
         options[name] = value;
+        i += 2;
     }
     const variant = options['--variant'];
     if (!['base', 'filler', 'thinking'].includes(variant)) throw new Error(usage);
@@ -54,8 +59,13 @@ function argumentsFor(args) {
     if (!Number.isSafeInteger(filler) || filler > 4096) throw new Error('--filler must be within 0..4096');
     // Bound (configuration): the runner accepts thinking 0 (off) or 1024..16384 tokens, matching the core; invalid values fail before any calls.
     if (!Number.isSafeInteger(thinking) || thinking > 16384 || (thinking > 0 && thinking < 1024)) throw new Error('--thinking must be 0 or within 1024..16384');
+    // Bound (configuration): --model accepts at most 128 ID characters, matching the core; invalid IDs fail before any calls.
+    if ('--model' in options && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(options['--model'])) throw new Error('--model must be a valid model ID');
+    if ('--effort' in options && !['low', 'medium', 'high', 'xhigh', 'max'].includes(options['--effort'])) throw new Error('--effort must be low|medium|high|xhigh|max');
+    if (options['--thinking-off'] && (variant === 'thinking' || '--thinking' in options)) throw new Error('--thinking-off cannot be combined with --variant thinking or --thinking');
     return { questionsPath: args[0], outputPath: args[1], idsPath: options['--ids'], variant,
-        opts: { fillerTokens: variant === 'filler' ? filler : 0, thinkingBudget: variant === 'thinking' ? thinking : 0 } };
+        opts: { fillerTokens: variant === 'filler' ? filler : 0, thinkingBudget: variant === 'thinking' ? thinking : 0,
+            model: options['--model'], effort: options['--effort'], thinking: options['--thinking-off'] ? 'off' : undefined } };
 }
 function writeResults(path, results) {
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -92,9 +102,15 @@ export async function main(args = process.argv.slice(2)) {
     process.env.STATS = '0';
     process.env.GEN_BACKEND = 'anthropic';
     process.env.RETRIEVAL = 'jev';
-    let answer;
-    try { ({ answer } = await import('../../rag.mjs')); }
+    let answer, validateVariants, modelCapabilities;
+    try { ({ answer, validateVariants, modelCapabilities } = await import('../../rag.mjs')); }
     catch { throw new Error('Unable to load answer pipeline'); }
+    const variants = validateVariants(config.opts);
+    if (config.variant === 'thinking' && !modelCapabilities(variants.model).manual)
+        throw new Error(`thinkingBudget is not supported by ${variants.model}; use effort`);
+    if (config.opts.effort !== undefined && !modelCapabilities(variants.model).effort)
+        throw new Error(`effort is not supported by ${variants.model}`);
+    const recordedEffort = modelCapabilities(variants.model).effort ? variants.effort ?? 'default' : 'default';
     const results = [];
     writeResults(outputPath, results);
     let failed = false;
@@ -103,14 +119,15 @@ export async function main(args = process.argv.slice(2)) {
         let result, error;
         try {
             if (question.question.length > MAX_QUESTION_LENGTH) throw new Error('Question exceeds length limit');
-            result = await answer(question.question, [], null, [], undefined, config.opts);
+            result = await answer(question.question, [], null, [], undefined, variants);
         }
         catch (e) { result = e; error = 'answer failed'; failed = true; }
-        results.push({ id: question.id, variant: config.variant, answer: error ? '' : result.text,
+        results.push({ id: question.id, variant: config.variant, model: variants.model, effort: recordedEffort, answer: error ? '' : result.text,
             rounds: result?.rounds ?? 0, haikuCalls: result?.haikuCalls ?? 0,
             inputTokensPerCall: result?.inputTokensPerCall ?? [],
+            calls: result?.calls ?? [], ttftMs: result?.ttftMs ?? null, totalMs: result?.totalMs ?? 0,
             inputTokens: result?.inputTokens ?? null, outputTokens: result?.outputTokens ?? null,
-            thinkingTokens: result?.thinkingTokens ?? (config.opts.thinkingBudget ? 'included in outputTokens' : 0),
+            thinkingTokens: result?.thinkingTokens ?? (variants.thinkingBudget || (modelCapabilities(variants.model).adaptive && variants.thinking !== 'off') ? 'included in outputTokens' : 0),
             ms: Date.now() - started, ...(error ? { error } : {}) });
         writeResults(outputPath, results);
     }

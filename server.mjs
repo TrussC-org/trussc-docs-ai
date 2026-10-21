@@ -202,6 +202,9 @@ export const server = createServer(async (req, res) => {
             return json(200, { results, path: info.path, exists: info.exists, rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
         }
 
+        // Generation opts are allowlisted as { ip } here and in /chat below.
+        // Never spread body, history metadata, headers or query params into opts;
+        // fillerTokens/thinkingBudget belong only to in-process offline callers.
         // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
         if (url.pathname === '/ask') {
             const result = await answer(question, history, page, pinned, undefined, { ip });

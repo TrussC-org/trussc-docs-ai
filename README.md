@@ -155,7 +155,7 @@ Only the boolean `true` enables it. Each round has exactly these fields:
 | `hintFollowed` | `true` if Haiku called `search_more` after the recommendation, `false` if it answered instead, `null` when no recommendation was shown |
 | `path` | `"jev"` or `"fallback"` |
 | `idOnlyCards` | Number of newly picked cards sent by id only because of the whole-request input budget (excludes already-shown references) |
-| `haiku` | `{ms,inputTokens,outputTokens,estInputTokens}`: elapsed milliseconds, reported input/output tokens, and a numeric estimate array in Haiku call order (including recovery/correction) |
+| `haiku` | `{ms,inputTokens,inputTokensTotal,outputTokens,estInputTokens}`: elapsed milliseconds; reported input tokens per call (array aligned with `estInputTokens`, `null` when unreported); round input total; round output total (includes thinking if enabled internally); and estimated input tokens per call (including recovery/correction) |
 | `jev` | `{ms,tokens}`: selection milliseconds and reported total tokens, or the request estimate when not reported |
 | `message` | The round's validated tool-call filler message, or `null` if no search tool was called |
 
@@ -479,3 +479,5 @@ One JSON line per request → `stats.jsonl` (gitignored): question, hashed IP, l
 Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report aggregates
 (volume, distinct visitors, p50/p95, top questions/APIs/categories, by day).
+
+Offline base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md). These internal options are unavailable over HTTP.

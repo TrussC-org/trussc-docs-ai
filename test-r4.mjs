@@ -1,10 +1,22 @@
 // Round-4 regressions: synthetic corpus and in-memory transports only.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { publicDebug } from './debug.mjs';
+function runNode(args, env, dir) {
+    const out = join(dir, 'child.stdout'), err = join(dir, 'child.stderr');
+    const stdout = openSync(out, 'w'), stderr = openSync(err, 'w');
+    let result;
+    try { result = spawnSync(process.execPath, args, { env, stdio: ['ignore', stdout, stderr] }); }
+    finally { closeSync(stdout); closeSync(stderr); }
+    if (result.error) throw result.error;
+    return { ...result, stdout: readFileSync(out, 'utf8'), stderr: readFileSync(err, 'utf8') };
+}
 const frame = value => `data: ${JSON.stringify(value)}\n\n`;
 const stop = frame({ type: 'message_stop' });
 const text = value => frame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: value } });
@@ -13,7 +25,7 @@ const baseCard = { id: 'symbol:drawCircle', title: 'drawCircle', source: 'refere
 async function fixture(options, test) {
     const env = { ...process.env }, savedFetch = globalThis.fetch;
     const dir = mkdtempSync(join(tmpdir(), 'docsai-r4-'));
-    const calls = [], output = [], savedConsole = { log: console.log, warn: console.warn, error: console.error };
+    const calls = [], rawCalls = [], output = [], savedConsole = { log: console.log, warn: console.warn, error: console.error };
     try {
         Object.assign(process.env, { TYPESAFE_API_KEY: 'fake-selector', ANTHROPIC_API_KEY: 'fake-generator',
             GEN_BACKEND: 'anthropic', RETRIEVAL: 'jev', HYBRID: '1', RERANK: '0', REF_BASE: 'https://trussc.org',
@@ -32,19 +44,19 @@ async function fixture(options, test) {
                 if (options.jev) return options.jev(opts);
                 return Response.json({ answers: { ...Object.fromEntries(req.state.cards.map((c, i) => [c.card, { noul: options.probability?.(c, i, calls.length) ?? .9 }])), exists: { noul: typeof options.exists === 'function' ? options.exists(calls.length) : options.exists ?? .1 } } });
             }
-            assert.equal(url, 'https://api.anthropic.com/v1/messages'); calls.push(req);
+            assert.equal(url, 'https://api.anthropic.com/v1/messages'); calls.push(req); rawCalls.push(opts.body);
             return options.generate ? options.generate(req, opts, calls.length) : new Response(text('Use [[drawCircle]].') + stop);
         };
         const rag = await import(join(dir, 'rag.mjs'));
         const { server } = await import(join(dir, 'server.mjs'));
-        const request = (path, body = { question: 'circle', debug: true }) => new Promise(resolve => {
-            const req = new PassThrough(); Object.assign(req, { method: 'POST', url: path, headers: {}, socket: { remoteAddress: 'fixture' } });
+        const request = (path, body = { question: 'circle', debug: true }, headers = {}) => new Promise(resolve => {
+            const req = new PassThrough(); Object.assign(req, { method: 'POST', url: path, headers, socket: { remoteAddress: 'fixture' } });
             const res = new EventEmitter(); Object.assign(res, { status: 200, data: '', setHeader() {}, writeHead(status) { this.status = status; }, write(data) { this.data += data; return true; }, end(data = '') { this.data += data; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
         const rows = () => { try { return readFileSync(process.env.STATS_LOG, 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
         const { selectCards } = await import(join(dir, 'jev.mjs'));
-        await test({ ...rag, selectCards, request, calls, output, rows });
+        await test({ ...rag, selectCards, request, calls, rawCalls, output, rows, dir });
     } finally {
         globalThis.fetch = savedFetch; Object.assign(console, savedConsole);
         for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
@@ -292,6 +304,246 @@ test('hard Haiku ceiling includes invalid-tool recovery and fabrication correcti
         const debug = JSON.parse(r.data).debug;
         assert.equal(calls.length, maxRounds + 1); assert.equal(rows().at(-1).haikuCalls, calls.length);
         assert.equal(debug.haikuCalls, calls.length); assert.equal(typeof debug.haikuCalls, 'number');
+    });
+});
+
+test('variant options validate before any calls, default and explicit-off payloads match', async () => {
+    await fixture({}, async ({ answer, answerStream, calls, rawCalls, validateVariants }) => {
+        assert.deepEqual(validateVariants(), { fillerTokens: 0, thinkingBudget: 0 });
+        for (const field of ['fillerTokens', 'thinkingBudget']) {
+            for (const value of [null, NaN, Infinity, -1, .5, '1024', true, Number.MAX_SAFE_INTEGER]) {
+                await assert.rejects(answer('circle', [], null, [], undefined, { [field]: value }), new RegExp(field));
+                const stream = answerStream('circle', [], null, [], undefined, { [field]: value });
+                await assert.rejects(stream.next(), new RegExp(field));
+            }
+        }
+        for (const value of [1, 1023, 16385]) await assert.rejects(answer('circle', [], null, [], undefined, { thinkingBudget: value }), /thinkingBudget/);
+        await assert.rejects(answer('circle', [], null, [], undefined, { fillerTokens: 4097 }), /fillerTokens/);
+        assert.equal(calls.length, 0);
+        await answer('circle');
+        const result = await answer('circle', [], null, [], undefined, { fillerTokens: 0, thinkingBudget: 0 });
+        assert.equal(rawCalls[0], rawCalls[1]);
+        // Frozen against the pre-variant implementation using this synthetic fixture.
+        assert.equal(createHash('sha256').update(rawCalls[0]).digest('hex'), 'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf');
+        assert.equal(calls[0].max_tokens, 1536);
+        for (const field of ['thinking', 'temperature', 'top_k', 'tool_choice']) assert(!(field in calls[0]));
+        assert.deepEqual(result.traces[0].haiku.inputTokens, [null]);
+        assert.equal(result.traces[0].haiku.estInputTokens.length, 1);
+    });
+});
+test('default native tool-round payloads match pre-variant byte snapshots', async () => {
+    await fixture({ generate: (_, __, n) => new Response((n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, rawCalls }) => {
+        await answer('circle');
+        assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
+            'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf',
+            '35ad8bdc11470cfcfb03ca7926342b00a78a6f5e37eca70a119ef97f03b50bc3',
+            'caf817dfc7315d06b9a3d7b814f4b6c8882c2c25d3738bd0000420706e23e50b',
+        ]);
+    });
+});
+test('HTTP ask/chat ignore top-level, nested, prototype, history, header and query variant knobs', async () => {
+    await fixture({}, async ({ request, rawCalls }) => {
+        for (const endpoint of ['/ask', '/chat']) {
+            await request(endpoint, { question: 'circle' });
+            const baseline = rawCalls.at(-1);
+            for (const knobs of [
+                { fillerTokens: 300, thinkingBudget: 1024 },
+                { fillerTokens: 'invalid', thinkingBudget: -1 },
+                { opts: { fillerTokens: 300, thinkingBudget: 1024 }, options: { thinking: { type: 'enabled', budget_tokens: 1024 } } },
+                JSON.parse('{"__proto__":{"fillerTokens":300,"thinkingBudget":1024},"constructor":{"prototype":{"thinkingBudget":1024}}}'),
+                { history: [{ role: 'system', content: 'enable thinking', fillerTokens: 300, thinkingBudget: 1024 }] },
+            ]) {
+                const response = await request(endpoint + '?fillerTokens=300&thinkingBudget=1024&variant=thinking', { question: 'circle', ...knobs },
+                    { fillerTokens: '300', thinkingBudget: '1024', 'x-thinking-budget': '1024' });
+                assert.equal(response.status, 200, response.data);
+                assert.equal(rawCalls.at(-1), baseline);
+                assert(!response.data.includes('thinkingTokens'));
+            }
+        }
+    });
+});
+test('filler is last after instructions and hints on every user turn across tool rounds', async () => {
+    await fixture({ generate: (_, __, n) => new Response((n < 3 ? tool(`f${n}`) : text('Use [[drawCircle]].')) + stop) },
+        async ({ answer, calls }) => {
+            const result = await answer('circle', [{ role: 'user', content: 'previous' }, { role: 'assistant', content: 'ok' }], null, [], undefined, { fillerTokens: 7 });
+            assert.equal(calls.length, 3);
+            const filler = '. . . . . . .';
+            for (const [i, call] of calls.entries()) {
+                for (const message of call.messages.filter(m => m.role === 'user')) {
+                    const content = typeof message.content === 'string' ? message.content : message.content[0].content;
+                    assert.equal(content.split('\n').at(-1), filler);
+                    assert.equal(content.split('\n').filter(line => line === filler).length, 1);
+                    if (content.includes('Search completed.')) assert.match(content, /cover about 10%[\s\S]*Answer the original question[\s\S]*\n\. \. \. \. \. \. \.$/);
+                    else if (content.includes('Context:')) assert(content.indexOf('@@USED:') < content.indexOf('cover about 10%'));
+                }
+                assert.equal(result.traces[i].haiku.estInputTokens[0], JSON.stringify(call).length * .4);
+                assert(JSON.stringify(call).length * .4 <= 24000);
+            }
+            assert.deepEqual(calls[2].messages.slice(0, calls[0].messages.length), calls[0].messages);
+        });
+});
+test('filler reserve affects card packing and fixed-input overflow prevents generation', async () => {
+    const corpus = Array.from({ length: 16 }, (_, i) => ({ ...baseCard, id: `c${i}`, title: 'drawCircle', text: 'evidence\n'.repeat(900) }));
+    await fixture({ corpus, env: { HAIKU_MAX_INPUT_TOKENS: '10500' } }, async ({ answer, calls }) => {
+        const base = await answer('circle');
+        const filler = await answer('circle', [], null, [], undefined, { fillerTokens: 4096 });
+        assert(filler.idOnlyCardsTotal > base.idOnlyCardsTotal);
+        assert(calls.every(c => JSON.stringify(c).length * .4 <= 10500));
+        assert.equal(filler.estInputTokens[0], JSON.stringify(calls.at(-1)).length * .4);
+    });
+    await fixture({}, async ({ answer, calls }) => {
+        await answer('circle');
+        const baseChars = JSON.stringify(calls[0]).length;
+        // With a fixed question sized just below the budget, the extra filler
+        // cannot be paid for even after dropping cards and disabling search.
+        const question = 'q'.repeat(Math.floor(24000 / .4 - baseChars - 1000));
+        await answer(question);
+        const before = calls.length;
+        await assert.rejects(answer(question, [], null, [], undefined, { fillerTokens: 4096 }), e => e.errorReason === 'input');
+        assert.equal(calls.length, before);
+    });
+});
+const thinkingBlock = { type: 'thinking', thinking: 'PRIVATE reasoning\n秘密', signature: 'signed+/=尾' };
+const redactedBlock = { type: 'redacted_thinking', data: 'opaque+/=秘密' };
+const reasoningFrames = () => frame({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } })
+    + frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'PRIVATE reasoning\n' } })
+    + frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '秘密' } })
+    + frame({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'signed+' } })
+    + frame({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: '/=尾' } })
+    + frame({ type: 'content_block_stop', index: 0 })
+    + frame({ type: 'content_block_start', index: 2, content_block: redactedBlock });
+for (const separate of [true, false]) test(`thinking/signature/redacted blocks survive tools privately; separate usage=${separate}`, async () => {
+    await fixture({ generate: (_, __, n) => new Response(
+        frame({ type: 'message_start', message: { usage: { input_tokens: 90 + n, output_tokens: 1 } } })
+        + reasoningFrames() + (n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].'))
+        + frame({ type: 'message_delta', usage: { output_tokens: 110 + n, ...(separate ? { thinking_tokens: 100 } : {}) } }) + stop) },
+        async ({ answerStream, calls }) => {
+            const events = [];
+            for await (const event of answerStream('circle', [], null, [], undefined, { thinkingBudget: 1024 })) events.push(event);
+            const result = events.at(-1);
+            assert.equal(result.rounds, 3); assert.equal(result.haikuCalls, 3);
+            for (const [i, call] of calls.entries()) {
+                assert.deepEqual(call.thinking, { type: 'enabled', budget_tokens: 1024 });
+                assert.equal(call.max_tokens, 1536 + 1024);
+                for (const field of ['tool_choice', 'temperature', 'top_k']) assert(!(field in call));
+                if (i) {
+                    for (const assistant of call.messages.filter(m => m.role === 'assistant')) {
+                        assert.deepEqual(assistant.content.slice(0, 2), [thinkingBlock, redactedBlock]);
+                        assert.equal(assistant.content[2].type, 'tool_use');
+                    }
+                }
+                assert.deepEqual(result.traces[i].haiku.inputTokens, [91 + i]);
+                assert.equal(result.traces[i].haiku.inputTokensTotal, 91 + i);
+                assert.equal(result.traces[i].haiku.thinkingTokens, separate ? 100 : 'included in outputTokens');
+                assert.equal(result.traces[i].haiku.estInputTokens[0], JSON.stringify(call).length * .4);
+            }
+            assert.equal(result.inputTokens, 276); assert.equal(result.outputTokens, 336);
+            assert.equal(result.thinkingTokens, separate ? 300 : 'included in outputTokens');
+            assert(!JSON.stringify(publicDebug(result.traces)).includes('thinking'));
+            assert(!JSON.stringify(events).includes('PRIVATE reasoning'));
+            assert(!JSON.stringify(events).includes('signed+'));
+            assert(!JSON.stringify(events).includes('opaque+'));
+        });
+});
+for (const separatelyReported of [true, false]) test(`recovery aligns per-call usage and mixed thinking accounting: ${separatelyReported}`, async () => {
+    await fixture({ generate: (_, __, n) => new Response(
+        (n === 1 ? frame({ type: 'message_start', message: { usage: { input_tokens: 101 } } }) + tool('invalid', { message: '', queries: [] }) : text('Use [[drawCircle]].'))
+        + frame({ type: 'message_delta', usage: { output_tokens: n === 1 ? 12 : 15,
+            ...(n === 1 ? { thinking_tokens: 9 } : separatelyReported ? { output_tokens_details: { thinking_tokens: 10 } } : {}) } }) + stop) },
+        async ({ answer, calls }) => {
+            const result = await answer('circle', [], null, [], undefined, { thinkingBudget: 16384 });
+            assert.equal(calls.length, 2);
+            assert(calls.every(call => call.max_tokens === 16384 + 1536));
+            assert.equal(result.rounds, 1);
+            assert.deepEqual(result.traces[0].haiku.inputTokens, [101, null]);
+            assert.equal(result.traces[0].haiku.estInputTokens.length, 2);
+            assert.equal(result.traces[0].haiku.inputTokensTotal, 101);
+            assert.equal(result.inputTokens, 101); assert.equal(result.outputTokens, 27);
+            assert.equal(result.thinkingTokens, separatelyReported ? 19 : 'included in outputTokens');
+        });
+});
+for (const mode of ['total', 'line', 'event', 'tool-json', 'tool-blocks']) test(`thinking keeps existing stream ${mode} cap`, async () => {
+    await fixture({ env: { HAIKU_MAX_RESPONSE_BYTES: mode === 'total' ? '1200' : '1048576' }, generate: () => {
+        let content = reasoningFrames();
+        if (mode === 'total' || mode === 'line') content += frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'x'.repeat(mode === 'total' ? 1400 : 65536) } });
+        if (mode === 'event') content += ': ' + 'x'.repeat(40000) + '\n: ' + 'x'.repeat(40000) + '\n\n';
+        if (mode === 'tool-json') content += tool('large') + frame({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'x'.repeat(8193) } });
+        if (mode === 'tool-blocks') for (let i = 3; i < 12; i++) content += frame({ type: 'content_block_start', index: i, content_block: { type: 'tool_use', id: `t${i}`, name: 'search_more', input: {} } });
+        return new Response(content + stop);
+    } }, async ({ answer }) => {
+        await assert.rejects(answer('circle', [], null, [], undefined, { thinkingBudget: 1024 }), e => e.errorReason === (mode.startsWith('tool-') ? mode === 'tool-json' ? 'tool-input' : 'tool-blocks' : 'oversize'));
+    });
+});
+test('variant runner validates args and missing keys without calls or credential output', async () => {
+    await fixture({}, async ({ dir, calls, output }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const args = [join(dir, 'questions.json'), join(dir, 'out.json'), '--variant', 'base'];
+        const env = { ...process.env };
+        try {
+            delete process.env.ANTHROPIC_API_KEY;
+            await assert.rejects(main(args), /Missing required environment variable: ANTHROPIC_API_KEY/);
+            process.env.ANTHROPIC_API_KEY = 'dummy-generator-value-must-not-print';
+            delete process.env.TYPESAFE_API_KEY;
+            await assert.rejects(main(args), /Missing required environment variable: TYPESAFE_API_KEY/);
+            const child = runNode([runner, ...args], process.env, dir);
+            assert.equal(child.status, 1, JSON.stringify(child)); assert.match(child.stderr,  /Missing required environment variable: TYPESAFE_API_KEY/, JSON.stringify(child));
+            assert(!child.stderr.includes(process.env.ANTHROPIC_API_KEY));
+            for (const extra of [['--variant', 'other'], ['--filler', '-1'], ['--thinking', '3'], ['--thinking', '16385'], ['--filler', '4097'], ['--filler', '1.5'], ['--key', 'dummy']]) {
+                await assert.rejects(main([...args, ...extra]));
+            }
+            assert.equal(calls.length, 0); assert(!output.join('\n').includes('dummy-generator-value'));
+        } finally { Object.assign(process.env, env); }
+    });
+});
+for (const variant of ['base', 'filler', 'thinking']) test(`variant runner CLI writes schema, subset and incremental atomic results: ${variant}`, async () => {
+    await fixture({}, async ({ dir }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const questions = join(dir, 'questions.json'), out = join(dir, 'out.json'), ids = join(dir, 'ids.txt'), preload = join(dir, 'fetch-stub.mjs');
+        writeFileSync(questions, JSON.stringify([{ id: 'a', question: 'circle' }, { id: 2, question: 'second' }, { id: 'c', question: 'excluded' }]));
+        writeFileSync(ids, 'a\r\n2\n');
+        writeFileSync(preload, `import assert from 'node:assert/strict'; import {readFileSync} from 'node:fs';
+const frame=${frame.toString()}; let calls=0;
+globalThis.fetch=async (url, options)=>{
+ const req=JSON.parse(options.body);
+ if(url.endsWith('/api/embed')) {
+  if(req.input==='second') {const rows=JSON.parse(readFileSync(${JSON.stringify(out)},'utf8'));assert.equal(rows.length,1);assert.equal(rows[0].id,'a');}
+  return Response.json({embeddings:[[1,0]]});
+ }
+ if(url.endsWith('/systemone'))return Response.json({answers:{...Object.fromEntries(req.state.cards.map(c=>[c.card,{noul:.9}])),exists:{noul:.9}}});
+ assert.equal(url,'https://api.anthropic.com/v1/messages');calls++;
+ assert.equal(process.env.STATS,'0');
+ if(${JSON.stringify(variant)}==='thinking')assert.deepEqual(req.thinking,{type:'enabled',budget_tokens:1024});else assert(!req.thinking);
+ assert.equal(req.messages.at(-1).content.endsWith('\\n'+Array(300).fill('.').join(' ')),${variant === 'filler'});
+ if(calls===2 && process.env.STUB_CRASH==='1')process.exit(7);
+ if(calls===2 && process.env.STUB_ERROR==='1')throw Error(process.env.ANTHROPIC_API_KEY);
+ return new Response(frame({type:'message_start',message:{usage:{input_tokens:101}}})+frame({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Use [[drawCircle]].'}})+frame({type:'message_delta',usage:{output_tokens:17}})+frame({type:'message_stop'}));
+};`);
+        const run = extras => runNode(['--import', preload, runner, questions, out, '--variant', variant, '--ids', ids],
+            { ...process.env, STATS: '1', STUB_ERROR: '0', STUB_CRASH: '0', ...extras }, dir);
+        let child = run({}); assert.equal(child.status, 0, child.stderr);
+        const results = JSON.parse(readFileSync(out, 'utf8'));
+        assert.equal(results.length, 2);
+        assert.deepEqual(results.map(row => row.id), ['a', 2]);
+        for (const result of results) {
+            assert.deepEqual(Object.keys(result).sort(), ['id','variant','answer','rounds','haikuCalls','inputTokens','outputTokens','thinkingTokens','ms'].sort());
+            assert.equal(result.variant, variant); assert.equal(result.rounds, 1); assert.equal(result.haikuCalls, 1);
+            assert.equal(result.inputTokens, 101); assert.equal(result.outputTokens, 17);
+            assert.equal(result.thinkingTokens, variant === 'thinking' ? 'included in outputTokens' : 0);
+            assert(result.answer.includes('drawCircle')); assert(result.ms >= 0);
+        }
+        assert(!existsSync(join(dir, 'stats.jsonl')));
+        child = run({ STUB_CRASH: '1' }); assert.equal(child.status, 7, child.stderr);
+        assert.equal(JSON.parse(readFileSync(out, 'utf8')).length, 1);
+        child = run({ STUB_ERROR: '1' }); assert.equal(child.status, 1, child.stderr);
+        const failure = JSON.parse(readFileSync(out, 'utf8'))[1]; assert.equal(failure.error, 'answer failed');
+        const allOutput = child.stdout + child.stderr + readFileSync(out, 'utf8');
+        assert(!allOutput.includes(process.env.ANTHROPIC_API_KEY)); assert(!allOutput.includes(process.env.TYPESAFE_API_KEY));
+        assert(!existsSync(join(dir, 'stats.jsonl')));
     });
 });
 let failures = 0;

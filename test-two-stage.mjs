@@ -240,7 +240,7 @@ async function testRoundPools() {
         ];
         process.env.EMBEDDED = join(dir, 'corpus.json');
         writeFileSync(process.env.EMBEDDED, JSON.stringify(corpus));
-        for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs']) writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
+        for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'mcp-core.mjs']) writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
         const jev = [], haiku = [], queries = ['alpha', 'beta'], message = 'Find both missing details.';
         globalThis.fetch = async (url, options) => {
             const req = JSON.parse(options.body);
@@ -315,7 +315,7 @@ async function testRoundPools() {
         // Raising the configured budget cannot exceed Jev's per-question limit.
         const largeDir = join(dir, 'large');
         const { mkdirSync } = await import('node:fs'); mkdirSync(largeDir);
-        for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs']) writeFileSync(join(largeDir, name), readFileSync(new URL(name, import.meta.url)));
+        for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'mcp-core.mjs']) writeFileSync(join(largeDir, name), readFileSync(new URL(name, import.meta.url)));
         process.env.JEV_POOL_TOKENS = '100000';
         const large = await import(join(largeDir, 'rag.mjs'));
         const capped = large.buildRoundPool(pools, 'circle', searchMore);

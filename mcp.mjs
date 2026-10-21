@@ -17,7 +17,8 @@ async function post(path, payload) {
         body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`${path} ${r.status}: ${await r.text()}`);
-    return (await r.json()).results || [];
+    const data = await r.json();
+    return path === '/search' ? data : data.results || [];
 }
 const handlers = {
     search: (query, k, full, lang) => post('/search', { question: query, k, full, lang }),

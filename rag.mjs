@@ -1,6 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
+import { createSymbolChecker, noSymbolFact, relatedCandidates } from './mcp-core.mjs';
 import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
 import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, JEV_SEARCH_HINT_BELOW, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, HAIKU_EFFORT, HAIKU_THINKING, EFFORT_LEVELS, HAIKU_ADAPTIVE_MAX_TOKENS, transportClass } from './config.mjs';
 import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
@@ -9,6 +10,19 @@ let _chunks = null;
 export function chunks() {
     if (!_chunks) _chunks = JSON.parse(readFileSync(EMBEDDED, 'utf8'));
     return _chunks;
+}
+
+// Built once from the corpus already loaded by retrieval; no extra data reads.
+let _symbolChecker = null;
+export function missingSymbols(query) {
+    if (!_symbolChecker) {
+        // Install abstention before trying initialization: exceptions must never
+        // break retrieval or retry on every request. Do not log corpus/errors.
+        _symbolChecker = () => [];
+        try { _symbolChecker = createSymbolChecker(chunks()); }
+        catch { console.warn('[symbol-check] unavailable; documentation name checks disabled'); }
+    }
+    return _symbolChecker(query);
 }
 
 // id → chunk lookup (lazy), for resolving carried-over "pinned" ids into context.
@@ -279,7 +293,12 @@ async function selectOrFallback(sorted, question, k, supK, opts, roundPools = nu
     const pool = roundPools ? buildRoundPool(roundPools, original, opts.searchMore) : buildPool(sorted, original);
     if (RETRIEVAL !== 'rerank') selection = await selectCards(original, pool, { ip: opts.ip, searchMore: opts.searchMore });
     const info = { poolSize: pool.length, path: selection.path, reason: selection.reason, ...(selection.errorClass ? { error: 'selection service error', errorClass: selection.errorClass } : {}), exists: selection.exists, jevMs: selection.ms, jevEstimatedTokens: selection.estimatedTokens, jevTokens: selection.tokens ?? selection.estimatedTokens };
-    const picked = selection.path === 'jev' ? selection.picked : await finalize(typeof sorted === 'function' ? sorted() : sorted, k, supK, question);
+    const ranked = selection.path === 'jev' ? selection.ranked : (typeof sorted === 'function' ? sorted() : sorted);
+    const picked = selection.path === 'jev' ? selection.picked : await finalize(ranked, k, supK, question);
+    // Preserve the full Jev p order, including cards beyond the min/max picks.
+    // Fallback titles retain pre-rerank RRF order. Metadata contains no card text.
+    Object.defineProperty(picked, 'search', { value: { missingSymbols: missingSymbols(original),
+        candidates: relatedCandidates(ranked) } });
     return withRetrieval(picked, info);
 }
 export async function retrieve(question, k = TOP_K, opts = {}) {
@@ -484,7 +503,9 @@ export function buildMessages(question, retrieved, history = [], pageName = null
     const note = (pageName && !sketchMode)
         ? `The user is currently viewing the reference page for \`${pageName}\`. If their question is referential ("this", "it", "explain this", "これ", "それ") without naming a specific API, assume it refers to ${pageName}. If the question names or is about something else, ignore this note. Answer directly — do not mention this note or that the question was "referential".\n\n`
         : '';
-    const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}\n\n---\n${USED_INSTRUCTION}`;
+    const fact = noSymbolFact(missingSymbols(question));
+    const symbolHint = fact ? `\n\nDocumentation name check:\n${fact}\nTell the user the named API does not appear in the loaded documentation, in the user's language. Related cards are closest matches; do not invent that API.` : '';
+    const user = `${note}Context:\n\n${context}\n\n---\n\nQuestion: ${question}${symbolHint}\n\n---\n${USED_INSTRUCTION}`;
     return [{ role: 'system', content: sys }, ...history, { role: 'user', content: user }];
 }
 

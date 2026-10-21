@@ -534,15 +534,38 @@ export function mergeSelections(previous, fresh) {
     }
     return [...byId.values()].sort((a, b) => (b.p ?? -1) - (a.p ?? -1));
 }
+// Internal experiments only; never derive these options from HTTP input.
+export function validateVariants(opts = {}) {
+    // Bound (configuration): filler periods stay within 0..4096; invalid values fail before retrieval.
+    const fillerTokens = opts.fillerTokens === undefined ? 0 : opts.fillerTokens;
+    // Bound (configuration): thinking stays at 0 (off) or 1024..16384 tokens; invalid values fail before retrieval.
+    const thinkingBudget = opts.thinkingBudget === undefined ? 0 : opts.thinkingBudget;
+    for (const [name, value, max] of [['fillerTokens', fillerTokens, 4096], ['thinkingBudget', thinkingBudget, 16384]]) {
+        if (!Number.isSafeInteger(value) || value < 0 || value > max)
+            throw new Error(`${name} must be an integer within 0..${max}`);
+    }
+    if (thinkingBudget > 0 && thinkingBudget < 1024) throw new Error('thinkingBudget must be 0 or at least 1024');
+    return { fillerTokens, thinkingBudget };
+}
+function fillerMessages(messages, count) {
+    if (!count) return messages;
+    const suffix = '\n' + Array(count).fill('.').join(' ');
+    return messages.map(m => m.role !== 'user' ? m : { ...m, content: typeof m.content === 'string'
+        ? m.content + suffix
+        : m.content.map(block => block.type === 'tool_result' ? { ...block, content: block.content + suffix } : block) });
+}
 // Bound (security): cap the serialized request including system, tools and history using the Jev character estimate. Overflow fails generation with input reason and is counted.
-function anthropicPayload(messages, offerTool, maxTokens = 1536) {
-    return { model: ANTHROPIC_MODEL, max_tokens: maxTokens,
+function anthropicPayload(messages, offerTool, maxTokens = 1536, variants = {}) {
+    messages = fillerMessages(messages, variants.fillerTokens);
+    const budget = variants.thinkingBudget || 0;
+    return { model: ANTHROPIC_MODEL, max_tokens: maxTokens + budget,
+        ...(budget ? { thinking: { type: 'enabled', budget_tokens: budget } } : {}),
         system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
         messages: messages.filter(m => m.role !== 'system'), stream: true,
         ...(offerTool ? { tools: [SEARCH_TOOL] } : {}) };
 }
-function fitsInput(messages, offerTool, reserveChars = 0) {
-    return (JSON.stringify(anthropicPayload(messages, offerTool)).length + reserveChars) * JEV_TOKENS_PER_CHAR <= HAIKU_MAX_INPUT_TOKENS;
+function fitsInput(messages, offerTool, reserveChars = 0, variants = {}) {
+    return (JSON.stringify(anthropicPayload(messages, offerTool, 1536, variants)).length + reserveChars) * JEV_TOKENS_PER_CHAR <= HAIKU_MAX_INPUT_TOKENS;
 }
 function generationText(card) {
     const text = card.text || '';
@@ -556,7 +579,7 @@ function generationText(card) {
 class GenerationFailure extends Error {
     constructor(reason) { super('generation service error'); this.reason = reason; }
 }
-async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
+async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics, variants = {}) {
     const controller = new AbortController();
     let timer, reader, timedOut = false;
     const started = Date.now();
@@ -566,7 +589,7 @@ async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
     });
     const checkTime = () => { if (Date.now() - started >= HAIKU_TIMEOUT_MS) throw new GenerationFailure('timeout'); };
     try {
-        const payload = anthropicPayload(messages, offerTool, maxTokens);
+        const payload = anthropicPayload(messages, offerTool, maxTokens, variants);
         const body = JSON.stringify(payload);
         if (body.length * JEV_TOKENS_PER_CHAR > HAIKU_MAX_INPUT_TOKENS) throw new GenerationFailure('input');
         checkTime();
@@ -576,8 +599,8 @@ async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
         })]);
         if (!r.ok) throw new GenerationFailure(r.status >= 300 && r.status < 400 ? 'redirect' : 'http');
         reader = r.body.getReader();
-        const blocks = new Map(), text = [];
-        let stopped = false, stopReason, inputTokens = null, outputTokens = null;
+        const blocks = new Map(), reasoning = new Map(), text = [];
+        let stopped = false, stopReason;
         // Bound (security): cap total response bytes and each SSE line/event at min(response cap, 64 KiB). Overflow fails generation with oversize reason and is counted.
         // Bound (security): cap tool blocks at 8 and each initial/incremental tool JSON at 8 KiB. Overflow fails generation with tool-blocks/tool-input reason and is counted.
         const maxFrame = Math.min(HAIKU_MAX_RESPONSE_BYTES, 65536), maxToolBytes = 8192, maxBlocks = 8;
@@ -614,8 +637,22 @@ async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
             let ev;
             try { ev = JSON.parse(data); } catch { throw new GenerationFailure('invalid'); }
             const usage = ev.type === 'message_start' ? ev.message?.usage : ev.type === 'message_delta' ? ev.usage : null;
-            if (Number.isFinite(usage?.input_tokens) && usage.input_tokens >= 0) inputTokens = usage.input_tokens;
-            if (Number.isFinite(usage?.output_tokens) && usage.output_tokens >= 0) outputTokens = usage.output_tokens;
+            if (metrics) {
+                if (Number.isFinite(usage?.input_tokens) && usage.input_tokens >= 0) metrics.inputTokens = usage.input_tokens;
+                if (Number.isFinite(usage?.output_tokens) && usage.output_tokens >= 0) metrics.outputTokens = usage.output_tokens;
+                const thinking = usage?.thinking_tokens ?? usage?.output_tokens_details?.thinking_tokens;
+                if (Number.isFinite(thinking) && thinking >= 0) metrics.thinkingTokens = thinking;
+            }
+            if (ev.type === 'content_block_start' && ['thinking', 'redacted_thinking'].includes(ev.content_block?.type)) {
+                if (reasoning.has(ev.index)) throw new GenerationFailure('invalid');
+                reasoning.set(ev.index, { ...ev.content_block });
+            }
+            if (ev.type === 'content_block_delta' && ['thinking_delta', 'signature_delta'].includes(ev.delta?.type)) {
+                const block = reasoning.get(ev.index);
+                const field = ev.delta.type === 'thinking_delta' ? 'thinking' : 'signature';
+                if (block?.type !== 'thinking' || typeof ev.delta[field] !== 'string') throw new GenerationFailure('invalid');
+                block[field] = (block[field] || '') + ev.delta[field];
+            }
             if (ev.type === 'error') throw new GenerationFailure('upstream');
             if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
                 if (blocks.size >= maxBlocks || blocks.has(ev.index)) throw new GenerationFailure('tool-blocks');
@@ -640,17 +677,13 @@ async function* anthropicRound(messages, offerTool, maxTokens = 1536, metrics) {
             if (ev.type === 'message_stop') { stopped = true; break; }
         }
         if (!stopped) throw new GenerationFailure('incomplete');
-        if (metrics) {
-            if (inputTokens !== null) metrics.inputTokens = (metrics.inputTokens ?? 0) + inputTokens;
-            if (outputTokens !== null) metrics.outputTokens = (metrics.outputTokens ?? 0) + outputTokens;
-        }
         if (blocks.size || stopReason === 'tool_use') {
             if (!offerTool) throw new GenerationFailure('unexpected-tool');
             if (blocks.size !== 1) return { invalid: true };
             const tool = [...blocks.values()][0];
             try { tool.input = tool.json ? JSON.parse(tool.json) : tool.input; } catch { return { invalid: true }; }
             if (tool.name !== 'search_more' || typeof tool.id !== 'string' || !tool.id || !validSearchInput(tool.input)) return { invalid: true };
-            return { tool };
+            return { tool, thinking: [...reasoning.entries()].sort(([a], [b]) => a - b).map(([, block]) => block) };
         }
         for (const d of text) yield d;
         return {};
@@ -934,20 +967,21 @@ export async function answer(question, history = [], page = null, pinned = [], k
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
 // Bound (security): pack full capped cards by descending p within the serialized input budget. Overflow keeps cards by id only and is counted.
-function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256) {
+function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256, variants = {}) {
     const parts = cards.map(card => shownIds.has(card.id) ? `[#${card.id}] already shown above` : `[#${card.id}]`);
-    if (!fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars)) return null;
+    if (!fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars, variants)) return null;
     const added = [];
     const priority = cards.map((card, i) => ({ card, i })).sort((a, b) => (b.card.p ?? -1) - (a.card.p ?? -1));
     for (const { card, i } of priority) {
         if (shownIds.has(card.id)) continue;
         const old = parts[i]; parts[i] = `[#${card.id}]\n${generationText(card)}`;
-        if (fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars)) added.push(card.id);
+        if (fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars, variants)) added.push(card.id);
         else parts[i] = old;
     }
     return { idOnlyCards: cards.filter(card => !shownIds.has(card.id) && !added.includes(card.id)).length, messages: render(parts.join('\n\n---\n\n'), offerTool), added };
 }
 export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
+    const variants = validateVariants(opts);
     const sketchMode = page === 'sketch';
     const prepared = await prep(question, history, k, page, pinned, opts);
     let { retrieved, links, messages } = prepared;
@@ -955,7 +989,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
     const stats = { rounds: 1, queries: [question], retrievals: [info], haikuMs: 0, haikuCalls: 0 };
     const traces = [];
     const startTrace = (queries, picked = retrieved) => {
-        const trace = { queries, picked, info, hintShown: false, hintFollowed: null, haikuCalls: 0, idOnlyCards: 0, haiku: { estInputTokens: [], ms: 0, inputTokens: null, outputTokens: null }, message: null };
+        const trace = { queries, picked, info, hintShown: false, hintFollowed: null, haikuCalls: 0, idOnlyCards: 0, haiku: { estInputTokens: [], ms: 0, inputTokens: [], inputTokensTotal: null, outputTokens: null, ...(variants.thinkingBudget ? { thinkingTokens: 0 } : {}) }, message: null };
         traces.push(trace);
         return trace;
     };
@@ -978,13 +1012,25 @@ export async function* answerStream(question, history = [], page = null, pinned 
             throw error;
         }
         stats.haikuCalls++; trace.haikuCalls++;
-        trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool)).length * JEV_TOKENS_PER_CHAR);
+        trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool, 1536, variants)).length * JEV_TOKENS_PER_CHAR);
+        const callIndex = trace.haiku.inputTokens.push(null) - 1;
+        const usage = {};
+        let failure;
         const started = Date.now();
-        try { return yield* anthropicRound(input, offerTool, 1536, trace.haiku); }
-        catch (error) { Object.assign(error, generationCounts()); throw error; }
+        try { return yield* anthropicRound(input, offerTool, 1536, usage, variants); }
+        catch (error) { failure = error; throw error; }
         finally {
+            trace.haiku.inputTokens[callIndex] = usage.inputTokens ?? null;
+            for (const [field, value] of [['inputTokensTotal', usage.inputTokens], ['outputTokens', usage.outputTokens]]) {
+                if (value !== undefined) trace.haiku[field] = (trace.haiku[field] ?? 0) + value;
+            }
+            if (variants.thinkingBudget) {
+                if (usage.thinkingTokens === undefined) trace.haiku.thinkingTokens = 'included in outputTokens';
+                else if (typeof trace.haiku.thinkingTokens === 'number') trace.haiku.thinkingTokens += usage.thinkingTokens;
+            }
             const elapsed = Date.now() - started;
             stats.haikuMs += elapsed; trace.haiku.ms += elapsed;
+            if (failure) Object.assign(failure, generationCounts(), { rounds: stats.rounds });
         }
     }
     async function* researchAnswer() {
@@ -1004,15 +1050,15 @@ export async function* answerStream(question, history = [], page = null, pinned 
             if (hint) user.content += `\n\n${hint}`;
             return [...messages.slice(0, -1), user];
         };
-        let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1);
+        let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1, 256, variants);
         if (!packed) {
             // Bound (security): fixed history, system and question must fit the input budget. Overflow drops oldest external turns and disables search and is not counted.
             noMoreSearch = true;
             while (!packed && messages.length > 2) {
                 messages.splice(1, 1);
-                packed = packGenerationCards(retrieved, new Set(), renderInitial, false);
+                packed = packGenerationCards(retrieved, new Set(), renderInitial, false, 256, variants);
             }
-            packed ??= packGenerationCards(retrieved, new Set(), renderInitial, false, 0);
+            packed ??= packGenerationCards(retrieved, new Set(), renderInitial, false, 0, variants);
         }
         if (!packed) {
             const error = new Error('generation service error');
@@ -1025,13 +1071,13 @@ export async function* answerStream(question, history = [], page = null, pinned 
         async function* forceAnswer() {
             const final = messages.map(m => ({ ...m }));
             final[0].content += finalNote;
-            return yield* callHaiku(fitsInput(final, false) ? final : messages, false);
+            return yield* callHaiku(fitsInput(final, false, 0, variants) ? final : messages, false);
         }
         // Bound (security): cap search rounds at MAX_SEARCH_ROUNDS. Overflow forces an answer without tools and is not counted.
         for (let round = 1; round <= MAX_SEARCH_ROUNDS; round++) {
             stats.rounds = round;
             const offerTool = round < MAX_SEARCH_ROUNDS && !noMoreSearch;
-            if (!offerTool && fitsInput([{ ...messages[0], content: messages[0].content + finalNote }, ...messages.slice(1)], false)) messages[0].content += finalNote;
+            if (!offerTool && fitsInput([{ ...messages[0], content: messages[0].content + finalNote }, ...messages.slice(1)], false, 0, variants)) messages[0].content += finalNote;
             trace.hintShown = recommends(offerTool);
             const response = yield* callHaiku(messages, offerTool);
             if (response.invalid) {
@@ -1043,23 +1089,23 @@ export async function* answerStream(question, history = [], page = null, pinned 
             trace.hintFollowed = trace.hintShown ? Boolean(response.tool) : null;
             if (!response.tool) return;
             const { message, queries } = response.tool.input;
-            const assistant = { role: 'assistant', content: [{ type: 'tool_use', id: response.tool.id, name: 'search_more', input: response.tool.input }] };
+            const assistant = { role: 'assistant', content: [...response.thinking, { type: 'tool_use', id: response.tool.id, name: 'search_more', input: response.tool.input }] };
             const renderResult = (cards, offerTool) => {
                 const hint = existsHint(offerTool);
                 return [...messages, assistant, { role: 'user', content: [{ type: 'tool_result', tool_use_id: response.tool.id,
                     content: `Search completed.\n\n${cards}${hint ? `\n\n${hint}` : ''}\nAnswer the original question using all cards shown above, or search again if needed.` }] }];
             };
-            if (!fitsInput(renderResult('', false), false, 256)) { yield* forceAnswer(); return; }
+            if (!fitsInput(renderResult('', false), false, 256, variants)) { yield* forceAnswer(); return; }
             trace.message = message;
             yield { research: { round: round + 1, message, queries } };
             stats.queries.push(...queries);
             const fresh = await retrieveMulti([question, ...queries], k, { ...opts, question, searchMore: { message, queries }, lang: sketchMode ? 'lua' : 'cpp' });
             info = retrievalInfo(fresh); stats.retrievals.push(info);
             const nextTool = round + 1 < MAX_SEARCH_ROUNDS;
-            packed = packGenerationCards(fresh, shownIds, renderResult, nextTool);
+            packed = packGenerationCards(fresh, shownIds, renderResult, nextTool, 256, variants);
             if (!packed) {
                 noMoreSearch = true;
-                packed = packGenerationCards(fresh, shownIds, renderResult, false, 0);
+                packed = packGenerationCards(fresh, shownIds, renderResult, false, 0, variants);
             }
             if (!packed) { yield* forceAnswer(); return; }
             messages = packed.messages;
@@ -1096,7 +1142,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
         if (GEN_BACKEND === 'anthropic') {
             // Only supplemental correction turns may shrink; retained native
             // search history and previously supplied cards remain intact.
-            while (!fitsInput(correction, false)) {
+            while (!fitsInput(correction, false, 0, variants)) {
                 const extra = correction.slice(-2).sort((a, b) => b.content.length - a.content.length)[0];
                 if (extra.content.length < 64) {
                     const error = new Error('generation service error');
@@ -1123,7 +1169,14 @@ export async function* answerStream(question, history = [], page = null, pinned 
     function generationCounts() {
         const idOnlyCards = traces.map(t => t.idOnlyCards);
         return { haikuCalls: stats.haikuCalls, idOnlyCards, idOnlyCardsTotal: idOnlyCards.reduce((a, b) => a + b, 0),
-            estInputTokens: traces.flatMap(t => t.haiku.estInputTokens) };
+            estInputTokens: traces.flatMap(t => t.haiku.estInputTokens),
+            inputTokens: sumUsage('inputTokensTotal'), outputTokens: sumUsage('outputTokens'),
+            thinkingTokens: !variants.thinkingBudget ? 0 : traces.some(t => typeof t.haiku.thinkingTokens !== 'number')
+                ? 'included in outputTokens' : sumUsage('thinkingTokens') };
+    }
+    function sumUsage(field) {
+        const values = traces.map(t => t.haiku[field]).filter(n => typeof n === 'number');
+        return values.length ? values.reduce((a, b) => a + b, 0) : null;
     }
     yield { type: 'final', ...generationCounts(), text, corrected: bad.size > 0, usedIds, traces, ...stats, ...info, jevMs: stats.retrievals.reduce((n, r) => n + r.jevMs, 0), jevEstimatedTokens: stats.retrievals.reduce((n, r) => n + r.jevEstimatedTokens, 0) };
 }

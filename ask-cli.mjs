@@ -24,7 +24,7 @@ export async function main(args = process.argv.slice(2), { fetchImpl = fetch, pr
         print(`Round ${i + 1}: ${round.path}, exists p=${round.exists ?? 'unknown'}`);
         print(`  Queries: ${round.queries.join(' / ')}`);
         print(`  Pool: ${round.poolSize ?? 'unknown'} cards`);
-        print(`  Haiku: ${round.haiku.ms} ms, tokens in=${round.haiku.inputTokens ?? 'unknown'} out=${round.haiku.outputTokens ?? 'unknown'}`);
+        print(`  Haiku: ${round.haiku.ms} ms, tokens in=${round.haiku.inputTokensTotal ?? 'unknown'} out=${round.haiku.outputTokens ?? 'unknown'}`);
         print(`  Jev: ${round.jev.ms} ms, tokens=${round.jev.tokens ?? 'unknown'}`);
         for (const card of round.picked) print(`  ${card.id} | ${card.title} | p=${card.p ?? 'unknown'}`);
         if (round.message) print(`  Search: ${round.message}`);

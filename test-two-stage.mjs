@@ -149,7 +149,8 @@ try {
     assertTrace(result.debug, rounds);
     assert.equal(statRows().at(-1).debug, true);
     if (mode !== 'ollama') {
-        assert.equal(result.debug.rounds[0].haiku.inputTokens, mode.startsWith('invalid') ? 202 : 101);
+        assert.deepEqual(result.debug.rounds[0].haiku.inputTokens, mode.startsWith('invalid') ? [101, 101] : [101]);
+        assert.equal(result.debug.rounds[0].haiku.inputTokensTotal, mode.startsWith('invalid') ? 202 : 101);
         assert.equal(result.debug.rounds[0].haiku.outputTokens, mode.startsWith('invalid') ? 34 : 17);
     }
     if (!fallback && mode !== 'rate') assert.equal(result.debug.rounds[0].jev.tokens, 123);
@@ -335,7 +336,7 @@ function assertTrace(debug, rounds) {
     keys(debug, ['haikuCalls', 'idOnlyCardsTotal', 'rounds']); assert.equal(typeof debug.haikuCalls, 'number'); assert.equal(debug.rounds.length, rounds);
     for (const round of debug.rounds) {
         keys(round, ['idOnlyCards', 'queries', 'poolSize', 'picked', 'exists', 'hintShown', 'hintFollowed', 'path', 'haiku', 'jev', 'message']);
-        keys(round.haiku, ['estInputTokens', 'ms', 'inputTokens', 'outputTokens']);
+        keys(round.haiku, ['estInputTokens', 'ms', 'inputTokens', 'inputTokensTotal', 'outputTokens']);
         keys(round.jev, ['ms', 'tokens']);
         assert(['jev', 'fallback'].includes(round.path));
         for (const card of round.picked) keys(card, ['id', 'title', 'p']);

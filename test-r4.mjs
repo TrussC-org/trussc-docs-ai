@@ -102,6 +102,9 @@ test('off-topic answer can decline a low-coverage search recommendation', async 
         const result = JSON.parse(response.data), stat = rows().at(-1);
         assert.equal(result.answer, 'Hello!'); assert.equal(calls.length, 1);
         assert(calls[0].tools, 'Haiku must be free to choose search_more');
+        const messageSchema = calls[0].tools[0].input_schema.properties.message;
+        assert(messageSchema.description.startsWith('A short line shown to the user while searching, in the user\'s language, addressed to them'));
+        assert.equal(messageSchema.maxLength, 300);
         assert.equal(result.debug.rounds.length, 1); assert.equal(stat.rounds, 1);
         for (const record of [result.debug.rounds[0], stat.retrievals[0]]) {
             assert.equal(record.exists, .29); assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, false);

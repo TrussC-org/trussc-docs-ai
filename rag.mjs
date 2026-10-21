@@ -516,7 +516,7 @@ async function* anthropicStream(messages, maxTokens = 1536) {
 const SEARCH_TOOL = {
     name: 'search_more', description: 'Search the TrussC documentation again when some part of the question (another feature, API or library it combines) is not covered by the cards. Use 1–3 short queries naming the missing parts, in English API terms when possible.',
     input_schema: { type: 'object', properties: {
-        message: { type: 'string', maxLength: 300 },
+        message: { type: 'string', maxLength: 300, description: 'A short line shown to the user while searching, in the user\'s language, addressed to them (e.g. 「顔認識の部分が見つからないので、もう少し探します」). Not a note about the user.' },
         queries: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 } },
     }, required: ['message', 'queries'], additionalProperties: false },
 };

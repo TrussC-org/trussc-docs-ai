@@ -86,7 +86,7 @@ try {
         }
         assert.equal(url, 'https://api.anthropic.com/v1/messages');
         haikuCalls.push(req);
-        assert.equal(JSON.stringify(req.messages).includes('Jev coverage estimate:'), !['rerank', 'rate', 'pool', 'budget'].includes(mode));
+        assert.equal(JSON.stringify(req.messages).includes('An independent relevance checker estimates'), !['rerank', 'rate', 'pool', 'budget'].includes(mode));
         const tool = !['plain', 'rerank', 'rate', 'pool', 'budget', 'request-rate'].includes(mode) && req.tools;
         let content = frames({ type: 'message_start', message: { usage: { input_tokens: 101, output_tokens: 0 } } });
         if (tool) {
@@ -282,7 +282,7 @@ async function testRoundPools() {
         assert.deepEqual(haiku[1].messages[1], { role: 'assistant', content: [{ type: 'tool_use', id: 'gap-tool', name: 'search_more', input: searchMore }] });
         const toolResult = haiku[1].messages[2].content[0];
         assert.equal(toolResult.type, 'tool_result'); assert.equal(toolResult.tool_use_id, 'gap-tool');
-        assert(toolResult.content.includes('B_CARD') && toolResult.content.includes('Jev coverage estimate: 0.20.'));
+        assert(toolResult.content.includes('B_CARD') && toolResult.content.includes('cover about 20% of what is needed'));
         assert(toolResult.content.includes('[#symbol:drawCircle] already shown above'));
         assert.equal(JSON.stringify(haiku[1].messages).split('ORIGINAL_CARD').length - 1, 1);
         assert.equal(jev[1].state.cards[0].title, 'drawCircle', 'original question pool comes first');

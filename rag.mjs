@@ -514,7 +514,7 @@ async function* anthropicStream(messages, maxTokens = 1536) {
 }
 
 const SEARCH_TOOL = {
-    name: 'search_more', description: 'Search the TrussC documentation again for evidence needed to answer the original question.',
+    name: 'search_more', description: 'Search the TrussC documentation again when some part of the question (another feature, API or library it combines) is not covered by the cards. Use 1–3 short queries naming the missing parts, in English API terms when possible.',
     input_schema: { type: 'object', properties: {
         message: { type: 'string', maxLength: 300 },
         queries: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 } },
@@ -992,8 +992,8 @@ export async function* answerStream(question, history = [], page = null, pinned 
         const recommends = offerTool => offerTool && typeof info.exists === 'number' && info.exists < JEV_SEARCH_HINT_BELOW;
         const existsHint = offerTool => {
             if (typeof info.exists !== 'number') return '';
-            return `Jev coverage estimate: ${info.exists.toFixed(2)}.` + (recommends(offerTool)
-                ? ` Below ${JEV_SEARCH_HINT_BELOW}, calling search_more is recommended unless the question doesn't need TrussC documentation (off-topic chat, greetings).` : '');
+            return `An independent relevance checker estimates these cards cover about ${Math.round(info.exists * 100)}% of what is needed to answer every part of the question.` + (recommends(offerTool)
+                ? ' Instead of answering now, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).' : '');
         };
         const finalNote = '\nThis is the final round. Answer now using the available evidence and state any gaps.';
         messages[0].content += '\nUse search_more only when more evidence is needed. When calling it, provide no answer text. Its message must be short and in the user\'s language.';

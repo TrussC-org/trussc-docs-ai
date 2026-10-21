@@ -684,6 +684,30 @@ test('runner refuses output/input collisions through directory symlinks before a
         assert.equal(calls.length, 0);
     });
 });
+test('runner refuses file-symlink collisions and non-regular inputs before any write', async () => {
+    await fixture({}, async ({ dir, calls }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), ids = join(dir, 'ids.txt');
+        const linkQ = join(dir, 'link-q.json'), linkIds = join(dir, 'link-ids.txt');
+        const original = JSON.stringify([{ id: 'q1', question: 'circle' }]);
+        writeFileSync(questions, original); writeFileSync(ids, 'q1');
+        symlinkSync(questions, linkQ); symlinkSync(ids, linkIds);
+        await assert.rejects(main([linkQ, questions, '--variant', 'base']), /Output path must differ/);
+        await assert.rejects(main([questions, ids, '--variant', 'base', '--ids', linkIds]), /Output path must differ/);
+        await assert.rejects(main([questions, linkQ, '--variant', 'base']), /Output path must differ/);
+        assert.equal(readFileSync(questions, 'utf8'), original); assert.equal(readFileSync(ids, 'utf8'), 'q1');
+        const fifo = join(dir, 'questions.fifo');
+        const made = spawnSync('mkfifo', [fifo]);
+        if (made.status === 0) {
+            await assert.rejects(main([fifo, join(dir, 'out.json'), '--variant', 'base']), /must be a regular file/);
+            assert.equal(existsSync(join(dir, 'out.json')), false);
+        }
+        assert.equal(calls.length, 0);
+    });
+});
 let failures = 0;
 for (const [name, fn] of tests) {
     try { await fn(); console.log(`PASS ${name}`); } catch (e) { failures++; console.error(`FAIL ${name}: ${e.message}`); }

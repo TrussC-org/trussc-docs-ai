@@ -1,25 +1,40 @@
 // Offline in-process evaluation. This module is never imported by the HTTP server.
-import { readFileSync, writeFileSync, renameSync, rmSync, statSync, realpathSync } from 'node:fs';
+import { writeFileSync, renameSync, rmSync, realpathSync, existsSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 const usage = 'Usage: node eval/answers/run-variants.mjs <questions.json> <out.json> --variant base|filler|thinking [--filler 300] [--thinking 1024] [--ids file]';
-// Bound (configuration): each questions/ids file may contain at most 4 MiB before a full read or parse.
+// Bound (configuration): each questions/ids input is a regular file read through one descriptor, at most 4 MiB before parsing.
 const MAX_INPUT_FILE_BYTES = 4 * 1024 * 1024;
 // Bound (configuration): mirror server.mjs's 8000 UTF-16 code-unit question limit before retrieval.
 const MAX_QUESTION_LENGTH = 8000;
 
+// Existing paths resolve fully (a symlink at the last component included);
+// a not-yet-existing output resolves through its parent directory.
 function canonicalPath(path) {
-    return join(realpathSync(dirname(path)), basename(path));
+    return existsSync(path) ? realpathSync(path) : join(realpathSync(dirname(path)), basename(path));
 }
+// Reads one regular file through a single descriptor, never more than the limit.
 function readInput(path, name) {
-    let size;
-    try { size = statSync(path).size; }
+    // Reject FIFOs/devices before opening: opening a FIFO blocks until a writer appears.
+    let st;
+    try { st = statSync(path); }
     catch { throw new Error(`Unable to read ${name} file`); }
-    if (size > MAX_INPUT_FILE_BYTES) throw new Error(`${name} file exceeds 4 MiB limit`);
-    try { return readFileSync(path, 'utf8'); }
+    if (!st.isFile()) throw new Error(`${name} file must be a regular file`);
+    let fd;
+    try { fd = openSync(path, 'r'); }
     catch { throw new Error(`Unable to read ${name} file`); }
+    try {
+        if (!fstatSync(fd).isFile()) throw new Error(`${name} file must be a regular file`);
+        const buffer = Buffer.alloc(MAX_INPUT_FILE_BYTES + 1);
+        let length = 0, n;
+        while (length < buffer.length && (n = readSync(fd, buffer, length, buffer.length - length, null)) > 0) length += n;
+        if (length > MAX_INPUT_FILE_BYTES) throw new Error(`${name} file exceeds 4 MiB limit`);
+        return buffer.toString('utf8', 0, length);
+    } catch (error) {
+        throw error.message?.startsWith(name) ? error : new Error(`Unable to read ${name} file`);
+    } finally { closeSync(fd); }
 }
 function argumentsFor(args) {
     if (args.length < 4 || args[0].startsWith('--') || args[1].startsWith('--')) throw new Error(usage);

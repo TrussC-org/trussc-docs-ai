@@ -64,12 +64,18 @@ for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial an
             const content = req.messages.at(-1).content;
             const prompt = typeof content === 'string' ? content : content[0].content;
             const hintShown = exists !== null && exists < .7;
-            assert.equal(prompt.includes('Jev coverage estimate:'), exists !== null);
-            if (exists !== null) assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
-            const recommendation = "Below 0.7, calling search_more is recommended unless the question doesn't need TrussC documentation (off-topic chat, greetings).";
+            assert.equal(prompt.includes('An independent relevance checker estimates'), exists !== null);
+            if (exists !== null) assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed to answer every part of the question.`));
+            const recommendation = "Before answering, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).";
             assert.equal(prompt.includes(recommendation), hintShown);
             assert(!prompt.includes('answer-exists probability'));
             if (i) assert(prompt.startsWith('Search completed.'));
+            // The hint ends the initial turn and sits right before the answer instruction in a tool result.
+            if (exists !== null) {
+                const hint = prompt.slice(prompt.indexOf('An independent relevance checker'));
+                if (i) assert(hint.split('\n')[1]?.startsWith('Answer the original question'), 'hint precedes the answer instruction');
+                else assert(!hint.includes('\n'), 'hint ends the initial user turn');
+            }
             const expected = { exists, hintShown, hintFollowed: hintShown ? i === 0 : null };
             for (const record of [debug.rounds[i], stat.retrievals[i]]) {
                 for (const [key, value] of Object.entries(expected)) assert.equal(record[key], value, `${key} round ${i + 1}`);
@@ -82,9 +88,8 @@ test('configured hint threshold is honoured', async () => {
         await fixture({ exists, env: { JEV_SEARCH_HINT_BELOW: String(threshold) } }, async ({ request, calls, rows }) => {
             const response = await request('/ask'); assert.equal(response.status, 200);
             const prompt = calls[0].messages.at(-1).content;
-            assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
-            assert.equal(prompt.includes(`Below ${threshold}, calling search_more is recommended`), hintShown);
-            assert.equal(prompt.includes('calling search_more is recommended'), hintShown);
+            assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
+            assert.equal(prompt.includes('Before answering, call search_more'), hintShown);
             assert.equal(JSON.parse(response.data).debug.rounds[0].hintShown, hintShown);
             assert.equal(rows().at(-1).retrievals[0].hintShown, hintShown);
         });
@@ -112,9 +117,9 @@ test('each round uses its current coverage estimate and hint decision', async ()
         for (const [i, exists] of [.29, .88, .1].entries()) {
             const content = calls[i].messages.at(-1).content;
             const prompt = typeof content === 'string' ? content : content[0].content;
-            assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
+            assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
             // Round 3 is the last (MAX_SEARCH_ROUNDS=3): search_more is not offered, so it is not recommended.
-            assert.equal(prompt.includes('calling search_more is recommended'), i === 0);
+            assert.equal(prompt.includes('Before answering, call search_more'), i === 0);
             for (const record of [debug.rounds[i], stat.retrievals[i]]) {
                 assert.equal(record.exists, exists); assert.equal(record.hintShown, i === 0);
                 assert.equal(record.hintFollowed, i === 0 ? true : null);
@@ -127,8 +132,8 @@ test('no recommendation when search_more is not offered (single round)', async (
         const response = await request('/ask'); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 1); assert.equal(calls[0].tools, undefined);
         const prompt = calls[0].messages.at(-1).content;
-        assert(prompt.includes('Jev coverage estimate: 0.29.'));
-        assert(!prompt.includes('calling search_more is recommended'));
+        assert(prompt.includes('cover about 29% of what is needed'));
+        assert(!prompt.includes('Before answering, call search_more'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, false); assert.equal(record.hintFollowed, null);
         }
@@ -138,7 +143,7 @@ test('invalid-tool recovery stays out of the hint metric', async () => {
     await fixture({ exists: .29, generate: (req, _, n) => new Response((n === 1 ? tool('bad', { message: '', queries: [] }) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
         const response = await request('/ask'); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 2); assert(calls[0].tools); assert.equal(calls[1].tools, undefined);
-        assert(calls[0].messages.at(-1).content.includes('calling search_more is recommended'));
+        assert(calls[0].messages.at(-1).content.includes('Before answering, call search_more'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, null);
         }
@@ -273,7 +278,7 @@ test('id-only and per-call estimates reach request stats and public allowlist', 
         for (const [i, round] of debug.rounds.entries()) {
             const content = calls[i].messages.at(-1).content;
             const context = typeof content === 'string' ? content : content[0].content;
-            assert.equal(round.idOnlyCards, [...context.matchAll(/^\[#card:\d+\](?=\n\n(?:---|Jev))/gm)].length, 'count only budget omissions, excluding already-shown references');
+            assert.equal(round.idOnlyCards, [...context.matchAll(/^\[#card:\d+\](?=\n\n(?:---|An independent))/gm)].length, 'count only budget omissions, excluding already-shown references');
         }
     });
 });

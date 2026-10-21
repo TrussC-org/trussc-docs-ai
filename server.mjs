@@ -17,7 +17,7 @@ import { answer, answerStream, retrieve, chunks, refLink, leanText, getByIds, re
 import { dispatch as mcpDispatch, searchResponse } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES } from './config.mjs';
 import { publicDebug } from './debug.mjs';
-import { logStat, hashIp, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
+import { logStat, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -134,7 +134,7 @@ export const server = createServer(async (req, res) => {
             logStat({ ep: proxy ? 'mcp' : endpoint,
                 tool: proxy ? (endpoint === 'search' ? 'trussc_search' : 'trussc_get') : null,
                 client: requestClient(proxy ? 'mcp' : endpoint, req.headers, body),
-                ip: hashIp(ip), ms: Date.now() - t0,
+                ip: hashIp(ip), net: hashNet(ip), ms: Date.now() - t0,
                 qLen: query === null ? null : query.length, qLang: query === null ? null : queryLanguage(query), ...fields });
         };
         if (rateLimited(ip)) {
@@ -176,8 +176,8 @@ export const server = createServer(async (req, res) => {
             // Stateless: initialize metadata belongs to this row only. Never
             // associate a later call with another request's clientInfo.
             const clientInfo = body.method === 'initialize' ? {
-                name: typeof body.params?.clientInfo?.name === 'string' ? body.params.clientInfo.name : null,
-                version: typeof body.params?.clientInfo?.version === 'string' ? body.params.clientInfo.version : null,
+                name: clientInfoValue(body.params?.clientInfo?.name),
+                version: clientInfoValue(body.params?.clientInfo?.version),
             } : null;
             const failed = resp?.error || resp?.result?.isError;
             // Use the dispatcher's validated query; never coerce arbitrary JSON

@@ -154,52 +154,44 @@ The gate reads the operator shell environment, not the service environment:
 export `TYPESAFE_API_KEY` in that shell using README.md's hidden `read -r -s`
 prompt, and unset it afterwards. Do not put the value in history or the repository.
 
-## External stats rotation (user timer)
+## Monthly stats deployment
 
-The owner installs these **user units**, separately from the API system unit.
-The API's sandbox stays unchanged: it still appends only to `stats.jsonl`, never
-reads the archives, and needs no new read/write permissions, destinations or
-environment variables. Do not put the rotation job inside the API unit.
+The API writes directly to `STATS_DIR/YYYY-MM.jsonl`, using each row's `ts` UTC
+month. `STATS_DIR` is defined in `config.mjs`; its default is the worktree's sibling
+`../docs-ai-stats/` (`/home/toru/TrussC-dev/docs-ai-stats` in deployment).
+`STATS_LOG` is removed. The directory holds stats only: nothing in it is executed
+or sourced. The operator creates it before the switch with mode `0700`; new
+monthly files use mode `0600`. Missing directories and failed appends drop stats
+with one warning per process and do not fail requests. No rotation timer was
+installed; the former script and unit templates are removed.
 
-The script requires Bash and standard Linux `flock`, `stat`, `head`, `date`,
-`truncate`, and `chmod`. It archives by the **UTC month of the day before the rotation** (the timer runs
-at 00:05 UTC, so that is the month the rotated rows belong to) to
-`~/TrussC-dev/docs-ai-stats/YYYY-MM.jsonl`, then truncates the live file in place.
-A few concurrent appends may be lost at the copytruncate boundary. Missing/empty
-live files are OK. Rotations share a short, nonblocking archive lock. Archive
-files use mode `0600`, and the archive directory uses `0700`. The script sets
-`umask 077` itself, including on direct invocation, and reapplies these modes to
-existing monthly archives and the lock even for missing/empty live files.
-Existing live permissions and inode are kept.
+**Apply the pull and service unit drop-in together.** The sandbox change is
+approved by secaudit, which prepares the drop-in and rollback script separately.
+The drop-in replaces the legacy `stats.jsonl` bind with
+`BindPaths=-/home/toru/TrussC-dev/docs-ai-stats` and adds
+`ReadWritePaths=/home/toru/TrussC-dev/docs-ai-stats`, `UMask=0077` and
+`LimitFSIZE=1G`. `ProtectHome=tmpfs` stays. The only new capability is creating
+`YYYY-MM.jsonl` in `STATS_DIR`; no other read/write access, destination or service
+environment variable is added. The repository does not provide the drop-in or
+rollback script.
 
-Install from the chosen worktree (owner commands, not run automatically):
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/trussc-docs-ai-stats-rotate.service deploy/trussc-docs-ai-stats-rotate.timer ~/.config/systemd/user/
-# Edit the installed .service ExecStart to this worktree's absolute script path.
-# Template defaults to %h/TrussC-dev/trussc-docs-ai/deploy/rotate-stats.sh.
-# Optional positional arguments after the script: /path/stats.jsonl /path/archive
-systemctl --user daemon-reload
-systemctl --user enable --now trussc-docs-ai-stats-rotate.timer
-systemctl --user list-timers trussc-docs-ai-stats-rotate.timer
-```
-
-The daily timer uses the host's daily schedule, catches up a missed run after the
-user manager next starts (`Persistent=true`), and requires that manager to run.
-The owner can arrange user lingering according to the host's existing policy if
-rotation must run while logged out. No API restart or system-unit edit is needed.
-Only this operator job gets archive access; neither unit is installed by this
-change. Run `node report.mjs --archive-dir ~/TrussC-dev/docs-ai-stats` from the
-worktree outside the API sandbox. Direct runs use the same permissions:
+Right after the switch, ask runs a one-time migration outside the service:
+split the legacy `stats.jsonl` lines by each row's `ts` UTC month and append them
+to the matching monthly files (mode `0600`). Preserve the existing query/answer
+text. Rename the legacy file to `stats.jsonl.migrated` when migration completes,
+and delete that renamed file after one week. The report reads the legacy file
+while it exists; finish the migration and rename before reporting to avoid
+counting both the source and its monthly copies. No migration is run by the API.
 
 ```bash
-bash deploy/rotate-stats.sh /path/to/stats.jsonl /path/to/archive
-node report.mjs 7 --live /path/to/stats.jsonl --archive-dir /path/to/archive
+node report.mjs 7
+STATS_DIR=/path/to/monthly node report.mjs
+node report.mjs --stats-dir /path/to/monthly --live /path/to/stats.jsonl
 ```
 
-Reporting streams selected archive months and applies row filters before
-aggregation. Oversized lines are skipped/counted, and bounded dimensions fold
-excess keys into `other`; overflow diagnostics explain any incomplete distinct
-counts or unavailable latency percentiles. See [STATS.md](../STATS.md) for schema,
-month-selection assumptions and exact limits.
+Run reporting outside the API sandbox. `--archive-dir` remains an alias for
+`--stats-dir`. Monthly files and a missing legacy file are supported. Reporting
+streams selected months and applies row filters before aggregation. Oversized
+lines are skipped/counted, and bounded dimensions fold excess keys into `other`;
+overflow diagnostics explain incomplete distinct counts or unavailable latency
+percentiles. See [STATS.md](../STATS.md) for the schema and exact limits.

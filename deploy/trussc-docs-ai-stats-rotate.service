@@ -1,8 +1,0 @@
-# User unit template: owner adjusts the worktree path before installing.
-[Unit]
-Description=Archive TrussC docs-ai usage stats
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash %h/TrussC-dev/trussc-docs-ai/deploy/rotate-stats.sh
-UMask=0077

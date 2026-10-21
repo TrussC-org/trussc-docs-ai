@@ -1,9 +1,9 @@
 # Usage stats
 
-The API appends one JSON object per tracked POST request to the existing
-`stats.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/ask`, `/search`, `/get`, and
-`/mcp` share these fields, on success and failure. The timer and report run as
-operator tools outside the API sandbox. No archive is read or written by the API.
+The API appends one JSON object per tracked POST request to
+`STATS_DIR/YYYY-MM.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/ask`, `/search`,
+`/get`, and `/mcp` share these fields, on success and failure. The month is the UTC
+month of the row's `ts`. The report runs outside the API sandbox.
 
 | Field | Meaning / unavailable value |
 | --- | --- |
@@ -19,15 +19,16 @@ operator tools outside the API sandbox. No archive is read or written by the API
 | `qLen` | Query length in UTF-16 code units, using the same trimmed query as the pipeline; `null` for requests without a query. |
 | `qLang` | Cheap script guess: kana → `ja`, else Hangul → `ko`, else Han → `zh`, else ASCII letters → `en`, else `other`. `null` without a query. Han-only Japanese and mixed languages can be misclassified. |
 | `ip` | Existing salted, truncated `hashIp` result; `null` when unavailable. No raw IP. |
+| `net` | Network grouping hash on every row, including MCP initialize and errors: SHA-256 with the existing `STATS_SALT` and `salt + '|' + key` construction, truncated to 16 lowercase hex characters. IPv4 uses the full address; IPv6 uses its normalized first /64; IPv4-mapped IPv6 uses the full IPv4 address. Missing/unparseable input is `null`. No raw address or prefix is logged. |
 | `errorReason`, `errorClass` | Existing pipeline error fields, with coarse request/validation defaults; `null` when absent. A successful fallback can still carry the existing pipeline `errorClass`. |
-| `q` | **Existing text field, retained pending owner decision.** The full query as previously logged (existing whitespace trimming remains). Omitted on non-query requests and early validation failures, as before. |
-| `a` | **Existing text field, retained pending owner decision.** Answer's first 4000 UTF-16 code units, only on successful `/ask` and `/chat`, as before. |
+| `q` | **Existing text field, retained by owner decision.** The full query as previously logged (existing whitespace trimming remains). Omitted on non-query requests and early validation failures, as before. |
+| `a` | **Existing text field, retained by owner decision.** Answer's first 4000 UTF-16 code units, only on successful `/ask` and `/chat`, as before. |
 
 Rejected question/history-length requests retain query length/language metadata
 when a question is available, while omitting query text as before.
 
 The existing `q` and `a` retention policy is centralized in the `text` object in
-`logStat`; a later owner decision can drop those fields there. Existing optional
+`logStat`; the owner has chosen to keep those fields. Existing optional
 pipeline/detail fields remain: `queries`, `exists`, `jevMs`, `haikuMs`,
 `jevEstimatedTokens`, `retrievals`, `idOnlyCards`, `idOnlyCardsTotal`,
 `estInputTokens`, plus `cid`, `turns`, `debug`, `corrected`, `n`, `top`, `links`,
@@ -40,14 +41,28 @@ sufficient: the CLI sends it too. Other HTTP requests use `http`. These are usag
 hints supplied by clients, not authenticated identities.
 
 HTTP MCP is stateless. Initialize rows add `method: "initialize"` and
-`clientInfo: {name, version}` (strings as supplied, missing values `null`). Later
-rows do not inherit this information. HTTP MCP rows also carry `method`, including
+`clientInfo: {name, version}`. Each supplied value must be 1–64 ASCII characters
+from `[A-Za-z0-9._ -]`; valid values (including dashboard self-marker nonces) are
+preserved exactly. Empty, oversized, non-string or disallowed-character values
+become `other`, without truncation or sanitization. Missing/null values are `null`.
+Later rows do not inherit this information. HTTP MCP rows also carry `method`, including
 `tools/call`; their `client` comes only from their own User-Agent. Normalization
 lowercases the first product, strips `/version` or a trailing `-1.2`/`_v1.2`,
 and aliases `claude-code`, `claude-desktop`, `claude-cli` → `claude`,
 `visual-studio-code` → `vscode`, `mcp-inspector` → `inspector`. A product outside
 1–32 ASCII `[a-z0-9._-]` characters becomes `other`, never a truncated token.
 No raw headers are logged.
+
+`net` uses the same header/socket address source as `ip`, while leaving the
+existing `ip` hashes unchanged. Parsing accepts at most 128 UTF-16 code units
+including any zone id; longer input returns `null`. Valid IPv6 compression,
+letter case, leading zeroes, dotted IPv4 tails and zone ids normalize before
+hashing. Zone ids do not affect the key. IPv6 keys use four lowercase,
+zero-padded hexadecimal words followed by `::/64`; mapped addresses (including
+hexadecimal spellings) instead use dotted IPv4. Two IPv6 addresses in one /64
+therefore share `net`, allowing the dashboard to mark home/office traffic as
+self without retaining addresses or prefixes. Hashes are pseudonyms, not
+authenticated identities. Old rows have no `net`; no history is rewritten.
 
 The stdio proxy continues to call `/search` and `/get`, with the product
 `trussc-mcp-stdio/0.1.0`; the API records those as `ep: "mcp"` with the matching
@@ -63,97 +78,97 @@ Illustrative common fields (optional pipeline detail fields are omitted here):
 `/chat`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"chat","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"chat","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
 ```
 
 `/ask`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
 ```
 
 `/search`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"search","tool":null,"client":"http","ms":2,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","errorReason":null,"errorClass":null,"q":"draw circle"}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"search","tool":null,"client":"http","ms":2,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle"}
 ```
 
 `/get`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"get","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","errorReason":null,"errorClass":null}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"get","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null}
 ```
 
 HTTP MCP initialize:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":null,"client":"cursor","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","errorReason":null,"errorClass":null,"method":"initialize","clientInfo":{"name":"Cursor","version":"1.0"}}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":null,"client":"cursor","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"method":"initialize","clientInfo":{"name":"Cursor","version":"1.0"}}
 ```
 
 HTTP MCP `trussc_search`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_search","client":"claude","ms":2,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","errorReason":null,"errorClass":null,"method":"tools/call","q":"draw circle"}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_search","client":"claude","ms":2,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"method":"tools/call","q":"draw circle"}
 ```
 
 HTTP MCP `trussc_get`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_get","client":"claude","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","errorReason":null,"errorClass":null,"method":"tools/call"}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_get","client":"claude","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"method":"tools/call"}
 ```
 
 Stdio proxy `/get`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_get","client":"trussc-mcp-stdio","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","errorReason":null,"errorClass":null}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_get","client":"trussc-mcp-stdio","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null}
 ```
 
 Failure on `/ask`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":6,"qLang":"en","ip":"0123456789abcdef","errorReason":"transport","errorClass":"TypeError","q":"circle"}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":6,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":"transport","errorClass":"TypeError","q":"circle"}
 ```
 
-## Rotation and reporting
+## Monthly files and reporting
 
-`deploy/rotate-stats.sh [stats.jsonl [archive-dir]]` defaults to the
-worktree's `stats.jsonl` and `~/TrussC-dev/docs-ai-stats`. The live filename must
-be `stats.jsonl`. Each rotation appends its snapshot to **the previous UTC day's month's**
-`YYYY-MM.jsonl`, irrespective of each row's `ts`. Thus late/historical rows can
-be in a later archive file. A manual rotation on the 1st of a month files that
-day's rows under the previous month. Reporting groups by each row's own `ts` date.
+`STATS_DIR` is defined in `config.mjs` and defaults to the sibling directory
+`new URL('../docs-ai-stats/', import.meta.url)`. In the deployed checkout this is
+`/home/toru/TrussC-dev/docs-ai-stats`. `STATS_LOG` is removed. The operator creates
+the directory before deployment; the API never creates directories. It holds
+stats only, and nothing in it is executed or sourced.
 
-The operator script sets `umask 077`, enforces mode `0700` on the archive
-directory and `0600` on monthly archives and the persistent lock, and reapplies
-these modes to existing monthly archives even when the live file is missing or
-empty. It leaves the live file mode unchanged.
-
-The operator script takes a nonblocking `flock` on the archive's persistent
-`.rotate.lock`. A concurrent invocation exits 1 without copying or truncating.
-Missing/empty live files succeed. After a successful copy it truncates the same
-live inode, preserving the API's append target and permissions. Copytruncate can
-lose a few concurrent appends at the boundary; that loss is accepted. A partial
-boundary line is possible, and the report skips malformed JSON. An interrupted
-rotation after copying but before truncation can duplicate rows on retry; this
-is a small usage summary, not an audit ledger. The script writes only the live
-stats file and archive directory. See [installation](deploy/DEPLOY.md#external-stats-rotation-user-timer).
+Each row uses one timestamp for both `ts` and its UTC `YYYY-MM.jsonl` filename.
+Only names matching `^\d{4}-\d{2}\.jsonl$` can be created. The writer opens with
+`O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW`, mode `0600`, makes a single append
+write for the complete JSON line and closes the file. Symlinks at the monthly
+filename are refused. Missing directories and open/write failures drop the line,
+warn once per process, and never fail request handling. Existing files retain
+their modes; the operator ensures migrated files use `0600`.
+There is no external rotation script, lock file or timer.
 
 ```bash
 node report.mjs
 node report.mjs 7 --include-debug
-node report.mjs --live /path/to/stats.jsonl --archive-dir /path/to/archive
+STATS_DIR=/path/to/monthly node report.mjs
+node report.mjs --stats-dir /path/to/monthly --live /path/to/stats.jsonl
 ```
 
-The report streams monthly JSONL archives plus the live file line by line,
-tolerates either being absent, and summarizes by endpoint, tool, client and row
-timestamp day. A positive day count sets an inclusive lower timestamp cutoff;
-`0` (the default) means all time. Before opening archives, it skips filenames
-more than one month before the cutoff month (one extra month covers a manual
-rotation on the 1st). Later months are still read because delayed rotation can
-put older rows there. This assumes records are archived no earlier than the
-month before their timestamp month; future-dated or manually moved rows
-in an earlier archive are outside that selection rule. Each admitted row is
-filtered by timestamp, debug flag and excluded IP before any aggregate changes.
+The report streams monthly files in `STATS_DIR` plus the optional legacy
+worktree `stats.jsonl`, and tolerates either being absent. `--archive-dir` remains
+an alias for `--stats-dir`; `--live` selects a legacy input. After migration
+renames the legacy file to `stats.jsonl.migrated`, it is no longer read, so the
+monthly copies are counted once. See [deployment](deploy/DEPLOY.md#monthly-stats-deployment)
+for the coordinated switch and one-time migration.
+
+Summaries group by endpoint, tool, client and row timestamp day. A positive day
+count sets an inclusive lower timestamp cutoff; `0` (the default) means all time.
+Before opening files, the report skips filenames more than one month before the
+cutoff month. The extra month preserves compatibility with files from the former
+external rotation; later months are still read for its delayed historical rows.
+This compatibility rule assumes records are filed no earlier than the month
+before their timestamp month. Direct writes always use their timestamp month.
+Each admitted row is filtered by timestamp, debug flag and excluded IP before
+any aggregate changes.
 
 The reader uses 16 KiB chunks and skips/counts lines longer than 256 KiB in bytes
 (excluding LF, including CR), including an unterminated tail. Malformed lines
@@ -161,15 +176,13 @@ are also skipped/counted. Only counters are retained. Each aggregate dimension
 keeps the first 256 distinct keys encountered, each at most 1024 UTF-16 code
 units; oversized keys and additional distinct keys fold into `other`. Counts
 for admitted keys continue to accumulate. Overflow diagnostics count folded
-observations, not distinct dropped keys. Archive traversal order determines
+observations, not distinct dropped keys. Directory traversal order determines
 which keys are admitted. Summaries are exact until a limit is reached; after
 visitor overflow, distinct visitors are a lower bound; conversation statistics
 cover tracked conversations only. Latency percentiles use weighted counts and
 are exact until their distinct-value limit is reached, then display
 `unavailable`; maximum latency and total request counts remain exact.
-Run it outside the API sandbox, preferably between rotations; concurrent
-rotation can produce a transient duplicate/missing snapshot. Old rows without
-`client` report as `unknown`. Existing debug filtering (excluded by default),
-`EXCLUDE_IP`, latency, visitor, question/API/category summaries remain available.
-The archive flag is for the report process only; it adds no service environment
-variable or file permission.
+Run the report outside the API sandbox. Concurrent appends may not yet be
+included in the snapshot. Old rows without `client` report as `unknown`.
+Existing debug filtering (excluded by default), `EXCLUDE_IP`, latency, visitor,
+question/API/category summaries remain available.

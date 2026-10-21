@@ -1,23 +1,22 @@
-// Summarize the usage log (stats.jsonl). No deps — just reads the JSONL.
+// Summarize monthly usage logs (STATS_DIR/YYYY-MM.jsonl). No deps — just reads the JSONL.
 //   node report.mjs                 # all-time
 //   node report.mjs --include-debug # include debug requests
 //   node report.mjs 7              # last 7 days
 //   node report.mjs --live /path/stats.jsonl --archive-dir /path/archive
-//   STATS_LOG=/path node report.mjs
+//   STATS_DIR=/path node report.mjs
 //   EXCLUDE_IP=hash1,hash2 node report.mjs   # drop your own hashed IP(s) to see real users
 import { createReadStream, existsSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import { Transform } from 'node:stream';
 import { createInterface } from 'node:readline';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { STATS_LOG } from './config.mjs';
+import { STATS_DIR } from './config.mjs';
 
 const args = process.argv.slice(2);
-let live = STATS_LOG, archive = join(homedir(), 'TrussC-dev/docs-ai-stats'), days = 0;
+let live = new URL('./stats.jsonl', import.meta.url).pathname, archive = STATS_DIR, days = 0;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--include-debug') continue;
-  if (args[i] === '--live' || args[i] === '--archive-dir') {
+  if (args[i] === '--live' || args[i] === '--archive-dir' || args[i] === '--stats-dir') {
     const flag = args[i], value = args[++i];
     if (!value || value.startsWith('--')) throw new Error(`missing value for ${flag}`);
     if (flag === '--live') live = value; else archive = value;
@@ -26,8 +25,8 @@ for (let i = 0; i < args.length; i++) {
 }
 const cutoff = days > 0 ? Date.now() - days * 86400000 : -Infinity;
 if (days > 0 && !Number.isFinite(new Date(cutoff).getTime())) throw new Error('date range out of bounds');
-// One month earlier: a rotation files rows under the previous UTC day's month,
-// so a manual run on the 1st can put a new month's rows in the previous file.
+// Include one earlier month for archives created by the former external rotation.
+// Direct monthly writes always use the row timestamp's UTC month.
 const cutoffMonth = days > 0 ? new Date(Date.UTC(new Date(cutoff).getUTCFullYear(), new Date(cutoff).getUTCMonth() - 1, 1)).toISOString().slice(0, 7) : '';
 const includeDebug = args.includes('--include-debug');
 const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map(s => s.trim()).filter(Boolean));
@@ -118,9 +117,8 @@ async function read(file) {
   } finally { lines.close(); input.destroy(); guarded.destroy(); }
 }
 
-// Stream directory entries too: do not retain a list of every archive. Rotation
-// names use the copy month; later archives can contain older rows, so read every
-// month >= the cutoff month and filter each row by ts before aggregation.
+// Stream directory entries too: do not retain a list of every monthly file.
+// Keep the former rotation's month-selection compatibility and filter by row ts.
 if (existsSync(archive)) {
   const directory = await opendir(archive);
   for await (const entry of directory) {

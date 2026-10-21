@@ -41,7 +41,7 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         assert.equal(readFileSync(marker, 'utf8'), 'LISTEN_STUB_CALLED');
     });
     process.env.MAX_BODY_BYTES = '262144'; process.env.RATE_MAX = '1000';
-    process.env.STATS = '1'; process.env.STATS_LOG = join(dir, 'stats.jsonl');
+    process.env.STATS = '1'; process.env.STATS_DIR = dir;
     await test('body-limit default and invalid numeric configuration', async () => {
         const warn = console.warn, warnings = [];
         console.warn = value => warnings.push(value);
@@ -115,7 +115,7 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         assert.equal((await done).status, 200); assert.equal(calls.at(-1)[1].length, 6);
     });
     await test('body rejections keep the common schema without body text', () => {
-        const rows = readFileSync(process.env.STATS_LOG, 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
+        const rows = readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
         assert.equal(rows.length, 6);
         for (const row of rows) {
             assert.equal(row.errorClass, 'Error'); assert(row.ms >= 0);

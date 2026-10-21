@@ -1,19 +1,20 @@
-// Offline stats/rotation/report regressions. In-memory HTTP and temp files only.
+// Offline stats/report regressions. In-memory HTTP and temp files only.
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync, openSync, closeSync, statSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync, openSync, closeSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { PassThrough } from 'node:stream';
-import { EventEmitter, once } from 'node:events';
-import { spawnSync, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 
 const dir = mkdtempSync(join(tmpdir(), 'docsai-stats-'));
 const savedEnv = { ...process.env };
-let holder;
 try {
-    const live = join(dir, 'stats.jsonl'), archive = join(dir, 'archive with spaces');
-    Object.assign(process.env, { STATS: '1', STATS_LOG: live, STATS_SALT: 'synthetic-test-salt', RATE_MAX: '1000' });
+    const archive = join(dir, 'monthly with spaces');
+    mkdirSync(archive);
+    const live = join(archive, new Date().toISOString().slice(0, 7) + '.jsonl');
+    Object.assign(process.env, { STATS: '1', STATS_DIR: archive, STATS_SALT: 'synthetic-test-salt', RATE_MAX: '1000' });
     for (const file of ['stats.mjs', 'config.mjs', 'server.mjs', 'mcp-core.mjs', 'debug.mjs']) {
         writeFileSync(join(dir, file), readFileSync(new URL(file, import.meta.url)));
     }
@@ -44,7 +45,32 @@ export async function* answerStream(query) {
     yield {type:'final', ...result};
 }
 `);
-    const { clientName, queryLanguage, pipelineStat, logStat, hashIp } = await import(pathToFileURL(join(dir, 'stats.mjs')));
+    const { clientName, queryLanguage, pipelineStat, logStat, hashIp, hashNet } = await import(pathToFileURL(join(dir, 'stats.mjs')));
+    assert.equal(hashNet('192.0.2.10'), hashIp('192.0.2.10'), 'IPv4 uses the full address and existing salt/hash');
+    assert.notEqual(hashNet('192.0.2.10'), hashNet('192.0.2.11'));
+    const home = hashNet('2001:db8:1234:5678::1');
+    assert.match(home, /^[a-f0-9]{16}$/);
+    assert.equal(home, hashIp('2001:0db8:1234:5678::/64'), 'canonical /64 key uses the existing salt/hash');
+    assert.equal(home, hashNet('2001:db8:1234:5678:ffff:abcd:1234:5678'), 'same /64');
+    assert.notEqual(home, hashNet('2001:db8:1234:5679::1'), 'different /64');
+    for (const spelling of ['2001:0DB8:1234:5678:0000:0000:0000:0001', '2001:db8:1234:5678::1%eth0']) {
+        assert.equal(home, hashNet(spelling), 'expanded/case/zone spelling');
+    }
+    assert.equal(hashNet('fe80::1%eth0'), hashNet('fe80:0:0:0:0:0:0:1%42'));
+    assert.equal(hashNet('::'), hashNet('0:0:0:0:0:0:0:0'));
+    assert.equal(hashNet('2001:db8::192.0.2.10'), hashNet('2001:db8:0:0:0:0:c000:20a'));
+    for (const mapped of ['::ffff:192.0.2.10', '::FFFF:c000:020a', '0:0:0:0:0:ffff:c000:20a%eth0']) {
+        assert.equal(hashNet(mapped), hashNet('192.0.2.10'), 'mapped IPv6 is full IPv4, even in hex notation');
+    }
+    assert.notEqual(hashNet('::ffff:192.0.2.10'), hashNet('::ffff:192.0.2.11'), 'mapped IPv6 keeps every IPv4 bit');
+    for (const invalid of [undefined, null, '', 42, {}, [], 'garbage', '192.0.2.999', '192.0.2.010', '2001:db8:::1',
+        '1:2:3:4:5:6:7:8:9', '::ffff:192.0.2.999', '[2001:db8::1]', 'fe80::1%', 'fe80::1%eth0%extra', ' 192.0.2.10', '192.0.2.10\n']) {
+        assert.equal(hashNet(invalid), null, 'missing/unparseable address');
+    }
+    const boundedAddress = 'fe80::1%' + 'a'.repeat(120);
+    assert.equal(boundedAddress.length, 128);
+    assert.equal(hashNet(boundedAddress), hashNet('fe80::1'), '128 code units accepted');
+    assert.equal(hashNet(boundedAddress + 'a'), null, '129 code units rejected');
     for (const [ua, expected] of [
         [undefined, 'unknown'], ['', 'unknown'], ['  ', 'unknown'],
         ['Claude-Code/1.2.3 (linux)', 'claude'], ['Claude-Desktop/2.0', 'claude'],
@@ -66,24 +92,35 @@ export async function* answerStream(query) {
     assert.equal(pipelineStat({}).jevTokens, null);
     const { server } = await import(pathToFileURL(join(dir, 'server.mjs')));
     const rows = () => existsSync(live) ? readFileSync(live, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
-    async function request(path, body, headers = {}) {
+    async function request(path, body, headers = {}, logged = true, remoteAddress = '192.0.2.10') {
         const before = rows().length;
         const response = await new Promise(resolve => {
             const req = new PassThrough();
-            Object.assign(req, { method:'POST', url:path, headers, socket:{remoteAddress:'192.0.2.10'} });
+            Object.assign(req, { method:'POST', url:path, headers, socket:{remoteAddress} });
             const res = new EventEmitter();
             Object.assign(res, { data:'', setHeader() {}, writeHead(status) { this.status = status; },
                 write(data) { this.data += data; return true; }, end(data = '') { this.data += data; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
+        if (!logged) return { response };
         const all = rows(); assert.equal(all.length, before + 1, path + ' writes exactly one line');
         const row = all.at(-1);
-        for (const field of ['ts','ep','tool','client','ms','path','fallbackReason','rounds','haikuCalls','haiku','jevTokens','qLen','qLang','ip','errorReason','errorClass']) {
+        for (const field of ['ts','ep','tool','client','ms','path','fallbackReason','rounds','haikuCalls','haiku','jevTokens','qLen','qLang','ip','net','errorReason','errorClass']) {
             assert(Object.hasOwn(row, field), `${path}: missing ${field}`);
         }
         assert(Number.isFinite(Date.parse(row.ts))); assert(row.ms >= 0);
         assert.deepEqual(Object.keys(row.haiku), ['in','out','thinking']);
-        assert.equal(row.ip, hashIp('192.0.2.10')); assert.match(row.ip, /^[a-f0-9]{16}$/);
+        const address = headers['cf-connecting-ip'] || remoteAddress || '';
+        assert.equal(row.ip, hashIp(address));
+        assert.equal(row.net, hashNet(address));
+        if (row.ip !== null) assert.match(row.ip, /^[a-f0-9]{16}$/);
+        if (row.net !== null) assert.match(row.net, /^[a-f0-9]{16}$/);
+        const written = readFileSync(live, 'utf8').trim().split('\n').at(-1);
+        if (address) assert(!written.includes(address), `${path}: no raw address in written line`);
+        for (const raw of ['192.0.2.10', '2001:db8:1234:5678', '2001:0DB8:1234:5678',
+            '2001:0db8:1234:5678', 'fe80:', '::ffff:', '/64']) {
+            assert(!written.includes(raw), `${path}: no raw address or prefix in written line: ${raw}`);
+        }
         for (const field of ['ua','ref','headers','qlen']) assert(!Object.hasOwn(row, field));
         return {row, response};
     }
@@ -112,6 +149,27 @@ export async function* answerStream(query) {
     const {row:init} = await request('/mcp', {id:1, method:'initialize', params:{clientInfo:{name:'Client Name', version:'1.2.3'}}}, {'user-agent':'Cursor/1.1'});
     assert.equal(init.ep, 'mcp'); assert.equal(init.method, 'initialize'); assert.equal(init.client, 'cursor');
     assert.deepEqual(init.clientInfo, {name:'Client Name', version:'1.2.3'}); assert.equal(init.tool, null);
+    for (const [value, expected] of [
+        ['N'.repeat(64), 'N'.repeat(64)], ['n'.repeat(65), 'other'],
+        ['self-marker_2026.10-21 Home Office', 'self-marker_2026.10-21 Home Office'],
+        ['', 'other'], ['bad/name', 'other'], ['bad\\name', 'other'], ['日本語', 'other'],
+        ['name\n', 'other'], ['name\r', 'other'], ['name\t', 'other'], ['name\u0000', 'other'],
+        ['bad😀', 'other'], [42, 'other'], [{name:'nested'}, 'other'], [[], 'other'],
+        [null, null], [undefined, null],
+    ]) {
+        const { row } = await request('/mcp', {id:1, method:'initialize', params:{clientInfo:{name:value, version:value}}});
+        assert.deepEqual(row.clientInfo, {name:expected, version:expected}, 'initialize clientInfo bounds');
+    }
+    assert.deepEqual((await request('/mcp', {id:1, method:'initialize'})).row.clientInfo, {name:null, version:null});
+    for (const address of ['192.0.2.10', '::ffff:192.0.2.10', '2001:db8:1234:5678::1',
+        '2001:0DB8:1234:5678:0000:0000:0000:0001%eth0', 'fe80::1%42', '', 'invalid-address']) {
+        // Header and socket paths, including initialize, must write only hashes.
+        for (const [path, body] of [['/get', {ids:['one']}], ['/mcp', {id:1, method:'initialize'}]]) {
+            const { row } = await request(path, body, {}, true, address);
+            const { row:header } = await request(path, body, {'cf-connecting-ip':address});
+            if (address) assert.equal(header.net, row.net, 'header and socket normalization agree');
+        }
+    }
     for (const [tool, args] of [['trussc_search', {query:'circle'}], ['trussc_get', {ids:['one']} ]]) {
         const {row} = await request('/mcp', call(tool,args), {'user-agent':'Claude-Code/1.2.3'});
         assert.equal(row.ep, 'mcp'); assert.equal(row.tool, tool); assert.equal(row.client, 'claude');
@@ -161,77 +219,81 @@ export async function* answerStream(query) {
         assert.equal(row.ep,'mcp'); assert.equal(row.client,'trussc-mcp-stdio');
         assert.equal(row.tool,proxy.path === '/search' ? 'trussc_search' : 'trussc_get');
     }
-    // A logging failure cannot affect request completion.
-    rmSync(live); mkdirSync(live);
-    assert.doesNotThrow(() => logStat({ep:'get'})); rmSync(live,{recursive:true});
-    console.log('PASS consistent endpoint/error schema, MCP initialize/tools/stdio, text, client bound, language and usage');
+    console.log('PASS consistent endpoint/error schema, MCP initialize/tools/stdio, text, client bounds, network hashes/privacy, language and usage');
 
-    const rotation = fileURLToPath(new URL('./deploy/rotate-stats.sh',import.meta.url));
-    function run(command, args, env = process.env) {
-        const out = openSync(join(dir,'cmd.out'),'w'), err = openSync(join(dir,'cmd.err'),'w');
-        let result;
-        try { result = spawnSync(command,args,{env,stdio:['ignore',out,err]}); }
-        finally { closeSync(out); closeSync(err); }
-        assert.equal(result.error, undefined);
-        return {...result, stdout:readFileSync(join(dir,'cmd.out'),'utf8'), stderr:readFileSync(join(dir,'cmd.err'),'utf8')};
+    // Exercise request handling with no stats directory; warn once per process.
+    rmSync(archive, { recursive: true });
+    const warnings = [], warn = console.warn;
+    console.warn = message => warnings.push(message);
+    try {
+        for (let i = 0; i < 2; i++) {
+            const { response } = await request('/get', { ids: ['one'] }, {}, false);
+            assert.equal(response.status, 200);
+        }
+        assert.equal(warnings.length, 1);
+        assert(!existsSync(archive), 'logger never creates a directory');
+    } finally { console.warn = warn; }
+
+    mkdirSync(archive);
+    const RealDate = Date, oldUmask = process.umask(0);
+    function at(ts) {
+        globalThis.Date = class extends RealDate {
+            constructor(...args) { super(...(args.length ? args : [ts])); }
+        };
     }
-    const rotate = () => run('bash',['-c','umask 0022; exec bash "$@"','rotation-test',rotation,live,archive]);
-    const mode = path => statSync(path).mode & 0o777;
-    assert.equal(rotate().status,0,'missing live is OK');
-    const row = (ep, tool, client, ts) => JSON.stringify({ts,ep,tool,client,ms:10,q:ep});
-    const first = row('ask',null,'widget','2025-12-31T23:59:59Z')+'\n';
-    const second = row('mcp','trussc_get','claude','2026-01-01T00:00:00Z')+'\n';
-    writeFileSync(live,first,{mode:0o600});
-    const inode = statSync(live).ino;
-    assert.equal(rotate().status,0);
-    assert.equal(statSync(live).ino,inode); assert.equal(mode(live),0o600); assert.equal(readFileSync(live,'utf8'),'');
-    writeFileSync(live,second); assert.equal(rotate().status,0); assert.equal(readFileSync(live,'utf8'),'');
-    const monthFiles = readdirSync(archive).filter(f=>f.endsWith('.jsonl'));
-    assert.equal(monthFiles.length,1,'rotation month, not each timestamp month');
-    assert.equal(monthFiles[0],new Date(Date.now()-86400000).toISOString().slice(0,7)+'.jsonl');
-    assert.equal(readFileSync(join(archive,monthFiles[0]),'utf8'),first+second);
-    assert.equal(rotate().status,0,'empty file is OK');
-    const monthly = join(archive,monthFiles[0]), lock = join(archive,'.rotate.lock');
-    assert.equal(mode(archive),0o700); assert.equal(mode(monthly),0o600); assert.equal(mode(lock),0o600);
-    chmodSync(archive,0o755); chmodSync(monthly,0o644); chmodSync(lock,0o644);
-    assert.equal(rotate().status,0,'empty rotation repairs existing modes');
-    assert.equal(mode(archive),0o700); assert.equal(mode(monthly),0o600); assert.equal(mode(lock),0o600);
-    assert.equal(mode(live),0o600); assert.equal(statSync(live).ino,inode);
-    // Pause an actual first rotation while it holds flock, before copying.
-    const bin = join(dir,'bin'); mkdirSync(bin);
-    const ready = join(archive,'ready');
-    writeFileSync(join(bin,'head'), '#!/bin/bash\n: > "$STATS_TEST_READY"\nread -r release\nexec /usr/bin/head "$@"\n', {mode:0o755});
-    writeFileSync(live,'third\n');
-    holder = spawn('bash',[rotation,live,archive], {env:{...process.env,PATH:bin+':'+process.env.PATH,STATS_TEST_READY:ready},stdio:['pipe','ignore','inherit']});
-    const holderExit = once(holder,'exit');
-    const deadline = Date.now()+5000;
-    while(!existsSync(ready) && Date.now()<deadline) await new Promise(r=>setTimeout(r,10));
-    assert(existsSync(ready),'first rotation reached its locked copy');
-    const blocked = rotate(); assert.equal(blocked.status,1); assert.match(blocked.stderr,/holds the lock/);
-    assert.equal(readFileSync(live,'utf8'),'third\n');
-    holder.stdin.end('release\n'); assert.deepEqual(await holderExit,[0,null]); holder = null;
-    assert.equal(readFileSync(join(archive,monthFiles[0]),'utf8'),first+second+'third\n');
-    assert.equal(readFileSync(live,'utf8'),'');
-    console.log('PASS restrictive/repairable archive modes under umask 0022; rotation appends in order, truncates, tolerates missing/empty live, and blocks concurrent rotation');
+    try {
+        // UTC year/month boundary, including the final millisecond of a month.
+        at('2025-12-31T23:59:59.999Z'); logStat({ ep: 'ask', q: 'December' });
+        at('2026-01-01T00:00:00Z'); logStat({ ep: 'mcp', tool: 'trussc_get', client: 'claude' });
+        at('2026-01-01T09:00:00+09:00'); logStat({ ep: 'search', q: 'January' });
+        const files = readdirSync(archive).sort();
+        assert.deepEqual(files, ['2025-12.jsonl', '2026-01.jsonl']);
+        for (const name of files) {
+            assert.match(name, /^\d{4}-\d{2}\.jsonl$/);
+            assert.equal(statSync(join(archive, name)).mode & 0o777, 0o600);
+            const lines = readFileSync(join(archive, name), 'utf8').trim().split('\n');
+            for (const line of lines) {
+                const row = JSON.parse(line);
+                assert.equal(row.ts.slice(0, 7) + '.jsonl', name);
+                assert.equal(row.net, null, 'the writer supplies net even without request metadata');
+            }
+        }
+        assert.equal(readFileSync(join(archive, '2026-01.jsonl'), 'utf8').trim().split('\n').length, 2);
+        // Expanded ISO years must never create a name outside the allowed pattern.
+        at('+010000-01-01T00:00:00Z'); assert.doesNotThrow(() => logStat({ ep: 'get' }));
+        assert.deepEqual(readdirSync(archive).sort(), files);
+        // Refuse a symlink without changing its target or replacing the link.
+        const target = join(dir, 'target'); writeFileSync(target, 'unchanged');
+        const link = join(archive, '2026-02.jsonl'); symlinkSync(target, link);
+        at('2026-02-01T00:00:00Z'); assert.doesNotThrow(() => logStat({ ep: 'get' }));
+        assert.equal(readFileSync(target, 'utf8'), 'unchanged'); rmSync(link);
+        // Failed opens also leave requests usable; existing non-files are refused.
+        mkdirSync(link); assert.doesNotThrow(() => logStat({ ep: 'get' })); rmSync(link, { recursive: true });
+    } finally { globalThis.Date = RealDate; process.umask(oldUmask); }
+    console.log('PASS UTC month boundary, strict filenames, append, mode 0600 under umask 0, symlink refusal, missing directory and one warning');
 
-    writeFileSync(live,row('search',null,'http','2026-01-02T00:00:00Z')+'\n{partial');
-    const report = fileURLToPath(new URL('./report.mjs',import.meta.url));
-    const result = run(process.execPath,[report,'--live',live,'--archive-dir',archive]);
-    assert.equal(result.status,0,result.stderr); assert.match(result.stdout,/\(3 requests,/);
-    for (const label of ['by endpoint:','by tool:','by client:','by day:','ask','search','mcp','trussc_get','widget','claude','http','2025-12-31','2026-01-01','2026-01-02']) assert(result.stdout.includes(label),label);
-    rmSync(live);
-    assert.match(run(process.execPath,[report,'--live',live,'--archive-dir',archive]).stdout,/\(2 requests,/);
-    assert.match(run(process.execPath,[report,'--live',live,'--archive-dir',join(dir,'absent')]).stdout,/no requests/);
-    // Missing-live rotation also repairs previous monthly archive permissions.
-    const olderArchive = join(archive,'2000-01.jsonl');
-    writeFileSync(olderArchive,'older\n',{mode:0o644});
-    chmodSync(archive,0o755); chmodSync(lock,0o644);
-    assert.equal(rotate().status,0);
-    assert.equal(mode(olderArchive),0o600); assert.equal(mode(archive),0o700); assert.equal(mode(lock),0o600);
-    assert.equal(readFileSync(olderArchive,'utf8'),'older\n');
-    console.log('PASS report combines archive/live and groups endpoint/tool/client/day, tolerating missing files and malformed tails');
+    function report(args = [], statsDir = archive) {
+        const out = openSync(join(dir, 'report.out'), 'w'), err = openSync(join(dir, 'report.err'), 'w');
+        let result;
+        try {
+            result = spawnSync(process.execPath, [fileURLToPath(new URL('./report.mjs', import.meta.url)),
+                '--live', join(dir, 'stats.jsonl'), ...args], {
+                env: { ...process.env, STATS_DIR: statsDir, EXCLUDE_IP: '' },
+                stdio: ['ignore', out, err], timeout: 10000,
+            });
+        } finally { closeSync(out); closeSync(err); }
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, 0, readFileSync(join(dir, 'report.err'), 'utf8'));
+        return readFileSync(join(dir, 'report.out'), 'utf8');
+    }
+    const reportOutput = report();
+    assert.match(reportOutput, /\(3 requests,/);
+    for (const label of ['by endpoint:', 'by tool:', 'by client:', 'by day:', 'ask', 'search', 'mcp', 'trussc_get', 'claude', '2025-12-31', '2026-01-01']) assert(reportOutput.includes(label), label);
+    assert.match(report(['--archive-dir', archive], join(dir, 'absent')), /\(3 requests,/);
+    assert.match(report(['--stats-dir', archive], join(dir, 'absent')), /\(3 requests,/);
+    assert.match(report([], join(dir, 'absent')), /no requests/);
+    console.log('PASS report reads STATS_DIR across months with missing legacy file, directory aliases and absent inputs');
 } finally {
-    if (holder) { holder.stdin.end('release\n'); await once(holder,'exit'); }
     for (const name of Object.keys(process.env)) if (!(name in savedEnv)) delete process.env[name];
     Object.assign(process.env,savedEnv); rmSync(dir,{recursive:true,force:true});
 }

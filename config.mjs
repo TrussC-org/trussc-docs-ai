@@ -117,11 +117,11 @@ export const EMBEDDED = process.env.EMBEDDED || new URL('./chunks.embedded.json'
 export const EMBEDDED_NEXT = process.env.EMBEDDED_NEXT || (/\.json$/.test(EMBEDDED) ? EMBEDDED.replace(/\.json$/, '.next.json') : EMBEDDED + '.next');
 
 // --- Usage stats ------------------------------------------------------------
-// One JSON line per request appended to STATS_LOG (no DB, no deps). Analyze with
+// One JSON line per request appended to STATS_DIR/YYYY-MM.jsonl (no DB, no deps). Analyze with
 // jq later. STATS_SALT keys the per-IP hash — set a real secret in prod so IPs
 // can't be reversed/correlated. Set STATS=0 to disable logging entirely.
 export const STATS = process.env.STATS !== '0';
-export const STATS_LOG = process.env.STATS_LOG || new URL('./stats.jsonl', import.meta.url).pathname;
+export const STATS_DIR = process.env.STATS_DIR || new URL('../docs-ai-stats/', import.meta.url).pathname;
 export const STATS_SALT = process.env.STATS_SALT || 'trussc-docs-ai-dev';
 
 // Jev card selection. Credentials are read only from the service environment.

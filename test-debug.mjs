@@ -40,10 +40,11 @@ try {
     writeFileSync(statsLog, [row, { ...row, debug: true, q: 'debug question' }].map(r => JSON.stringify(r)).join('\n'));
     // Execute the real report with stubbed imports, keeping this test independent
     // of child-process capture and operator environment/configuration.
-    const report = readFileSync(new URL('./report.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
+    const report = readFileSync(new URL('./report.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '')
+        .replace("new URL('./stats.jsonl', import.meta.url).pathname", JSON.stringify(statsLog));
     const runReport = async args => {
         const output = [];
-        await vm.runInNewContext(`(async () => { ${report} })()`, { Buffer, Transform, createReadStream, createInterface, opendir, existsSync, homedir: () => dir, join, STATS_LOG: statsLog,
+        await vm.runInNewContext(`(async () => { ${report} })()`, { Buffer, Transform, createReadStream, createInterface, opendir, existsSync, join, STATS_DIR: dir,
             process: { argv: ['node', 'report.mjs', ...args], env: {}, exit() { throw new Error('unexpected early exit'); } },
             console: { log: (...args) => output.push(args.join(' ')) },
         });

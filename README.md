@@ -205,7 +205,7 @@ change and a server restart; requests cannot override it.
 | `JEV_PICK_MIN_P` | `0.4` | Threshold probability |
 | `JEV_PICK_MIN` | `4` | Threshold minimum, filled by descending p |
 | `JEV_PICK_MAX` | `16` | Threshold maximum (takes precedence if below minimum) |
-| `JEV_SEARCH_HINT_BELOW` | `0.7` | Haiku always sees the Jev coverage estimate as a percentage; below this value, in rounds that offer `search_more`, its prompt also asks it to search for the missing parts before answering (Haiku still decides). Clamped to 0–1 |
+| `JEV_SEARCH_HINT_BELOW` | `0.7` | Haiku always sees the Jev coverage estimate as a percentage; below this value, in rounds that offer `search_more`, its prompt also asks it to search for the missing parts instead of answering now (Haiku still decides). Clamped to 0–1 |
 | `JEV_RATE_MAX` | `20` | Jev calls per IP per sliding window |
 | `JEV_RATE_WIN_MS` | `60000` | Sliding window duration |
 | `JEV_DAILY_TOKENS` | `20000000` | Per-process daily token budget, resetting at local midnight |

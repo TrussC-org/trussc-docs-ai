@@ -66,7 +66,7 @@ for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial an
             const hintShown = exists !== null && exists < .7;
             assert.equal(prompt.includes('An independent relevance checker estimates'), exists !== null);
             if (exists !== null) assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed to answer every part of the question.`));
-            const recommendation = "Before answering, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).";
+            const recommendation = "Instead of answering now, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).";
             assert.equal(prompt.includes(recommendation), hintShown);
             assert(!prompt.includes('answer-exists probability'));
             if (i) assert(prompt.startsWith('Search completed.'));
@@ -89,7 +89,7 @@ test('configured hint threshold is honoured', async () => {
             const response = await request('/ask'); assert.equal(response.status, 200);
             const prompt = calls[0].messages.at(-1).content;
             assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
-            assert.equal(prompt.includes('Before answering, call search_more'), hintShown);
+            assert.equal(prompt.includes('Instead of answering now, call search_more'), hintShown);
             assert.equal(JSON.parse(response.data).debug.rounds[0].hintShown, hintShown);
             assert.equal(rows().at(-1).retrievals[0].hintShown, hintShown);
         });
@@ -119,7 +119,7 @@ test('each round uses its current coverage estimate and hint decision', async ()
             const prompt = typeof content === 'string' ? content : content[0].content;
             assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
             // Round 3 is the last (MAX_SEARCH_ROUNDS=3): search_more is not offered, so it is not recommended.
-            assert.equal(prompt.includes('Before answering, call search_more'), i === 0);
+            assert.equal(prompt.includes('Instead of answering now, call search_more'), i === 0);
             for (const record of [debug.rounds[i], stat.retrievals[i]]) {
                 assert.equal(record.exists, exists); assert.equal(record.hintShown, i === 0);
                 assert.equal(record.hintFollowed, i === 0 ? true : null);
@@ -133,7 +133,7 @@ test('no recommendation when search_more is not offered (single round)', async (
         assert.equal(calls.length, 1); assert.equal(calls[0].tools, undefined);
         const prompt = calls[0].messages.at(-1).content;
         assert(prompt.includes('cover about 29% of what is needed'));
-        assert(!prompt.includes('Before answering, call search_more'));
+        assert(!prompt.includes('Instead of answering now, call search_more'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, false); assert.equal(record.hintFollowed, null);
         }
@@ -143,7 +143,7 @@ test('invalid-tool recovery stays out of the hint metric', async () => {
     await fixture({ exists: .29, generate: (req, _, n) => new Response((n === 1 ? tool('bad', { message: '', queries: [] }) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
         const response = await request('/ask'); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 2); assert(calls[0].tools); assert.equal(calls[1].tools, undefined);
-        assert(calls[0].messages.at(-1).content.includes('Before answering, call search_more'));
+        assert(calls[0].messages.at(-1).content.includes('Instead of answering now, call search_more'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, null);
         }

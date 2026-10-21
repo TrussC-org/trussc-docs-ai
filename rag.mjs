@@ -993,7 +993,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
         const existsHint = offerTool => {
             if (typeof info.exists !== 'number') return '';
             return `An independent relevance checker estimates these cards cover about ${Math.round(info.exists * 100)}% of what is needed to answer every part of the question.` + (recommends(offerTool)
-                ? ' Before answering, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).' : '');
+                ? ' Instead of answering now, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).' : '');
         };
         const finalNote = '\nThis is the final round. Answer now using the available evidence and state any gaps.';
         messages[0].content += '\nUse search_more only when more evidence is needed. When calling it, provide no answer text. Its message must be short and in the user\'s language.';

@@ -15,10 +15,7 @@ export const TOOLS = [{
         'so its priors are unreliable. Call this BEFORE writing, reviewing, or answering ' +
         'anything about TrussC C++ code to get the REAL API signatures, conventions ' +
         '(TAU not PI, colors are 0–1 floats, `using namespace tc`, include <TrussC.h>), ' +
-        'working example code, and addon usage. Results are ranked by hybrid retrieval ' +
-        '(BM25 over names + bge-m3 semantic, fused with RRF), then selected by Jev. ' +
-        'A cross-encoder reranker with source quotas is the fallback. Example ' +
-        'chunks come back TRIMMED by ' +
+        'working example code, and addon usage. Example chunks come back TRIMMED by ' +
         'default (header + start of source); pass full:true, or call trussc_get with the ' +
         'chunk id, to get the whole multi-file source. Use a specific natural-language ' +
         'query, e.g. "draw a filled circle in a color", "load and play a sound file". ' +
@@ -51,14 +48,10 @@ export const TOOLS = [{
     },
 }];
 
-// Render results. Score line shows the fused rank (rrf) alongside the raw cosine so
-// the ordering is legible ("why is a 0.52 above a 0.55?" → different bm25 rank).
+// Render results. On the Jev path each card carries its relevance probability p,
+// which is the only score a caller can act on; fallback scores are internal.
 function scoreLine(c) {
-    const cos = c.score == null ? null : `cos ${Number(c.score).toFixed(3)}`;
-    const rrf = c.rrf == null ? null : `rrf ${Number(c.rrf).toFixed(4)}`;
-    const rr = c.rerank == null ? null : `rr ${Number(c.rerank).toFixed(3)}`;
-    const parts = [cos, rrf, rr].filter(Boolean).join(' · ');
-    return parts ? `  (${parts})` : '';
+    return typeof c.p === 'number' && Number.isFinite(c.p) ? `  (relevance ${c.p.toFixed(2)})` : '';
 }
 export function formatResults(results, query) {
     if (!results || !results.length) return `No TrussC matches for "${query}".`;

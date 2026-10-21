@@ -165,6 +165,19 @@ export const HAIKU_TIMEOUT_MS = numberEnv('HAIKU_TIMEOUT_MS', 60000);
 export const HAIKU_MAX_RESPONSE_BYTES = numberEnv('HAIKU_MAX_RESPONSE_BYTES', 1048576, { integer: true });
 export const HAIKU_CARD_CHARS = numberEnv('HAIKU_CARD_CHARS', 8000, { integer: true });
 export const HAIKU_MAX_INPUT_TOKENS = numberEnv('HAIKU_MAX_INPUT_TOKENS', 24000);
+export const EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
+// Bound (configuration): operator-only effort is an allowed level or unset (model default); invalid values warn and use the default.
+const effort = process.env.HAIKU_EFFORT;
+export const HAIKU_EFFORT = EFFORT_LEVELS.includes(effort) ? effort : undefined;
+if (effort && !HAIKU_EFFORT) console.warn('Warning: HAIKU_EFFORT must be low|medium|high|xhigh|max; using model default');
+// Bound (configuration): operator-only thinking is off or unset (model default); invalid values warn and use the default.
+const thinking = process.env.HAIKU_THINKING;
+export const HAIKU_THINKING = thinking === 'off' ? thinking : undefined;
+if (thinking && !HAIKU_THINKING) console.warn('Warning: HAIKU_THINKING must be off or unset; using model default');
+// Bound (configuration): adaptive generation allows 1536..32768 total output tokens, including thinking; overflow clamps with a warning.
+const adaptiveMaxTokens = numberEnv('HAIKU_ADAPTIVE_MAX_TOKENS', 8192, { integer: true });
+export const HAIKU_ADAPTIVE_MAX_TOKENS = Math.max(1536, Math.min(32768, adaptiveMaxTokens));
+if (adaptiveMaxTokens < 1536 || adaptiveMaxTokens > 32768) console.warn('Warning: HAIKU_ADAPTIVE_MAX_TOKENS clamped to 1536..32768');
 // Exception messages from keyed transports are never retained. Only known native
 // class names are useful diagnostics; arbitrary upstream names are not trusted.
 export function transportClass(error) {

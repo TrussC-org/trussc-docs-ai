@@ -12,7 +12,7 @@ import { pipelineStat } from './stats.mjs';
 import { main } from './ask-cli.mjs';
 
 // Future internal fields must not expand the public schema, at any nesting level.
-const privateFields = { reason: 'budget', remainingBudget: 123, rate: 20, prompt: 'system text', key: 'secret', ip: '192.0.2.1', pathOnDisk: '/private/file', thinkingTokens: 99, thinkingBudget: 1024, fillerTokens: 300, signature: 'private signature' };
+const privateFields = { ttftMs: 4, totalMs: 12, calls: [{ ttftMs: 4, totalMs: 12 }], thinking: 'off', reason: 'budget', remainingBudget: 123, rate: 20, prompt: 'system text', key: 'secret', ip: '192.0.2.1', pathOnDisk: '/private/file', thinkingTokens: 99, thinkingBudget: 1024, fillerTokens: 300, signature: 'private signature' };
 const trace = {
     ...privateFields, queries: ['circle'],
     picked: [{ ...privateFields, id: 'symbol:drawCircle', title: 'drawCircle', p: .8, text: 'PRIVATE CARD TEXT' }],

@@ -213,6 +213,9 @@ change and a server restart; requests cannot override it.
 | `GEN_BACKEND` | `ollama` | `anthropic` enables native search rounds |
 | `ANTHROPIC_API_KEY` | unset | Haiku credential, environment only |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Answer model |
+| `HAIKU_EFFORT` | unset (model default) | Optional `low`, `medium`, `high`, `xhigh`, or `max`; sent as `output_config.effort` only for supported models (currently Haiku 5.5). Invalid values warn and use the model default. Haiku 5.5 defaults to medium. |
+| `HAIKU_THINKING` | unset (model default) | Optional `off` sends `thinking: {"type":"disabled"}` for adaptive models only. Requires effort high or below (Haiku 5.5's default medium is allowed); xhigh/max and manual thinking budgets are rejected before retrieval or requests. Invalid values warn and use the model default. Haiku 4.5 already defaults to thinking off, so its payload stays unchanged. |
+| `HAIKU_ADAPTIVE_MAX_TOKENS` | `8192` | Total output token allowance for adaptive models, including thinking; integer clamped to 1536..32768. Haiku 4.5 and unknown models retain 1536 (plus any internal manual thinking budget). |
 | `HAIKU_TIMEOUT_MS` | `60000` | Overall generation deadline, covering connect and the entire streamed response |
 | `HAIKU_MAX_RESPONSE_BYTES` | `1048576` | Incremental streamed-body byte cap; individual SSE lines/events also capped at min(this value, 64 KiB) |
 | `HAIKU_CARD_CHARS` | `8000` | Generation text cap per card, including truncation marker; separate from Jev's text cap |
@@ -480,4 +483,4 @@ Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report aggregates
 (volume, distinct visitors, p50/p95, top questions/APIs/categories, by day).
 
-Offline base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md). These internal options are unavailable over HTTP.
+Offline model/effort, thinking-off and base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md), including per-call usage and latency measurements. These internal options are unavailable over HTTP. The production model default remains Haiku 4.5; Haiku 5.5 uses adaptive thinking by default and rejects manual thinking budgets.

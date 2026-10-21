@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily TrussC docs-ai stats rotation
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=trussc-docs-ai-stats-rotate.service
+
+[Install]
+WantedBy=timers.target

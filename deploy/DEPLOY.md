@@ -153,3 +153,52 @@ silently. Installing/editing a system unit and daemon-reload still require sudo.
 The gate reads the operator shell environment, not the service environment:
 export `TYPESAFE_API_KEY` in that shell using README.md's hidden `read -r -s`
 prompt, and unset it afterwards. Do not put the value in history or the repository.
+
+## External stats rotation (user timer)
+
+The owner installs these **user units**, separately from the API system unit.
+The API's sandbox stays unchanged: it still appends only to `stats.jsonl`, never
+reads the archives, and needs no new read/write permissions, destinations or
+environment variables. Do not put the rotation job inside the API unit.
+
+The script requires Bash and standard Linux `flock`, `stat`, `head`, `date`,
+`truncate`, and `chmod`. It archives by the **rotation's current UTC month** to
+`~/TrussC-dev/docs-ai-stats/YYYY-MM.jsonl`, then truncates the live file in place.
+A few concurrent appends may be lost at the copytruncate boundary. Missing/empty
+live files are OK. Rotations share a short, nonblocking archive lock. Archive
+files use mode `0600`, and the archive directory uses `0700`. The script sets
+`umask 077` itself, including on direct invocation, and reapplies these modes to
+existing monthly archives and the lock even for missing/empty live files.
+Existing live permissions and inode are kept.
+
+Install from the chosen worktree (owner commands, not run automatically):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/trussc-docs-ai-stats-rotate.service deploy/trussc-docs-ai-stats-rotate.timer ~/.config/systemd/user/
+# Edit the installed .service ExecStart to this worktree's absolute script path.
+# Template defaults to %h/TrussC-dev/trussc-docs-ai/deploy/rotate-stats.sh.
+# Optional positional arguments after the script: /path/stats.jsonl /path/archive
+systemctl --user daemon-reload
+systemctl --user enable --now trussc-docs-ai-stats-rotate.timer
+systemctl --user list-timers trussc-docs-ai-stats-rotate.timer
+```
+
+The daily timer uses the host's daily schedule, catches up a missed run after the
+user manager next starts (`Persistent=true`), and requires that manager to run.
+The owner can arrange user lingering according to the host's existing policy if
+rotation must run while logged out. No API restart or system-unit edit is needed.
+Only this operator job gets archive access; neither unit is installed by this
+change. Run `node report.mjs --archive-dir ~/TrussC-dev/docs-ai-stats` from the
+worktree outside the API sandbox. Direct runs use the same permissions:
+
+```bash
+bash deploy/rotate-stats.sh /path/to/stats.jsonl /path/to/archive
+node report.mjs 7 --live /path/to/stats.jsonl --archive-dir /path/to/archive
+```
+
+Reporting streams selected archive months and applies row filters before
+aggregation. Oversized lines are skipped/counted, and bounded dimensions fold
+excess keys into `other`; overflow diagnostics explain any incomplete distinct
+counts or unavailable latency percentiles. See [STATS.md](../STATS.md) for schema,
+month-selection assumptions and exact limits.

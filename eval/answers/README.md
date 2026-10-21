@@ -20,10 +20,13 @@ come from arguments. Output is a JSON array, atomically replaced after each
 question and at completion; a crash leaves completed rows available. A fresh run
 replaces earlier results rather than resuming them.
 
-Each row has `id`, `variant`, `answer`, `rounds`, `haikuCalls`, `inputTokens`,
+Each row has `id`, `variant`, `answer`, `rounds`, `haikuCalls`, `inputTokensPerCall`, `inputTokens`,
 `outputTokens`, `thinkingTokens`, and `ms`, plus `error` on failure. Input/output
 counts sum reported Haiku usage across all search, recovery and correction calls;
-unreported usage is `null`. Output tokens retain the API's count, including
+unreported usage is `null`. `inputTokensPerCall` lists reported input counts in call
+order, with `null` for unreported calls. Failed rows retain accumulated usage,
+including when retrieval or correction packing fails after generation.
+Output tokens retain the API's count, including
 thinking. `thinkingTokens` is zero for base/filler; for thinking it sums separately
 reported thinking counts, or is `"included in outputTokens"` when the API does not
 report them separately. Thinking text and signatures are never written to results.

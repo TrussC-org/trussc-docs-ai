@@ -1,6 +1,8 @@
 // Round-4 regressions: synthetic corpus and in-memory transports only.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, openSync, closeSync, symlinkSync, truncateSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -530,8 +532,9 @@ globalThis.fetch=async (url, options)=>{
         assert.equal(results.length, 2);
         assert.deepEqual(results.map(row => row.id), ['a', 2]);
         for (const result of results) {
-            assert.deepEqual(Object.keys(result).sort(), ['id','variant','answer','rounds','haikuCalls','inputTokens','outputTokens','thinkingTokens','ms'].sort());
+            assert.deepEqual(Object.keys(result).sort(), ['id','variant','answer','rounds','haikuCalls','inputTokensPerCall','inputTokens','outputTokens','thinkingTokens','ms'].sort());
             assert.equal(result.variant, variant); assert.equal(result.rounds, 1); assert.equal(result.haikuCalls, 1);
+            assert.deepEqual(result.inputTokensPerCall, [101]);
             assert.equal(result.inputTokens, 101); assert.equal(result.outputTokens, 17);
             assert.equal(result.thinkingTokens, variant === 'thinking' ? 'included in outputTokens' : 0);
             assert(result.answer.includes('drawCircle')); assert(result.ms >= 0);
@@ -544,6 +547,165 @@ globalThis.fetch=async (url, options)=>{
         const allOutput = child.stdout + child.stderr + readFileSync(out, 'utf8');
         assert(!allOutput.includes(process.env.ANTHROPIC_API_KEY)); assert(!allOutput.includes(process.env.TYPESAFE_API_KEY));
         assert(!existsSync(join(dir, 'stats.jsonl')));
+    });
+});
+// Exercise the same failure boundary through both in-process APIs and the runner.
+async function failureFor(consumer, api, opts, variant) {
+    if (consumer === 'runner') {
+        const runnerDir = join(api.dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const questions = join(api.dir, 'questions.json'), out = join(api.dir, 'out.json');
+        writeFileSync(questions, JSON.stringify([{ id: 'failure', question: 'circle' }]));
+        const { main } = await import(runner);
+        assert.equal(await main([questions, out, '--variant', variant, '--filler', String(opts.fillerTokens ?? 0)]), 1);
+        const row = JSON.parse(readFileSync(out, 'utf8'))[0];
+        assert.equal(row.error, 'answer failed');
+        return row;
+    }
+    let failure;
+    try {
+        if (consumer === 'answer') await api.answer('circle', [], null, [], undefined, opts);
+        else for await (const event of api.answerStream('circle', [], null, [], undefined, opts)) {
+            assert.notEqual(event.type, 'final');
+        }
+    } catch (error) { failure = error; }
+    assert(failure instanceof Error, 'pipeline must throw');
+    return failure;
+}
+for (const consumer of ['answer', 'answerStream', 'runner']) {
+    test(`completed Haiku usage survives follow-up retrieval failure: ${consumer}`, async () => {
+        await fixture({ generate: (_, __, n) => {
+            if (n === 2) {
+                const previous = globalThis.fetch;
+                globalThis.fetch = async (url, options) => {
+                    if (url.endsWith('/api/embed')) throw new Error('synthetic follow-up retrieval outage');
+                    return previous(url, options);
+                };
+            }
+            return new Response(frame({ type: 'message_start', message: { usage: { input_tokens: n * 101 } } })
+                + tool(`search${n}`, { message: 'Search again', queries: [`gap${n}`] })
+                + frame({ type: 'message_delta', usage: { output_tokens: n * 17, thinking_tokens: n * 5 } }) + stop);
+        } }, async api => {
+            const failure = await failureFor(consumer, api, { thinkingBudget: 1024 }, 'thinking');
+            assert.equal(api.calls.length, 2);
+            assert.equal(failure.rounds, 2); assert.equal(failure.haikuCalls, 2);
+            assert.deepEqual(failure.inputTokensPerCall, [101, 202]);
+            assert.equal(failure.inputTokens, 303); assert.equal(failure.outputTokens, 51);
+            assert.equal(failure.thinkingTokens, 15);
+        });
+    });
+    test(`completed Haiku usage survives correction-packing failure: ${consumer}`, async () => {
+        const corpus = [baseCard, { ...baseCard, id: 'symbol:Node', title: 'Node', meta: { kind: 'type' } }];
+        const opts = { fillerTokens: 4096 };
+        let budget;
+        await fixture({ corpus }, async ({ answer, calls }) => {
+            await answer('circle', [], null, [], undefined, opts);
+            budget = Math.ceil(JSON.stringify(calls[0]).length * .4) + 256;
+        });
+        await fixture({ corpus, env: { HAIKU_MAX_INPUT_TOKENS: String(budget) }, generate: () =>
+            new Response(frame({ type: 'message_start', message: { usage: { input_tokens: 101 } } })
+                + text('Node::invented') + frame({ type: 'message_delta', usage: { output_tokens: 17 } }) + stop)
+        }, async api => {
+            const failure = await failureFor(consumer, api, opts, 'filler');
+            assert.equal(api.calls.length, 1, 'packing fails before a correction call');
+            if (consumer !== 'runner') assert.equal(failure.errorReason, 'input');
+            assert.equal(failure.rounds, 1); assert.equal(failure.haikuCalls, 1);
+            assert.deepEqual(failure.inputTokensPerCall, [101]);
+            assert.equal(failure.inputTokens, 101); assert.equal(failure.outputTokens, 17);
+            assert.equal(failure.thinkingTokens, 0);
+        });
+    });
+}
+test('runner bounds questions/ids files before full reads and preserves existing output', async () => {
+    await fixture({}, async ({ dir, calls }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), out = join(dir, 'out.json'), ids = join(dir, 'ids.txt');
+        const valid = JSON.stringify([{ id: 'q1', question: 'circle' }]);
+        writeFileSync(out, 'keep existing output');
+        writeFileSync(questions, valid); truncateSync(questions, 4 * 1024 * 1024 + 1);
+        const savedRead = fs.readFileSync, oversizedReads = [];
+        fs.readFileSync = (path, ...args) => {
+            if ([questions, ids].includes(path) && fs.statSync(path).size > 4 * 1024 * 1024) oversizedReads.push(path);
+            return savedRead(path, ...args);
+        };
+        syncBuiltinESMExports();
+        try {
+            await assert.rejects(main([questions, out, '--variant', 'base']), /Questions file exceeds 4 MiB limit/);
+            writeFileSync(questions, valid); writeFileSync(ids, 'q1'); truncateSync(ids, 4 * 1024 * 1024 + 1);
+            await assert.rejects(main([questions, out, '--variant', 'base', '--ids', ids]), /Ids file exceeds 4 MiB limit/);
+            assert.deepEqual(oversizedReads, [], 'oversized files must be rejected before readFileSync');
+        } finally { fs.readFileSync = savedRead; syncBuiltinESMExports(); }
+        assert.equal(readFileSync(out, 'utf8'), 'keep existing output'); assert.equal(calls.length, 0);
+    });
+});
+test('runner rejects questions above 8000 code units before retrieval and continues', async () => {
+    await fixture({}, async ({ dir, calls }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), out = join(dir, 'out.json'), embedded = [];
+        writeFileSync(questions, JSON.stringify([{ id: 'long', question: '😀'.repeat(4001) },
+            { id: 'limit', question: 'q'.repeat(8000) }, { id: 'next', question: 'circle' }]));
+        const previous = globalThis.fetch;
+        globalThis.fetch = async (url, options) => {
+            if (url.endsWith('/api/embed')) embedded.push(JSON.parse(options.body).input);
+            return previous(url, options);
+        };
+        assert.equal(await main([questions, out, '--variant', 'base']), 1);
+        const results = JSON.parse(readFileSync(out, 'utf8'));
+        assert.deepEqual(results.map(r => r.id), ['long', 'limit', 'next']);
+        assert.equal(results[0].error, 'answer failed'); assert.equal(results[0].haikuCalls, 0);
+        assert.deepEqual(results[0].inputTokensPerCall, []);
+        assert.equal(results[1].error, undefined); assert.equal(results[2].error, undefined);
+        assert.deepEqual(embedded, ['q'.repeat(8000), 'circle']); assert.equal(calls.length, 2);
+    });
+});
+test('runner refuses output/input collisions through directory symlinks before any write', async () => {
+    await fixture({}, async ({ dir, calls }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), ids = join(dir, 'ids.txt'), alias = join(dir, 'alias');
+        const original = JSON.stringify([{ id: 'q1', question: 'circle' }]);
+        writeFileSync(questions, original); writeFileSync(ids, 'q1'); symlinkSync(dir, alias, 'dir');
+        for (const [q, out, subset] of [
+            [questions, join(alias, 'questions.json'), ids],
+            [join(alias, 'questions.json'), questions, ids],
+            [questions, join(alias, 'ids.txt'), ids],
+            [questions, ids, join(alias, 'ids.txt')],
+        ]) await assert.rejects(main([q, out, '--variant', 'base', '--ids', subset]), /Output path must differ/);
+        assert.equal(readFileSync(questions, 'utf8'), original); assert.equal(readFileSync(ids, 'utf8'), 'q1');
+        assert.equal(calls.length, 0);
+    });
+});
+test('runner refuses file-symlink collisions and non-regular inputs before any write', async () => {
+    await fixture({}, async ({ dir, calls }) => {
+        const runnerDir = join(dir, 'eval/answers'); mkdirSync(runnerDir, { recursive: true });
+        const runner = join(runnerDir, 'run-variants.mjs');
+        writeFileSync(runner, readFileSync(new URL('eval/answers/run-variants.mjs', import.meta.url)));
+        const { main } = await import(runner);
+        const questions = join(dir, 'questions.json'), ids = join(dir, 'ids.txt');
+        const linkQ = join(dir, 'link-q.json'), linkIds = join(dir, 'link-ids.txt');
+        const original = JSON.stringify([{ id: 'q1', question: 'circle' }]);
+        writeFileSync(questions, original); writeFileSync(ids, 'q1');
+        symlinkSync(questions, linkQ); symlinkSync(ids, linkIds);
+        await assert.rejects(main([linkQ, questions, '--variant', 'base']), /Output path must differ/);
+        await assert.rejects(main([questions, ids, '--variant', 'base', '--ids', linkIds]), /Output path must differ/);
+        await assert.rejects(main([questions, linkQ, '--variant', 'base']), /Output path must differ/);
+        assert.equal(readFileSync(questions, 'utf8'), original); assert.equal(readFileSync(ids, 'utf8'), 'q1');
+        const fifo = join(dir, 'questions.fifo');
+        const made = spawnSync('mkfifo', [fifo]);
+        if (made.status === 0) {
+            await assert.rejects(main([fifo, join(dir, 'out.json'), '--variant', 'base']), /must be a regular file/);
+            assert.equal(existsSync(join(dir, 'out.json')), false);
+        }
+        assert.equal(calls.length, 0);
     });
 });
 let failures = 0;

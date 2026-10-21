@@ -19,6 +19,8 @@ function runNode(args, env, dir) {
     if (result.error) throw result.error;
     return { ...result, stdout: readFileSync(out, 'utf8'), stderr: readFileSync(err, 'utf8') };
 }
+// Generation input estimate: JEV_TOKENS_PER_CHAR (.4 here) times the model's tokenScale (1.25 for Haiku 5.5).
+const est = req => JSON.stringify(req).length * (/^claude-haiku-5-5(-|$)/.test(req.model) ? .5 : .4);
 const frame = value => `data: ${JSON.stringify(value)}\n\n`;
 const stop = frame({ type: 'message_stop' });
 const text = value => frame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: value } });
@@ -36,6 +38,7 @@ async function fixture(options, test) {
             HAIKU_TIMEOUT_MS: '1000', HAIKU_MAX_RESPONSE_BYTES: '1048576', HAIKU_CARD_CHARS: '8000', HAIKU_MAX_INPUT_TOKENS: '24000',
             ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001', HAIKU_EFFORT: '', HAIKU_THINKING: '', HAIKU_ADAPTIVE_MAX_TOKENS: '8192',
             STATS: '1', RATE_MAX: '1000', EMBEDDED: join(dir, 'corpus.json'), STATS_LOG: join(dir, 'stats.jsonl'), ...options.env });
+        for (const k of options.unset || []) delete process.env[k];
         writeFileSync(process.env.EMBEDDED, JSON.stringify(options.corpus || [baseCard]));
         for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'server.mjs', 'mcp-core.mjs', 'stats.mjs', 'debug.mjs'])
             writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
@@ -243,13 +246,13 @@ test('generation card cap and whole request budget, p priority and id references
         const result = await answer('circle');
         assert(result.idOnlyCardsTotal > 0);
         assert.equal(result.idOnlyCardsTotal, result.idOnlyCards.reduce((a, b) => a + b, 0));
-        assert.deepEqual(result.estInputTokens, calls.map(req => JSON.stringify(req).length * .4));
-        assert(JSON.stringify(calls[0]).length * .4 <= 24000);
+        assert.deepEqual(result.estInputTokens, calls.map(req => est(req)));
+        assert(est(calls[0]) <= 24000);
         assert(calls[0].messages[0].content.includes('(truncated; use trussc_get for the full text)'));
     });
     await fixture({ corpus, env: { HAIKU_MAX_INPUT_TOKENS: '15000' }, probability: (_, i) => .5 + i / 40 }, async ({ answer, calls }) => {
         await answer('circle'); const req = calls[0];
-        assert(JSON.stringify(req).length * .4 <= 15000, 'entire serialized request must fit');
+        assert(est(req) <= 15000, 'entire serialized request must fit');
         assert(req.messages[0].content.includes('(truncated; use trussc_get for the full text)'));
         assert(req.messages[0].content.includes('CARD_15\n'), 'highest p gets full capped text first');
         assert(!req.messages[0].content.includes('CARD_0\n'), 'overflow cards are id only');
@@ -262,14 +265,27 @@ test('multi-round input stays bounded, prior user turn preserved, fixed overflow
     await fixture({ corpus, env: { HAIKU_MAX_INPUT_TOKENS: '24000', MAX_SEARCH_ROUNDS: '5' }, probability: (_, i, n) => Math.floor(i / 16) === n % 3 ? .9 : .01,
         generate: (req, _, n) => new Response((req.tools ? tool(`tool${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, calls }) => {
         const r = await answer('circle'); assert(calls.length >= 3, 'exercise accumulated native history');
-        for (const req of calls) assert(JSON.stringify(req).length * .4 <= 24000);
+        for (const req of calls) assert(est(req) <= 24000);
         for (const req of calls.slice(1)) assert.deepEqual(req.messages[0], calls[0].messages[0]);
         assert(!calls.at(-1).tools); assert(r.haikuCalls <= 6);
     });
     await fixture({ env: { HAIKU_MAX_INPUT_TOKENS: '12000' } }, async ({ answer, calls }) => {
         await answer('circle', [{ role: 'user', content: 'history '.repeat(50000) }]);
-        assert(calls.every(req => JSON.stringify(req).length * .4 <= 12000));
+        assert(calls.every(req => est(req) <= 12000));
         assert(!calls[0].tools, 'fixed overflow must disable further searches');
+    });
+});
+for (const lines of [400, 8000]) test(`default 4 search rounds on Haiku 5.5 stay within the input bound: ${lines}-line cards`, async () => {
+    const corpus = Array.from({ length: 48 }, (_, i) => ({ ...baseCard, id: `card:${i}`, title: `entry${i}`, text: `CARD_${i}\n` + 'payload line\n'.repeat(lines) }));
+    await fixture({ corpus, unset: ['ANTHROPIC_MODEL', 'HAIKU_EFFORT', 'MAX_SEARCH_ROUNDS'], probability: (_, i, n) => Math.floor(i / 16) === n % 3 ? .9 : .01,
+        generate: (req, _, n) => new Response((req.tools ? tool(`tool${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, calls }) => {
+        const r = await answer('circle');
+        for (const req of calls) assert(est(req) <= 24000);
+        assert(!calls.at(-1).tools); assert(calls.slice(0, -1).every(req => req.tools));
+        assert.equal(r.haikuCalls, calls.length);
+        // Cards near the 8000-char cap fill the budget, so searching stops early instead of overflowing.
+        if (lines === 400) assert.equal(calls.length, 4, 'three re-searches then a final answer');
+        else assert(calls.length >= 2 && calls.length <= 4);
     });
 });
 test('correction input fits beside accumulated native context', async () => {
@@ -278,7 +294,7 @@ test('correction input fits beside accumulated native context', async () => {
     await fixture({ corpus, generate: (req, _, n) => new Response((req.tools ? tool(`tool${n}`) : text('Node::invented; use [[drawCircle]].')) + stop) }, async ({ answer, calls }) => {
         const result = await answer('circle'); assert.equal(result.corrected, true);
         assert(calls.length >= 3); assert(calls.length <= 4);
-        for (const req of calls) assert(JSON.stringify(req).length * .4 <= 24000);
+        for (const req of calls) assert(est(req) <= 24000);
         for (const req of calls.slice(1)) assert.deepEqual(req.messages[0], calls[0].messages[0]);
     });
 });
@@ -291,7 +307,7 @@ test('id-only and per-call estimates reach request stats and public allowlist', 
         assert.deepEqual(stat.idOnlyCards, debug.rounds.map(r => r.idOnlyCards));
         assert.equal(stat.idOnlyCardsTotal, debug.idOnlyCardsTotal);
         assert.equal(stat.idOnlyCardsTotal, stat.idOnlyCards.reduce((a, b) => a + b, 0));
-        const estimates = calls.map(req => JSON.stringify(req).length * .4);
+        const estimates = calls.map(req => est(req));
         assert.deepEqual(stat.estInputTokens, estimates);
         assert.deepEqual(debug.rounds.flatMap(r => r.haiku.estInputTokens), estimates);
         for (const [i, round] of debug.rounds.entries()) {
@@ -362,7 +378,7 @@ test('model-aware adaptive defaults, effort overrides and unknown models', async
             assert.equal(calls[0].model, model);
             assert.equal(calls[0].max_tokens, model === 'claude-haiku-5-5' || model === 'claude-haiku-5-5-20261021' ? 8192 : 1536);
             assert(!('thinking' in calls[0])); assert(!('output_config' in calls[0]));
-            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+            assert.equal(result.estInputTokens[0], est(calls[0]));
         });
     }
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
@@ -391,7 +407,7 @@ test('thinking off payloads, effort bounds, env validation and 4.5 byte identity
             assert.deepEqual(calls[0].thinking, { type: 'disabled' });
             assert.deepEqual(calls[0].output_config, effort ? { effort } : undefined);
             assert.equal(result.thinkingTokens, 0);
-            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+            assert.equal(result.estInputTokens[0], est(calls[0]));
         });
     }
     for (const effort of ['xhigh', 'max']) for (const envOff of [false, true]) {
@@ -442,16 +458,54 @@ test('invalid model, effort and incompatible thinking fail before retrieval or g
         assert.equal(requests.length, 0);
     });
 });
-test('adaptive response token config is bounded and invalid effort uses the model default', async () => {
+test('adaptive response token config is bounded and invalid effort uses the default effort', async () => {
     for (const [raw, expected] of [['12000', 12000], ['0', 1536], ['999999', 32768], ['NaN', 8192], ['-1', 8192]]) {
         await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_ADAPTIVE_MAX_TOKENS: raw, HAIKU_EFFORT: 'invalid' } }, async ({ answer, calls, output }) => {
             const result = await answer('circle');
-            assert.equal(calls[0].max_tokens, expected); assert(!('output_config' in calls[0]));
-            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+            assert.equal(calls[0].max_tokens, expected); assert.deepEqual(calls[0].output_config, { effort: 'low' });
+            assert.equal(result.estInputTokens[0], est(calls[0]));
             assert(output.some(s => s.includes('HAIKU_EFFORT')));
             assert(!output.join('\n').includes('invalid'));
         });
     }
+});
+test('defaults: Haiku 5.5 at effort low, 4 search rounds and the implied-evidence rule', async () => {
+    await fixture({ unset: ['ANTHROPIC_MODEL', 'HAIKU_EFFORT', 'MAX_SEARCH_ROUNDS'] }, async ({ answer, calls, dir, output }) => {
+        const config = await import(join(dir, 'config.mjs'));
+        assert.equal(config.ANTHROPIC_MODEL, 'claude-haiku-5-5');
+        assert.equal(config.HAIKU_EFFORT, 'low');
+        assert.equal(config.MAX_SEARCH_ROUNDS, 4);
+        const result = await answer('circle');
+        assert.equal(calls[0].model, 'claude-haiku-5-5');
+        assert.deepEqual(calls[0].output_config, { effort: 'low' });
+        assert.equal(calls[0].max_tokens, 8192);
+        assert(!('thinking' in calls[0]));
+        assert(calls[0].system.includes("an example or related card clearly implies it"));
+        assert(calls[0].system.includes('Never introduce or guess an API that is not shown'));
+        assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .5);
+        assert(!output.some(s => s.includes('HAIKU_EFFORT')));
+    });
+});
+test('an empty HAIKU_EFFORT keeps the model default on Haiku 5.5', async () => {
+    await fixture({ env: { ANTHROPIC_MODEL: 'claude-haiku-5-5', HAIKU_EFFORT: '' } }, async ({ answer, calls, output }) => {
+        await answer('circle');
+        assert(!('output_config' in calls[0])); assert(!('thinking' in calls[0]));
+        assert(!output.some(s => s.includes('HAIKU_EFFORT')));
+    });
+});
+test('the 4.5 payload is unchanged when the env selects 4.5, with the default effort or none', async () => {
+    const payloads = [];
+    for (const options of [{ unset: ['HAIKU_EFFORT'] }, { env: { HAIKU_EFFORT: '' } }, { env: { HAIKU_EFFORT: 'max' } }])
+        await fixture({ ...options, env: { ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001', ...options.env } }, async ({ answer, calls, rawCalls }) => {
+            const result = await answer('circle');
+            assert.equal(calls[0].model, 'claude-haiku-4-5-20251001');
+            assert.equal(calls[0].max_tokens, 1536);
+            assert(!('output_config' in calls[0])); assert(!('thinking' in calls[0]));
+            assert(!calls[0].system.includes('clearly implies it'));
+            assert.equal(result.estInputTokens[0], JSON.stringify(calls[0]).length * .4);
+            payloads.push(rawCalls[0]);
+        });
+    assert.equal(new Set(payloads).size, 1);
 });
 for (const adaptive of [false, true]) test(`HTTP ignores model/effort and variant knobs everywhere; adaptive=${adaptive}`, async () => {
     await fixture({ env: { ANTHROPIC_MODEL: adaptive ? 'claude-haiku-5-5' : 'claude-haiku-4-5-20251001', HAIKU_EFFORT: adaptive ? 'medium' : '' } }, async ({ request, rawCalls }) => {
@@ -492,8 +546,8 @@ test('filler is last after instructions and hints on every user turn across tool
                     if (content.includes('Search completed.')) assert.match(content, /cover about 10%[\s\S]*Answer the original question[\s\S]*\n\. \. \. \. \. \. \.$/);
                     else if (content.includes('Context:')) assert(content.indexOf('@@USED:') < content.indexOf('cover about 10%'));
                 }
-                assert.equal(result.traces[i].haiku.estInputTokens[0], JSON.stringify(call).length * .4);
-                assert(JSON.stringify(call).length * .4 <= 24000);
+                assert.equal(result.traces[i].haiku.estInputTokens[0], est(call));
+                assert(est(call) <= 24000);
             }
             assert.deepEqual(calls[2].messages.slice(0, calls[0].messages.length), calls[0].messages);
         });
@@ -504,8 +558,8 @@ test('filler reserve affects card packing and fixed-input overflow prevents gene
         const base = await answer('circle');
         const filler = await answer('circle', [], null, [], undefined, { fillerTokens: 4096 });
         assert(filler.idOnlyCardsTotal > base.idOnlyCardsTotal);
-        assert(calls.every(c => JSON.stringify(c).length * .4 <= 10500));
-        assert.equal(filler.estInputTokens[0], JSON.stringify(calls.at(-1)).length * .4);
+        assert(calls.every(c => est(c) <= 10500));
+        assert.equal(filler.estInputTokens[0], est(calls.at(-1)));
     });
     await fixture({}, async ({ answer, calls }) => {
         await answer('circle');
@@ -566,7 +620,7 @@ for (const adaptive of [false, true]) for (const separate of [true, false]) test
                 assert.deepEqual(result.traces[i].haiku.inputTokens, [91 + i]);
                 assert.equal(result.traces[i].haiku.inputTokensTotal, 91 + i);
                 assert.equal(result.traces[i].haiku.thinkingTokens, separate ? 100 : 'included in outputTokens');
-                assert.equal(result.traces[i].haiku.estInputTokens[0], JSON.stringify(call).length * .4);
+                assert.equal(result.traces[i].haiku.estInputTokens[0], est(call));
             }
             assert.equal(result.inputTokens, 276); assert.equal(result.outputTokens, 336);
             assert.equal(result.thinkingTokens, separate ? 300 : 'included in outputTokens');
@@ -855,7 +909,7 @@ for (const consumer of ['answer', 'answerStream', 'runner']) {
         let budget;
         await fixture({ corpus }, async ({ answer, calls }) => {
             await answer('circle', [], null, [], undefined, opts);
-            budget = Math.ceil(JSON.stringify(calls[0]).length * .4) + 256;
+            budget = Math.ceil(est(calls[0])) + 256;
         });
         await fixture({ corpus, env: { HAIKU_MAX_INPUT_TOKENS: String(budget) }, generate: () =>
             new Response(frame({ type: 'message_start', message: { usage: { input_tokens: 101 } } })

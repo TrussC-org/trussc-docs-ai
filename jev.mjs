@@ -98,7 +98,7 @@ export function createSelector({ cfg = config, fetchImpl = (...args) => fetch(..
                 const ranked = pool.map((c, i) => ({ ...c, p: data.answers[`c${i + 1}`].noul })).sort((a, b) => b.p - a.p);
                 // Bound (selection): fixed or threshold/min/max rules bound returned cards. Overflow drops lower-probability cards and is not counted.
                 const count = cfg.JEV_PICK === 'fixed' ? cfg.JEV_PICK_K : Math.min(cfg.JEV_PICK_MAX, Math.max(Math.min(cfg.JEV_PICK_MIN, cfg.JEV_PICK_MAX), ranked.filter((c) => c.p >= cfg.JEV_PICK_MIN_P).length));
-                return result('jev', null, { picked: ranked.slice(0, count), exists: data.answers.exists.noul, usage,
+                return result('jev', null, { picked: ranked.slice(0, count), ranked, exists: data.answers.exists.noul, usage,
                     tokens: typeof reported === 'number' && Number.isFinite(reported) && reported >= 0 ? reported : estimatedTokens });
             } catch (e) {
                 // Only our fixed reason vocabulary may escape this module.

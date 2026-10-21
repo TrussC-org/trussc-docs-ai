@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { publicDebug } from './debug.mjs';
+import vm from 'node:vm';
 function runNode(args, env, dir) {
     const out = join(dir, 'child.stdout'), err = join(dir, 'child.stderr');
     const stdout = openSync(out, 'w'), stderr = openSync(err, 'w');
@@ -41,7 +42,10 @@ async function fixture(options, test) {
         for (const k of options.unset || []) delete process.env[k];
         writeFileSync(process.env.EMBEDDED, JSON.stringify(options.corpus || [baseCard]));
         for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'server.mjs', 'mcp-core.mjs', 'stats.mjs', 'debug.mjs'])
-            writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
+            writeFileSync(join(dir, name), options.checkerInitFailure && name === 'mcp-core.mjs'
+                ? readFileSync(new URL(name, import.meta.url), 'utf8').replace('export function createSymbolChecker(corpus) {',
+                    'export function createSymbolChecker(corpus) { console.log("checker-init-attempt"); throw Error("CORPUS_CONTENT_MUST_NOT_ESCAPE");')
+                : readFileSync(new URL(name, import.meta.url)));
         for (const k of Object.keys(savedConsole)) console[k] = (...args) => output.push(args.join(' '));
         globalThis.fetch = async (url, opts) => {
             requests.push(url);
@@ -1014,6 +1018,467 @@ test('runner refuses file-symlink collisions and non-regular inputs before any w
             assert.equal(existsSync(join(dir, 'out.json')), false);
         }
         assert.equal(calls.length, 0);
+    });
+});
+// Use the actual builders: enum values and Lua-only types have no symbol: card.
+const builderSource = readFileSync(new URL('./build-chunks.mjs', import.meta.url), 'utf8');
+const builders = {};
+vm.runInNewContext(`const descBlock = o => o.desc ? [o.desc] : [];
+${builderSource.slice(builderSource.indexOf('function chunkApi('), builderSource.indexOf('// --- Source: examples'))}
+${builderSource.slice(builderSource.indexOf('const luaDesc'), builderSource.indexOf('// --- Hand-written: Lua gotchas'))}
+globalThis.chunkApi = chunkApi; globalThis.chunkSketchLua = chunkSketchLua;`, builders);
+const documentedCorpus = [baseCard,
+    ...JSON.parse(JSON.stringify(builders.chunkApi({ types: [
+        { name: 'Vec2', static_methods: [{ name: 'fromAngle' }], properties: [{ type: 'float', name: 'x' }],
+            operators: [{ signature: 'Vec2 operator+(const Vec2& rhs)' }] },
+        { name: 'Ray', nested: [
+            { name: 'Ray::Hit', short: 'Hit', kind: 'type', properties: [{ type: 'float', name: 'distance' }] },
+            { name: 'Ray::Mode', short: 'Mode', kind: 'enum', values: [{ name: 'Closest', value: 0 }] },
+        ] },
+        { name: 'Node', methods: [{ name: 'getGlobalPos' }] },
+    ], enums: [{ name: 'BlendMode', values: [{ name: 'Add' }] }] }, new Map()))),
+    ...JSON.parse(JSON.stringify(builders.chunkSketchLua({ types: [{ name: 'TweenFloat',
+        methods: [{ name: 'getValue', return: 'number', signatures: [''] }] }] }))),
+    { id: 'symbol:MouseEventArgs', title: 'MouseEventArgs', source: 'reference', text: 'Properties:\n  Vec2 globalPos' },
+    { id: 'addon:tcxBox2d', source: 'addon', title: 'Physics addon', text: 'Install the physics addon.' },
+    { id: 'addon:network#usage', source: 'addon', title: 'Networking', text: 'Use tcx::RemoteClient; call tcx::RemoteClient::connect().' },
+].map(c => ({ ...c, vector: [1, 0] }));
+for (const query of ['Vec2.fromAngle(0)', 'node.getGlobalPos()', 'node:getGlobalPos()', 'BlendMode::Add', 'TweenFloat', 'tcxBox2d', 'tcx::RemoteClient']) {
+    test(`documented name has no missing fact in MCP, HTTP search or chat: ${query}`, async () => {
+        await fixture({ corpus: documentedCorpus, exists: .9 }, async ({ request, calls }) => {
+            for (const question of [query, 'tc::CudaGraph']) {
+                const missing = question === 'tc::CudaGraph';
+                const search = await request('/search', { question, ...(query === 'TweenFloat' ? { lang: 'lua' } : {}) });
+                assert.equal(search.status, 200, search.data);
+                assert.equal(JSON.parse(search.data).missingSymbols.length > 0, missing, 'HTTP search metadata');
+                const rpc = await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: question } } });
+                assert.equal(JSON.parse(rpc.data).result.content[0].text.includes('No TrussC symbol named'), missing, 'MCP text');
+                const response = await request('/ask', { question, ...(query === 'TweenFloat' ? { page: 'sketch' } : {}) });
+                assert.equal(response.status, 200, response.data);
+                const prompt = JSON.stringify(calls.at(-1).messages);
+                assert.equal(prompt.includes('No TrussC symbol named'), missing, 'generation prompt');
+            }
+        });
+    });
+}
+// Check all three consumers: a false absence fact also changes the chat prompt.
+async function assertNameSignals({ request, calls, dir, checkStdio }, query, names = [], lang) {
+    const response = await request('/search', { question: query, ...(lang ? { lang } : {}) });
+    assert.equal(response.status, 200, response.data);
+    assert.deepEqual(JSON.parse(response.data).missingSymbols.map(c => c.name), names, query);
+    const rpc = JSON.parse((await request('/mcp', { id: 1, method: 'tools/call',
+        params: { name: 'trussc_search', arguments: { query, ...(lang ? { lang } : {}) } } })).data).result;
+    assert(!rpc.isError);
+    assert.equal(rpc.content[0].text.includes('No TrussC symbol named'), names.length > 0, query);
+    assert.equal(rpc.content[0].text.includes('Closest matches:'), names.length > 0, query);
+    if (checkStdio) {
+        // Exercise the real stdio proxy with the actual /search reply. The child
+        // uses a fetch stub and exits on EOF; no listener or network is involved.
+        writeFileSync(join(dir, 'stdio-upstream.json'), response.data);
+        writeFileSync(join(dir, 'stdio-preload.mjs'), `import { readFileSync } from 'node:fs';
+            globalThis.fetch = async () => Response.json(JSON.parse(readFileSync(${JSON.stringify(join(dir, 'stdio-upstream.json'))}, 'utf8')));`);
+        writeFileSync(join(dir, 'stdio-input'), JSON.stringify({ id: 1, method: 'tools/call',
+            params: { name: 'trussc_search', arguments: { query, ...(lang ? { lang } : {}) } } }) + '\n');
+        const fds = [openSync(join(dir, 'stdio-input'), 'r'), openSync(join(dir, 'stdio-output'), 'w'), openSync(join(dir, 'stdio-error'), 'w')];
+        let child;
+        try { child = spawnSync(process.execPath, ['--import', join(dir, 'stdio-preload.mjs'),
+            new URL('./mcp.mjs', import.meta.url).pathname], { stdio: fds }); }
+        finally { fds.forEach(closeSync); }
+        assert.equal(child.error, undefined);
+        assert.equal(child.status, 0, readFileSync(join(dir, 'stdio-error'), 'utf8'));
+        const stdio = JSON.parse(readFileSync(join(dir, 'stdio-output'), 'utf8')).result;
+        assert(!stdio.isError);
+        assert.equal(stdio.content[0].text, rpc.content[0].text, `stdio agrees with HTTP MCP: ${query}`);
+    }
+    const chat = await request('/ask', { question: query, ...(lang === 'lua' ? { page: 'sketch' } : {}) });
+    assert.equal(chat.status, 200, chat.data);
+    const prompt = calls.at(-1).messages.at(-1).content;
+    assert.equal(prompt.includes('Documentation name check:'), names.length > 0, query);
+    assert.equal(prompt.includes('No TrussC symbol named'), names.length > 0, query);
+    for (const name of names) {
+        const fact = `No TrussC symbol named \`${name}\` appears in the documentation.`;
+        assert(rpc.content[0].text.startsWith(fact), query);
+        assert(prompt.includes(fact), query);
+    }
+}
+for (const query of ['tween: getValue()', 'tween : getValue()',
+    'e. globalPos', 'e . globalPos', 'obj . fieldName', 'UnknownType . missingName',
+    'tween\t:\ngetValue()', 'tcApp . cpp']) {
+    test(`spaced member or filename abstains in all paths: ${query}`, async () => {
+        await fixture({ corpus: documentedCorpus, exists: .9 }, async api => {
+            await assertNameSignals(api, query, [], query.startsWith('tween') ? 'lua' : undefined);
+            if (query === 'tween: getValue()') {
+                for (const control of ['tween:getValue()', 'tween :getValue()', 'obj . field'])
+                    await assertNameSignals(api, control);
+            }
+        });
+    });
+}
+test('spaced qualifiers check only the owner in all paths', async () => {
+    await fixture({ corpus: documentedCorpus, exists: .9 }, async api => {
+        for (const query of ['AbsentOwner :: b', 'tc :: CudaGraph :: begin', 'tc :: CudaGraph :: beginFrame',
+            'tc:: CudaGraph::beginFrame', 'tcx :: CudaGraph :: beginFrame'])
+            await assertNameSignals(api, query, [query === 'AbsentOwner :: b' ? 'AbsentOwner' : 'CudaGraph']);
+        for (const query of ['tc :: Vec2 :: missingName', 'tcx :: RemoteClient :: missingName'])
+            await assertNameSignals(api, query);
+    });
+});
+test('addon words and ids abstain consistently in all paths', async () => {
+    const corpus = [...documentedCorpus,
+        { ...baseCard, id: 'symbol:lowersymbol' }, { ...baseCard, id: 'lua:LuaOwner::lowerlua' },
+        { ...baseCard, id: 'addon:loweraddon', source: 'addon', title: 'Addon card' },
+        { ...baseCard, id: 'addon:probe#readme', source: 'addon',
+        title: 'Probe addon', text: 'This addon lets you draw a circle. Begins a session.\n' +
+            'tcx::RemoteClient tcxBox2d CamelClient Pascal lower_thing lower2 tcxplain lowerowner::run\n' +
+            '```cpp\nlowerapi();\n```' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (const name of ['circle', 'begins', 'session', 'CamelClient', 'Pascal', 'lower_thing', 'lower2', 'tcxplain'])
+            await assertNameSignals(api, `tc::${name}`);
+        for (const name of ['circle', 'session']) await assertNameSignals(api, `tcx::${name}::run`);
+        for (const query of ['tcx::RemoteClient', 'tcxBox2d', 'tc::loweraddon', 'tc::lowerowner',
+            'tc::lowerapi', 'tcx::lowerowner::run', 'tcx::lowerapi::run',
+            'tc::lowersymbol', 'tc::lowerlua']) await assertNameSignals(api, query);
+    });
+});
+const r5AddonCorpus = [...documentedCorpus,
+    { ...baseCard, id: 'addon:tcxplain', source: 'addon', title: 'tcxplain (addon)', text: 'tcx::lowerapi()' }];
+for (const query of ['tcx::tcxplain', 'tcx::lowerapi', 'tc::tcxbox2d', 'tcx::tcxbox2d', 'tcx::remoteclient']) {
+    test(`r5 addon lookup ignores query case in all paths: ${query}`, async () => {
+        await fixture({ corpus: r5AddonCorpus, exists: .9 }, async api => {
+            await assertNameSignals(api, query);
+            for (const control of ['tcxbox2d', 'tcx::REMOTECLIENT', 'tcx::remoteclient::connect',
+                'tcx::lowerapi::run', 'tcx::RemoteClient']) await assertNameSignals(api, control);
+            await assertNameSignals(api, 'tc::CudaGraph', ['CudaGraph']);
+        });
+    });
+}
+for (const query of ['tc::Circle', 'tc::Begins', 'tc::begins::run', 'tc::circle::draw', 'tc::This']) {
+    test(`r6 addon sentence mentions abstain in all paths: ${query}`, async () => {
+        const corpus = [baseCard, { ...baseCard, id: 'addon:tcxProbe', source: 'addon',
+            title: 'tcxProbe (addon)', text: 'This addon lets you draw a circle. Begins a session. Circle drawing is easy.' }];
+        await fixture({ corpus, exists: .9 }, async api => {
+            await assertNameSignals(api, query);
+            for (const name of ['circle', 'begins']) await assertNameSignals(api, `tc::${name}`);
+        });
+    });
+}
+test('r6 addon headings and all word shapes abstain in all paths', async () => {
+    const corpus = [baseCard, { ...baseCard, id: 'addon:tcxProbe#readme', source: 'addon',
+        title: 'HeadingOwner', text: '# HeadingName\nCamelClient Pascal lower_thing lower2 tcxword\n' +
+            'class ProseClass and using ProseAlias are words. ProseCall() is prose.' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (const name of ['HeadingOwner', 'HeadingName', 'CamelClient', 'Pascal', 'lower_thing',
+            'lower2', 'tcxword', 'ProseClass', 'ProseAlias', 'ProseCall'])
+            await assertNameSignals(api, `tc::${name}::run`);
+    });
+});
+for (const [label, source, text] of [
+    ['example source', 'example', 'class lowerclass {}; struct lowerstruct {}; enum class lowerenum { value };\n' +
+        'using loweralias = int; typedef unsigned long lowertype;\nvoid lowerdecl (); lowercall ();'],
+    ['backtick fence', 'addon', '```cpp\nclass lowerclass {}; struct lowerstruct {}; enum lowerenum { value };\n' +
+        'using loweralias = int; typedef unsigned long lowertype;\nvoid lowerdecl (); lowercall ();\n```'],
+    ['tilde fence', 'addon', '~~~cpp\nclass lowerclass {}; struct lowerstruct {}; enum struct lowerenum { value };\n' +
+        'using loweralias = int; typedef unsigned long lowertype;\nvoid lowerdecl (); lowercall ();\n~~~'],
+]) test(`r6 addon words include comments and strings in all paths: ${label}`, async () => {
+    const code = text.replace('void lowerdecl', 'typedef void (*lowercallback)(int);\n' +
+        '// class CommentGhost {}; CommentCall();\n/* struct BlockGhost {}; BlockCall(); */\n' +
+        'const char* description = "class StringGhost {}; StringCall();";\nvoid lowerdecl');
+    const corpus = [baseCard, { ...baseCard, id: source === 'example' ? 'example:tcxProbe/basic' : 'addon:tcxProbe#readme',
+        source, title: 'Probe addon', meta: { addon: 'tcxProbe' }, text: code }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (const name of ['lowerclass', 'lowerstruct', 'lowerenum', 'loweralias', 'lowertype', 'lowercallback', 'lowerdecl', 'lowercall'])
+            await assertNameSignals(api, `tcx::${name}`);
+        for (const name of ['CommentGhost', 'CommentCall', 'BlockGhost', 'BlockCall', 'StringGhost', 'StringCall'])
+            await assertNameSignals(api, `tcx::${name}::run`);
+        await assertNameSignals(api, 'tc::CudaGraph', ['CudaGraph']);
+    });
+});
+test('addon inline and qualified words abstain in all paths', async () => {
+    const corpus = [baseCard, { ...baseCard, id: 'addon:tcxProbe#readme', source: 'addon', title: 'Probe addon',
+        text: 'Call `lowerinline ()`. Use lowerowner :: lowermember and tcx :: lowername.' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (const name of ['lowerinline', 'lowerowner', 'lowermember', 'lowername'])
+            await assertNameSignals(api, `tcx::${name}`);
+        await assertNameSignals(api, 'tc::CudaGraph', ['CudaGraph']);
+    });
+});
+// Attributes/macros and plain words use exactly the same addon admission rule.
+for (const [label, declaration] of [
+    ['attribute', 'class [[nodiscard]] RemoteClient {};'],
+    ['export macro', '#define API\nclass API RemoteClient {};'],
+]) test(`r6 addon whole words across HTTP, both MCP transports and chat: ${label}`, async () => {
+    const corpus = [{ ...baseCard, text: 'Reference card.' },
+        { ...baseCard, id: 'addon:tcxBox2d', source: 'addon', title: 'Addon card',
+            text: '```cpp\n' + declaration + '\nvoid lowerapi /* documented arguments */ ();\n' +
+                'namespace trussc { using tcx::osc::OscMessage; using tcx::PhysicsWorld; }\n```\n' +
+                'CudaGraphSuffix pre_CudaGraph_post encircle.' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        const transports = { ...api, checkStdio: true };
+        for (const query of ['tcx::RemoteClient', 'tcx::remoteclient', 'tcx::RemoteClient::connect',
+            'tcx::lowerapi', 'tcxBox2d', 'tcxbox2d', 'tc::OscMessage', 'tc::PhysicsWorld',
+            'tcx::OscMessage', 'PhysicsWorld']) await assertNameSignals(transports, query);
+        for (const query of ['tc::CudaGraph', 'tc::CudaGraph::begin', 'tcx::CudaGraph::begin', 'tc::circle'])
+            await assertNameSignals(transports, query, [query.includes('circle') ? 'circle' : 'CudaGraph']);
+    });
+    // A prose mention is deliberately enough to abstain, for every prefix.
+    corpus[1].text += '\nPlease draw a circle. Mention GPT and imgui_tools.';
+    await fixture({ corpus, exists: .9 }, async api => {
+        const transports = { ...api, checkStdio: true };
+        for (const query of ['tc::circle', 'tcx::circle', 'tc::circle::draw', 'tc::GPT', 'tc::imgui_tools'])
+            await assertNameSignals(transports, query);
+    });
+});
+test('r6 actual addon builder initializes within a linear scaling bound', async () => {
+    const { createSymbolChecker } = await import('./mcp-core.mjs');
+    const dir = mkdtempSync(join(tmpdir(), 'docsai-r6-builder-test-'));
+    try {
+        const addonDir = join(dir, 'tcxProbe'), srcDir = join(addonDir, 'example-basic', 'src');
+        mkdirSync(srcDir, { recursive: true });
+        const context = { ADDON_EXAMPLES: 'all', readdirSync: fs.readdirSync, lstatSync: fs.lstatSync,
+            readFileSync, regularPath: (...parts) => join(...parts), exampleApis: () => [] };
+        vm.runInNewContext(builderSource.slice(builderSource.indexOf('function chunkAddonExamples('),
+            builderSource.indexOf('function chunkExamples(')) + '\nglobalThis.build = chunkAddonExamples;', context);
+        const build = count => {
+            const source = 'const char* help = R"md(\n```\n' + '`/*` '.repeat(count) + '\n```\n)md";\n';
+            writeFileSync(join(srcDir, 'tcApp.cpp'), source);
+            const [card] = JSON.parse(JSON.stringify(context.build([{ name: 'tcxProbe' }],
+                new Map([['tcxProbe', { dir: addonDir }]]), new Set())));
+            assert(card.text.includes(source), 'the real builder must retain the full source');
+            return { card, sourceBytes: Buffer.byteLength(source) };
+        };
+        const small = build(20000), large = build(80000);
+        // Warm up separately; median samples reduce scheduler/JIT noise. The
+        // generous absolute bound limits time spent initializing on the event loop.
+        createSymbolChecker([build(1000).card]);
+        const measure = card => {
+            const start = performance.now(), check = createSymbolChecker([card]);
+            const ms = performance.now() - start;
+            assert.deepEqual(check('tc::CudaGraph').map(c => c.name), ['CudaGraph']);
+            assert(ms < 3000, `addon initialization exceeded 3 seconds: ${ms} ms`);
+            return ms;
+        };
+        const smallMs = Array.from({ length: 3 }, () => measure(small.card)).sort((a, b) => a - b)[1];
+        const largeMs = Array.from({ length: 3 }, () => measure(large.card)).sort((a, b) => a - b)[1];
+        assert(largeMs <= smallMs * 7 + 25, `100 KB -> 400 KB scaling: ${smallMs} -> ${largeMs} ms`);
+        console.log(JSON.stringify({ builderSourceBytes: [small.sourceBytes, large.sourceBytes],
+            builderCardBytes: [Buffer.byteLength(small.card.text), Buffer.byteLength(large.card.text)],
+            medianInitMs: [smallMs, largeMs], ratio: largeMs / smallMs }));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('qualified fields, nested values, addon members and operators abstain in all paths', async () => {
+    await fixture({ corpus: documentedCorpus, exists: .9 }, async api => {
+        for (const query of ['tc::Vec2::x', 'Ray::Hit::distance', 'Ray::Mode::Closest',
+            'tcx::RemoteClient::connect()', 'Vec2::operator+', 'operator[]', 'operator()',
+            'Vec2::operator[]', 'Vec2::operator()', 'Vec2::operator==', 'Vec2::operator=',
+            'CudaGraph::operator<=', 'CudaGraph::operator+=']) await assertNameSignals(api, query);
+    });
+});
+test('filenames and unknown dot or colon receivers abstain in all paths', async () => {
+    await fixture({ corpus: documentedCorpus, exists: .9 }, async api => {
+        for (const query of ['Where should I put drawCircle in tcApp.cpp?',
+            'Where should I put drawCircle in tcApp.h?', 'Where should I put drawCircle in CMakeLists.txt?',
+            'CudaGraph.begin()', 'CudaGraph.begin', 'cudaGraph:begin()', 'a.missingName()',
+            'UnknownType.missingName', 'a:missingName()']) await assertNameSignals(api, query);
+    });
+});
+const r7ExampleCorpus = [baseCard, { ...baseCard, id: 'example:shaderExample', source: 'example',
+    title: 'Shader example', text: 'Source files: tcApp.cpp and tcApp.h' }];
+for (const query of ['How do I include myApp-config.h?',
+    'Where should I put drawCircle in shaderExample/src/tcApp.cpp?',
+    'Where should I put drawCircle in MyProject/src/tcApp.cpp?', 'shaderExample']) {
+    test(`r7 filename chunks and example ids abstain across all transports: ${query}`, async () => {
+        await fixture({ corpus: r7ExampleCorpus, exists: .9 }, async api => {
+            const transports = { ...api, checkStdio: true };
+            await assertNameSignals(transports, query);
+            for (const name of ['CudaGraph', 'setupGui']) await assertNameSignals(transports, `tc::${name}`, [name]);
+        });
+    });
+}
+test('r7 whole chunks abstain before identifier splitting without hiding adjacent names', async () => {
+    await fixture({ corpus: r7ExampleCorpus, exists: .9 }, async api => {
+        const transports = { ...api, checkStdio: true };
+        for (const chunk of ['mySketch-backup.cpp', 'myApp-config', 'myApp/path', 'MyProject\\src\\tcApp.cpp',
+            '`myApp-config.h`', '<myApp-config.h>', 'myApp(config.h)', 'tc::CudaGraph/path', 'tc::CudaGraph-backup']) {
+            await assertNameSignals(transports, `Include ${chunk}?`);
+            for (const name of ['CudaGraph', 'setupGui'])
+                await assertNameSignals(transports, `${chunk}\t tc::${name}`, [name]);
+        }
+        // A chunk cut by the work bound must not manufacture a name or path.
+        assert.deepEqual(api.missingSymbols(' '.repeat(7988) + 'tc::CudaGraph/path'), []);
+    });
+});
+test('r9 quoted paths and filenames with spaces abstain as a whole', async () => {
+    await fixture({ corpus: r7ExampleCorpus, exists: .9 }, async api => {
+        const transports = { ...api, checkStdio: true };
+        for (const quoted of ['"MyProject Files/src/tcApp.cpp"', "'My Sketch Folder\\tcApp.h'", '`MyProject Files/main.cpp`', '“MyProject Files/tcApp.cpp”', '"MyApp Notes.txt"']) {
+            await assertNameSignals(transports, `Where should I put drawCircle in ${quoted}?`);
+            // Names outside the quoted path are still judged.
+            await assertNameSignals(transports, `${quoted} and tc::CudaGraph`, ['CudaGraph']);
+        }
+        // Quoted code that is not a path keeps being judged.
+        await assertNameSignals(transports, 'Is "tc::CudaGraph" available?', ['CudaGraph']);
+    });
+});
+test('symbol components and every card title or text suppress warnings', async () => {
+    const corpus = [baseCard,
+        { ...baseCard, id: 'symbol:OuterType::InnerType::runNow', title: 'OuterType::InnerType::runNow' },
+        { ...baseCard, id: 'doc:alias', title: 'TitleOwner', text: 'Mention ProseGhost and circle.' },
+        { ...baseCard, id: 'addon:network', title: 'Network addon', source: 'addon', text: 'tcx::RemoteClient' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (const query of ['InnerType', 'OuterType', 'runNow',
+            'OuterType::anything::else', 'tc::RemoteClient', 'tcx::RemoteClient::anything']) await assertNameSignals(api, query);
+        await assertNameSignals(api, 'ProseGhost');
+        await assertNameSignals(api, 'TitleOwner::anything');
+    });
+});
+for (const [label, text] of [
+    ['103-byte dotted rule', '// ' + '.'.repeat(100)],
+    ['128-digit literal', 'const char* sha512 = "' + '7'.repeat(128) + '";'],
+    ['128-character hex digest', '// sha512: ' + 'a8'.repeat(64)],
+]) test(`unqueryable addon span preserves name checks: ${label}`, async () => {
+    const corpus = [...documentedCorpus, { ...baseCard, id: 'example:tcxProbe/basic', source: 'example',
+        meta: { addon: 'tcxProbe' }, text: text + '\nUse tcx::TrailingClient after the span.' }];
+    await fixture({ corpus, exists: .9 }, async api => {
+        for (let i = 0; i < 2; i++) {
+            await assertNameSignals(api, 'tc::CudaGraph', ['CudaGraph']);
+            await assertNameSignals(api, 'tcx::TrailingClient::connect()');
+        }
+        assert(!api.output.some(line => line.includes('[symbol-check] unavailable')));
+    });
+});
+// Whole-word mentions in core and addon cards both abstain.
+
+const ownerCorpus = [baseCard,
+    { ...baseCard, id: 'symbol:Fbo', title: 'Fbo', meta: { kind: 'type' }, text: 'Draw a circle in a color.' },
+    { ...baseCard, id: 'symbol:Fbo::begin', title: 'Fbo::begin', meta: { kind: 'method', owner: 'Fbo' }, text: 'Begins drawing.' },
+];
+for (const [query, name] of [
+    ['tc::CudaGraph::begin', 'CudaGraph'], ['tcx::CudaGraph::begin', 'CudaGraph'],
+]) test(`unknown owner or global warns in all paths: ${query}`, async () => {
+    await fixture({ corpus: ownerCorpus, exists: .9 }, async ({ request, calls }) => {
+        const response = await request('/search', { question: query });
+        assert.equal(response.status, 200, response.data);
+        assert.deepEqual(JSON.parse(response.data).missingSymbols.map(c => c.name), [name]);
+        const rpc = JSON.parse((await request('/mcp', { id: 1, method: 'tools/call',
+            params: { name: 'trussc_search', arguments: { query } } })).data).result;
+        assert(!rpc.isError);
+        const fact = `No TrussC symbol named \`${name}\` appears in the documentation.`;
+        assert(rpc.content[0].text.startsWith(fact));
+        assert(rpc.content[0].text.includes('Closest matches:'));
+        const chat = await request('/ask', { question: query });
+        assert.equal(chat.status, 200, chat.data);
+        assert(calls.at(-1).messages.at(-1).content.includes(fact));
+    });
+});
+test('known owner accepts unenumerated members and dot calls in all paths', async () => {
+    await fixture({ corpus: ownerCorpus, exists: .9 }, async api => {
+        for (const query of ['Fbo::drawCircle', 'Fbo.drawCircle()', 'node.drawCircle()']) await assertNameSignals(api, query);
+    });
+});
+test('core prose words abstain in all paths', async () => {
+    await fixture({ corpus: ownerCorpus, exists: .9 }, async api => {
+        for (const query of ['tc::circle', 'tc::begins']) await assertNameSignals({ ...api, checkStdio: true }, query);
+    });
+});
+for (const [id, source] of [['symbol:Owner', 'reference'], ['lua:Owner', 'sketch-lua'],
+    ['doc:owner', 'for-ai'], ['concept:owner', 'for-ai'], ['example:owner', 'example']]) {
+    test(`core inline names abstain across all transports: ${id}`, async () => {
+        const corpus = [baseCard, { id, source, title: 'TitleOnlyOwner',
+            text: 'Members: onMouseDrag sampleRate EaseFunction MatrixScope earlyUpdate\n' +
+                '// CommentOwner "StringOwner" pre_CudaGraph_post CudaGraphSuffix', vector: [1, 0] }];
+        await fixture({ corpus, exists: .9 }, async api => {
+            const transports = { ...api, checkStdio: true };
+            for (const name of ['onMouseDrag', 'sampleRate', 'EaseFunction', 'MatrixScope', 'earlyUpdate',
+                'TitleOnlyOwner', 'CommentOwner', 'StringOwner']) {
+                for (const query of [name, `TC::${name.toLowerCase()}::member`]) await assertNameSignals(transports, query);
+            }
+            for (const name of ['CudaGraph', 'setupGui', 'loadFromUrlAsync', 'FboSettings', 'drawRoundedRect'])
+                await assertNameSignals(transports, `how do I use ${name}`, [name]);
+        });
+    });
+}
+test('addon text above the former corpus cap still checks absent symbols', async () => {
+    const corpus = [...ownerCorpus, ...Array.from({ length: 3000 }, (_, i) => ({
+        ...baseCard, id: `symbol:KnownType${i}`, title: `KnownType${i}`, text: 'A documented type.', meta: { kind: 'type' },
+    })), { ...baseCard, id: 'example:tcxLarge/basic', source: 'example', meta: { addon: 'tcxLarge' },
+        text: '// example\n' + ' '.repeat(17 * 1024 * 1024) }];
+    await fixture({ corpus, exists: .9 }, async ({ request }) => {
+        const response = await request('/search', { question: 'tc::CudaGraph' });
+        assert.equal(response.status, 200, response.data);
+        assert.deepEqual(JSON.parse(response.data).missingSymbols.map(c => c.name), ['CudaGraph']);
+    });
+});
+for (const injected of [false, true]) test(`retrieval survives repeated requests: ${injected ? 'one-shot init exception' : 'oversized addon span skipped'}`, async () => {
+    const corpus = [...ownerCorpus, { ...baseCard, id: 'example:tcxProbe/basic', source: 'example',
+        meta: { addon: 'tcxProbe' }, text: injected ? '// harmless' : '// ' + 'x.'.repeat(4 * 1024 * 1024) + 'x\n' }];
+    await fixture({ corpus, exists: .9, checkerInitFailure: injected }, async ({ request, calls, output }) => {
+        for (const path of ['/search', '/ask', '/mcp', '/search', '/ask', '/mcp']) {
+            const body = path === '/mcp' ? { id: 1, method: 'tools/call',
+                params: { name: 'trussc_search', arguments: { query: 'tc::CudaGraph' } } } : { question: 'tc::CudaGraph' };
+            const response = await request(path, body);
+            assert.equal(response.status, 200, response.data);
+            const value = JSON.parse(response.data);
+            if (path === '/search') { assert(value.results.length > 0); assert.deepEqual(value.missingSymbols.map(c => c.name), injected ? [] : ['CudaGraph']); }
+            if (path === '/mcp') { assert(!value.result.isError); assert.equal(value.result.content[0].text.includes('No TrussC symbol named'), !injected); }
+            if (path === '/ask') assert.equal(JSON.stringify(calls.at(-1).messages).includes('Documentation name check:'), !injected);
+        }
+        assert.equal(output.filter(line => line === '[symbol-check] unavailable; documentation name checks disabled').length, injected ? 1 : 0);
+        assert(!output.join('\n').includes('CORPUS_CONTENT_MUST_NOT_ESCAPE'));
+        if (injected) assert.equal(output.filter(line => line === 'checker-init-attempt').length, 1, 'initialization attempted only once');
+    });
+});
+test('missing symbol fact reaches search and chat through the same loaded ids', async () => {
+    await fixture({ corpus: [baseCard], exists: .9 }, async api => {
+        await assertNameSignals(api, 'tc::circle');
+        await assertNameSignals(api, 'tc::setupGui', ['setupGui']);
+    });
+    const corpus = [baseCard, ...['Fbo', 'Fbo::begin', 'CudaGraphs'].map(name => ({ ...baseCard, id: `symbol:${name}`, title: name }))];
+    await fixture({ corpus, exists: .9 }, async ({ request, calls }) => {
+        for (const query of ['tc::CudaGraph', 'drawCircle', 'Fbo::begin', 'tc::Fbo', 'draw a circle']) {
+            const response = await request('/ask', { question: query });
+            assert.equal(response.status, 200, response.data);
+            const prompt = JSON.stringify(calls.at(-1).messages);
+            assert.equal(prompt.includes('No TrussC symbol named `CudaGraph` appears in the documentation.'), query === 'tc::CudaGraph');
+            assert.equal(prompt.includes("in the user's language"), query === 'tc::CudaGraph');
+            const rpc = await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query } } });
+            const output = JSON.parse(rpc.data).result.content[0].text;
+            assert.equal(output.includes('No TrussC symbol named'), query === 'tc::CudaGraph');
+            if (query === 'tc::CudaGraph') assert(output.includes('Near names: `CudaGraphs`.'));
+        }
+    });
+});
+for (const exists of [.29, .3, .8, null]) test(`MCP coverage and related pool ordering: ${exists}`, async () => {
+    const corpus = Array.from({ length: 35 }, (_, i) => ({ ...baseCard, id: `symbol:card${i}`, title: `card ${i}`, text: `facts ${i}` }));
+    // Reverse Jev's order relative to tied RRF; only the four minimum picks clear
+    // the selector. A fallback reranker also reverses cards, but spare titles
+    // must still follow RRF. No extra Jev/rerank request is needed for titles.
+    await fixture({ corpus, exists, env: exists === null ? { TYPESAFE_API_KEY: '', RERANK: '1' } : { JEV_PICK_MIN: '4', JEV_PICK_MAX: '16' },
+        probability: (_, i) => i / 100,
+    }, async ({ request, requests }) => {
+        const savedFetch = globalThis.fetch;
+        globalThis.fetch = async (url, opts) => url.endsWith('/rerank')
+            ? Response.json({ results: JSON.parse(opts.body).texts.map((_, index) => ({ index, score: index })).reverse() }) : savedFetch(url, opts);
+        try {
+            const result = await request('/search', { question: 'facts', k: 4 });
+            assert.equal(result.status, 200, result.data);
+            const search = JSON.parse(result.data);
+            assert.equal(search.results.length, 4, 'minimum four cards preserved');
+            assert.equal(search.candidates.length, 35);
+            assert(search.candidates.every(c => Object.keys(c).sort().join(',') === 'id,title'));
+            assert.deepEqual(search.candidates.map(c => c.id), (exists === null ? corpus : [...corpus].reverse()).map(c => c.id));
+            if (exists !== null) assert(search.results.every(c => typeof c.p === 'number'));
+            const rpc = await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: 'facts', k: 4 } } });
+            const output = JSON.parse(rpc.data).result.content[0].text;
+            assert.equal(output.includes("These results probably don't answer the query."), exists !== null && exists < .3);
+            assert.equal(output.includes('Closest matches:'), exists !== null && exists < .3);
+            const related = output.split('Other possibly related:\n')[1].split('\n');
+            const ids = related.map(line => line.match(/\[#(.+)\]/)[1]);
+            assert.deepEqual(ids, search.candidates.filter(c => !search.results.some(shown => shown.id === c.id)).slice(0, 16).map(c => c.id));
+            assert.equal(ids.length, 16);
+            assert.equal(new Set(ids).size, 16);
+            assert(Buffer.byteLength(output) <= 262144);
+            assert.equal(requests.filter(url => url.endsWith('/systemone')).length, exists === null ? 0 : 2);
+        } finally { globalThis.fetch = savedFetch; }
     });
 });
 let failures = 0;

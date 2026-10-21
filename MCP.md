@@ -69,8 +69,52 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 - **`trussc_search(query, k?, full?, lang?)`** — ranked by hybrid retrieval (BM25 over
   names + bge-m3 semantic, RRF-fused), then selected by Jev probabilities. Quotas apply only on fallback. Example chunks come back **trimmed** by default
   (header + start of source) to keep the result light; pass `full: true` for whole text.
-  `k` is the **max total results** (default 8, clamped 1–20). Each result shows `cos`
-  (cosine) and `rrf` (fused rank score) so the ordering is legible.
+  `k` is the **max total results** (default 8, clamped 1–20). Each card shows its `[#id]` and, on the Jev path, a relevance probability.
+  A leading type or function name absent from the loaded documentation gets a
+  top-line warning ("No TrussC symbol named `X` appears in the documentation.")
+  and up to three near names. Matching ignores case and a leading `tc::`/`tcx::`.
+  For every judged name, strip one leading `tc::`/`tcx::`, then check only
+  the leading `A` in `A::b::c` (a bare name is its own leading name).
+  Known names come from `symbol:`, `lua:` and `example:` ids and their components.
+  Otherwise, any case-insensitive whole-word mention in any loaded card's title
+  or text, or a matching `addon:` id/component, suppresses the warning. This includes
+  symbol, Lua, doc, concept and example cards as well as addons. This rule applies
+  equally to `tc::`, `tcx::` and bare names, including addon compatibility aliases
+  such as `tc::OscMessage` and `tc::PhysicsWorld`. Prose, headings, comments
+  and strings all count as reasons to abstain: for example, any card mentioning
+  "circle" suppresses a warning for `tc::circle`. This favors avoiding false
+  absence claims; a missing warning does not establish that an API exists.
+  Inline fields, members and nested types need no standalone card id: a word such
+  as `onMouseDrag`, `sampleRate` or `MatrixScope` in its owner's text suffices.
+  Whitespace around separators has the same meaning: `tc :: CudaGraph :: begin`
+  checks only `CudaGraph`. Dot/colon spellings (`a.b()`, `A.b`, `a:b()`,
+  `a . b`, `a : b()`) and operator syntax are skipped. Before splitting names,
+  any whitespace-delimited chunk containing `/` or `\`, a hyphen joining
+  identifier characters, or a trailing file extension is skipped entirely.
+  Ordinary English, acronyms, short bare words and a small list
+  of product names are ignored, as are the non-TrussC names `std`, `chrono`,
+  `filesystem`, `this_thread` and `ranges`, including as qualified leading names.
+  Member existence is never checked: for example,
+  `Fbo::drawCircle` emits no name warning when `Fbo` is known. A missing warning
+  therefore does not verify that a member exists. If initialization fails or the
+  overall index bounds are exceeded, name checking abstains. All card words are
+  collected in one linear scan, with at most 1 Gi code units of total title/text
+  and 1,000,000 distinct words/id components across core and addon cards. Words
+  are maximal ASCII letter/digit/underscore spans. Vectors are never scanned.
+  Words longer than 96 code units skip only themselves; later words remain
+  checkable. Canonical suggestion spellings retain only the first 2,048 ids;
+  this does not limit exact membership.
+  Below 0.3 coverage, the output says "These results probably don't answer the
+  query." Missing names or low coverage label the cards as closest matches.
+  Fallback has no coverage warning. Selection still keeps its minimum four cards
+  when available (the caller's `k` may show fewer).
+  After the cards, **Other possibly related** lists up to 16 distinct titles and
+  exact ids, excluding shown cards. Order is Jev relevance on that path and RRF
+  on fallback, even if a fallback reranker reordered the full cards. Titles are
+  capped at 192 UTF-8 bytes and ids at 256 bytes (oversized ids are omitted).
+  The whole search text is capped at 256 KiB; oversized card output is truncated
+  with a `trussc_get` hint. `/search` carries the same bounded title/id candidate
+  metadata, coverage and missing names for the stdio MCP proxy.
   - `lang` — API flavor. `"cpp"` (default) is the C++ framework; `"lua"` targets
     **TrussSketch** (the in-browser Lua playground) — it prefers the Lua twin of each
     symbol (colon-call methods, `Type.new(...)`, reserved-word renames like `fbo:end_fbo()`)
@@ -81,3 +125,26 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 
 The intended agent move: `trussc_search` to find the right chunks cheaply, then
 `trussc_get` (or `full:true`) for the one or two you actually need in full.
+
+This file is developer documentation. The MCP tool description explains only
+visible output: documentation-absence lines, near names, closest matches and
+other possibly related titles/ids. It does not describe retrieval or name-check
+implementation rules.
+
+## Offline name regression
+
+Run `node test-no-match-sweep.mjs` to build real reference cards with
+`build-chunks.mjs` in a temporary directory, without embeddings. Input paths use
+the builder's existing config/overrides (`SITE_REPO`, `TRUSSC_API`,
+`SKETCH_LUA_REF`, `OF_MAPPING`, `EXAMPLES_JSON`); nested worktrees can discover an
+ancestor's sibling site checkout. The sweep queries every available reference
+TOML heading and each distinct bare component, or every name in the real builder
+API input when TOML is unavailable. It asserts that documented words never get
+absence lines and checks five true absences. Missing source data prints an
+explicit `SKIP`. The restricted sweep also explicitly skips core docs/example
+sources and addon trees; it never reads them or creates embeddings. Counts and
+remaining reported names are printed for review.
+
+`node test-symbol-checker.mjs` measures initialization on a ~65 MiB,
+5,002-card synthetic corpus and verifies whole-word/span and distinct-word bounds.
+The existing pipeline suite covers HTTP search, both MCP transports and chat.

@@ -14,7 +14,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { answer, answerStream, retrieve, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
-import { dispatch as mcpDispatch } from './mcp-core.mjs';
+import { dispatch as mcpDispatch, searchResponse } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES } from './config.mjs';
 import { publicDebug } from './debug.mjs';
 import { logStat, hashIp, suggested, pipelineStat } from './stats.mjs';
@@ -89,14 +89,14 @@ const sources = (retrieved) => retrieved.map((c) => ({ title: c.title, source: c
 // examples are trimmed to a head excerpt (leanText).
 const toResult = (c, full) => {
     const link = refLink(c);
-    return { id: c.id, title: c.title, source: c.source, score: c.score, rrf: c.rrf ?? null, rerank: c.rerank ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
+    return { id: c.id, title: c.title, source: c.source, score: c.score, ...(typeof c.p === 'number' ? { p: c.p } : {}), rrf: c.rrf ?? null, rerank: c.rerank ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
 };
 // Handlers for the MCP tools — local (no HTTP round-trip; the box has corpus + bge).
 const mcpHandlers = (ip) => ({
     search: async (query, k, full, lang) => {
         const retrieved = await retrieve(query, k, { lang, ip });
         logStat({ ep: 'mcp', ip: hashIp(ip), q: query, ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [query] }) });
-        return retrieved.map((c) => toResult(c, full));
+        return searchResponse(retrieved, retrieved.map((c) => toResult(c, full)));
     },
     get: async (ids) => getByIds(ids),   // getByIds already returns full text
 });
@@ -199,7 +199,7 @@ export const server = createServer(async (req, res) => {
             const results = retrieved.map((c) => toResult(c, !!body.full));
             logStat({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [question] }), ep: 'search', ms: Date.now() - t0, ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             const info = retrievalInfo(retrieved);
-            return json(200, { results, path: info.path, exists: info.exists, rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
+            return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
         }
 
         // Generation opts are allowlisted as { ip } here and in /chat below.

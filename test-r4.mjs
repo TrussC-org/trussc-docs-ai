@@ -38,7 +38,7 @@ async function fixture(options, test) {
             JEV_POOL_TOKENS: '28000', JEV_CARD_CHARS: '2000', JEV_TOKENS_PER_CHAR: '.4', JEV_SEARCH_HINT_BELOW: '.7',
             HAIKU_TIMEOUT_MS: '1000', HAIKU_MAX_RESPONSE_BYTES: '1048576', HAIKU_CARD_CHARS: '8000', HAIKU_MAX_INPUT_TOKENS: '24000',
             ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001', HAIKU_EFFORT: '', HAIKU_THINKING: '', HAIKU_ADAPTIVE_MAX_TOKENS: '8192',
-            STATS: '1', RATE_MAX: '1000', EMBEDDED: join(dir, 'corpus.json'), STATS_LOG: join(dir, 'stats.jsonl'), ...options.env });
+            STATS: '1', RATE_MAX: '1000', EMBEDDED: join(dir, 'corpus.json'), STATS_DIR: dir, ...options.env });
         for (const k of options.unset || []) delete process.env[k];
         writeFileSync(process.env.EMBEDDED, JSON.stringify(options.corpus || [baseCard]));
         for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'server.mjs', 'mcp-core.mjs', 'stats.mjs', 'debug.mjs'])
@@ -65,7 +65,7 @@ async function fixture(options, test) {
             const res = new EventEmitter(); Object.assign(res, { status: 200, data: '', setHeader() {}, writeHead(status) { this.status = status; }, write(data) { this.data += data; return true; }, end(data = '') { this.data += data; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
-        const rows = () => { try { return readFileSync(process.env.STATS_LOG, 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
+        const rows = () => { try { return readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
         const { selectCards } = await import(join(dir, 'jev.mjs'));
         await test({ ...rag, selectCards, request, calls, rawCalls, requests, output, rows, dir });
     } finally {

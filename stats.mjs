@@ -1,15 +1,55 @@
-// Usage stats: append one JSON line per request to STATS_LOG. Deliberately tiny —
+// Usage stats: append one JSON line per request to STATS_DIR/YYYY-MM.jsonl. Deliberately tiny —
 // no DB, no deps, fire-and-forget. Logging must NEVER break a response, so every
 // path is wrapped. Analyze later with jq (see README / report.mjs).
-import { appendFileSync } from 'node:fs';
+import { constants, openSync, writeSync, closeSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { STATS, STATS_LOG, STATS_SALT } from './config.mjs';
+import { isIP } from 'node:net';
+import { STATS, STATS_DIR, STATS_SALT } from './config.mjs';
 
 // Pseudonymize the client IP: a salted hash, truncated. Lets us count distinct
 // visitors / spot abuse without storing raw IPs.
 export function hashIp(ip) {
   if (!ip) return null;
   return createHash('sha256').update(STATS_SALT + '|' + ip).digest('hex').slice(0, 16);
+}
+
+// Group IPv6 privacy addresses by /64 without persisting the address or prefix.
+// Keep hashIp unchanged so existing per-address visitor hashes remain comparable.
+export function hashNet(ip) {
+  // Bound (address parsing): accept at most 128 UTF-16 code units, including
+  // any zone id; oversized/non-string/invalid addresses return null, not a hash.
+  if (typeof ip !== 'string' || ip.length > 128) return null;
+  const family = isIP(ip);
+  if (family === 4) return hashIp(ip);
+  if (family !== 6) return null;
+  let address = ip.split('%', 1)[0]; // isIP validated the optional zone id too.
+  if (address.includes('.')) {
+    const last = address.lastIndexOf(':');
+    const octets = address.slice(last + 1).split('.').map(Number);
+    address = address.slice(0, last + 1) +
+      ((octets[0] << 8) | octets[1]).toString(16) + ':' +
+      ((octets[2] << 8) | octets[3]).toString(16);
+  }
+  const [left, right] = address.split('::');
+  const head = left ? left.split(':') : [];
+  const tail = right ? right.split(':') : [];
+  // Bound (address expansion): isIP validation guarantees exactly eight words
+  // after expanding ::, including a dotted IPv4 tail converted to two words.
+  const words = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail]
+    .map(word => parseInt(word, 16));
+  if (words.slice(0, 5).every(word => word === 0) && words[5] === 0xffff) {
+    return hashIp([words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255].join('.'));
+  }
+  return hashIp(words.slice(0, 4).map(word => word.toString(16).padStart(4, '0')).join(':') + '::/64');
+}
+
+export function clientInfoValue(value) {
+  if (value === undefined || value === null) return null;
+  // Bound (stats output): each supplied initialize name/version must be 1..64
+  // ASCII [A-Za-z0-9._ -] characters; invalid values become "other", never truncated.
+  if (typeof value !== 'string' || value.length < 1 || value.length > 64 || /[^A-Za-z0-9._ -]/.test(value)) return 'other';
+  return value;
 }
 
 // The reference symbols surfaced for a query → "which APIs/categories get asked
@@ -57,26 +97,44 @@ export function requestClient(ep, headers, body = {}) {
 
 const tokenCount = n => Number.isFinite(n) && n >= 0 ? n : null;
 
+let warned = false;
+
 export function logStat(rec) {
   if (!STATS) return;
   try {
-    // Existing text fields live ONLY here. Owner retention decision pending:
-    // drop this text object later without changing request/pipeline logging.
+    // Existing text fields live ONLY here. Query and answer retention
+    // remains the owner-approved policy.
     const { q, a, ...fields } = rec;
     const text = { ...(typeof q === 'string' ? { q } : {}),
       ...(typeof a === 'string' ? { a: a.slice(0, 4000) } : {}) };
-    appendFileSync(STATS_LOG, JSON.stringify({ ...fields,
-      ts: new Date().toISOString(), ep: rec.ep, tool: rec.tool ?? null,
+    const ts = new Date().toISOString();
+    const name = ts.slice(0, 7) + '.jsonl';
+    // Bound (stats destination): only a four-digit UTC year/month filename.
+    if (!/^\d{4}-\d{2}\.jsonl$/.test(name)) throw new Error('invalid stats month');
+    const line = JSON.stringify({ ...fields,
+      ts, ep: rec.ep, tool: rec.tool ?? null,
       client: rec.client ?? 'http', ms: rec.ms ?? null,
       path: rec.path ?? null, fallbackReason: rec.fallbackReason ?? null,
       rounds: rec.rounds ?? 0, haikuCalls: rec.haikuCalls ?? 0,
       haiku: { in: tokenCount(rec.haiku?.in), out: tokenCount(rec.haiku?.out), thinking: tokenCount(rec.haiku?.thinking) },
       jevTokens: tokenCount(rec.jevTokens), qLen: typeof q === 'string' ? q.length : rec.qLen ?? null,
-      qLang: typeof q === 'string' ? queryLanguage(q) : rec.qLang ?? null, ip: rec.ip ?? null,
+      qLang: typeof q === 'string' ? queryLanguage(q) : rec.qLang ?? null, ip: rec.ip ?? null, net: rec.net ?? null,
       errorReason: rec.errorReason ?? null, errorClass: rec.errorClass ?? null,
-      ...text }) + '\n');
+      ...text }) + '\n';
+    const fd = openSync(join(STATS_DIR, name),
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    try {
+      const bytes = Buffer.from(line);
+      // One append per row; never retry a partial write as a separate append.
+      if (writeSync(fd, bytes) !== bytes.length) throw new Error('short stats write');
+    } finally { closeSync(fd); }
+  } catch {
+    // A missing directory or any logging failure must never affect a response.
+    if (!warned) {
+      warned = true;
+      try { console.warn('Warning: stats append failed; dropping usage stats'); } catch {}
+    }
   }
-  catch (e) { /* swallow — never let logging affect the request */ }
 }
 
 // Explicit fields keep upstream response objects and credentials out of stats.

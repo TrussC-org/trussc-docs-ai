@@ -147,6 +147,10 @@ export const JEV_PICK_K = numberEnv('JEV_PICK_K', 8, { integer: true });
 export const JEV_PICK_MIN_P = numberEnv('JEV_PICK_MIN_P', 0.4);
 export const JEV_PICK_MIN = numberEnv('JEV_PICK_MIN', 4, { integer: true });
 export const JEV_PICK_MAX = numberEnv('JEV_PICK_MAX', 16, { integer: true });
+// Bound (configuration): operator-only search-hint threshold stays within 0..1. Overflow clamps with a warning and is not counted.
+const hintBelow = numberEnv('JEV_SEARCH_HINT_BELOW', 0.7);
+export const JEV_SEARCH_HINT_BELOW = Math.max(0, Math.min(1, hintBelow));
+if (hintBelow > 1) console.warn('Warning: JEV_SEARCH_HINT_BELOW clamped to 0..1');
 export const JEV_RATE_MAX = numberEnv('JEV_RATE_MAX', 20, { integer: true });
 export const JEV_RATE_WIN_MS = numberEnv('JEV_RATE_WIN_MS', 60000);
 export const JEV_DAILY_TOKENS = numberEnv('JEV_DAILY_TOKENS', 20000000);

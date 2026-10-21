@@ -2,7 +2,7 @@
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
 import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
-import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, transportClass } from './config.mjs';
+import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, JEV_SEARCH_HINT_BELOW, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, transportClass } from './config.mjs';
 import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
@@ -936,16 +936,16 @@ export async function answer(question, history = [], page = null, pinned = [], k
 // Bound (security): pack full capped cards by descending p within the serialized input budget. Overflow keeps cards by id only and is counted.
 function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256) {
     const parts = cards.map(card => shownIds.has(card.id) ? `[#${card.id}] already shown above` : `[#${card.id}]`);
-    if (!fitsInput(render(parts.join('\n\n---\n\n')), offerTool, reserveChars)) return null;
+    if (!fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars)) return null;
     const added = [];
     const priority = cards.map((card, i) => ({ card, i })).sort((a, b) => (b.card.p ?? -1) - (a.card.p ?? -1));
     for (const { card, i } of priority) {
         if (shownIds.has(card.id)) continue;
         const old = parts[i]; parts[i] = `[#${card.id}]\n${generationText(card)}`;
-        if (fitsInput(render(parts.join('\n\n---\n\n')), offerTool, reserveChars)) added.push(card.id);
+        if (fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars)) added.push(card.id);
         else parts[i] = old;
     }
-    return { idOnlyCards: cards.filter(card => !shownIds.has(card.id) && !added.includes(card.id)).length, messages: render(parts.join('\n\n---\n\n')), added };
+    return { idOnlyCards: cards.filter(card => !shownIds.has(card.id) && !added.includes(card.id)).length, messages: render(parts.join('\n\n---\n\n'), offerTool), added };
 }
 export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
     const sketchMode = page === 'sketch';
@@ -955,7 +955,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
     const stats = { rounds: 1, queries: [question], retrievals: [info], haikuMs: 0, haikuCalls: 0 };
     const traces = [];
     const startTrace = (queries, picked = retrieved) => {
-        const trace = { queries, picked, info, haikuCalls: 0, idOnlyCards: 0, haiku: { estInputTokens: [], ms: 0, inputTokens: null, outputTokens: null }, message: null };
+        const trace = { queries, picked, info, hintShown: false, hintFollowed: null, haikuCalls: 0, idOnlyCards: 0, haiku: { estInputTokens: [], ms: 0, inputTokens: null, outputTokens: null }, message: null };
         traces.push(trace);
         return trace;
     };
@@ -988,13 +988,20 @@ export async function* answerStream(question, history = [], page = null, pinned 
         }
     }
     async function* researchAnswer() {
-        const existsHint = () => `Jev answer-exists probability: ${info.exists ?? 'unknown'}. This is only a hint; if low, prefer searching again.`;
+        // The estimate is always shown; the search_more recommendation only when that tool is offered.
+        const recommends = offerTool => offerTool && typeof info.exists === 'number' && info.exists < JEV_SEARCH_HINT_BELOW;
+        const existsHint = offerTool => {
+            if (typeof info.exists !== 'number') return '';
+            return `Jev coverage estimate: ${info.exists.toFixed(2)}.` + (recommends(offerTool)
+                ? ` Below ${JEV_SEARCH_HINT_BELOW}, calling search_more is recommended unless the question doesn't need TrussC documentation (off-topic chat, greetings).` : '');
+        };
         const finalNote = '\nThis is the final round. Answer now using the available evidence and state any gaps.';
         messages[0].content += '\nUse search_more only when more evidence is needed. When calling it, provide no answer text. Its message must be short and in the user\'s language.';
         let noMoreSearch = false;
-        const renderInitial = context => {
+        const renderInitial = (context, offerTool) => {
             const user = buildMessages(question, [], [], prepared.pageName, context).at(-1);
-            user.content += `\n\n${existsHint()}`;
+            const hint = existsHint(offerTool);
+            if (hint) user.content += `\n\n${hint}`;
             return [...messages.slice(0, -1), user];
         };
         let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1);
@@ -1025,17 +1032,24 @@ export async function* answerStream(question, history = [], page = null, pinned 
             stats.rounds = round;
             const offerTool = round < MAX_SEARCH_ROUNDS && !noMoreSearch;
             if (!offerTool && fitsInput([{ ...messages[0], content: messages[0].content + finalNote }, ...messages.slice(1)], false)) messages[0].content += finalNote;
+            trace.hintShown = recommends(offerTool);
             const response = yield* callHaiku(messages, offerTool);
             if (response.invalid) {
                 // Invalid input cannot initiate retrieval; recovery uses the same counter.
+                // Not a voluntary decision either way, so it stays out of the hint metric.
+                trace.hintFollowed = null;
                 yield* forceAnswer(); return;
             }
+            trace.hintFollowed = trace.hintShown ? Boolean(response.tool) : null;
             if (!response.tool) return;
             const { message, queries } = response.tool.input;
             const assistant = { role: 'assistant', content: [{ type: 'tool_use', id: response.tool.id, name: 'search_more', input: response.tool.input }] };
-            const renderResult = cards => [...messages, assistant, { role: 'user', content: [{ type: 'tool_result', tool_use_id: response.tool.id,
-                content: `Search completed.\n\n${cards}\n\n${existsHint()}\nAnswer the original question using all cards shown above, or search again if needed.` }] }];
-            if (!fitsInput(renderResult(''), false, 256)) { yield* forceAnswer(); return; }
+            const renderResult = (cards, offerTool) => {
+                const hint = existsHint(offerTool);
+                return [...messages, assistant, { role: 'user', content: [{ type: 'tool_result', tool_use_id: response.tool.id,
+                    content: `Search completed.\n\n${cards}${hint ? `\n\n${hint}` : ''}\nAnswer the original question using all cards shown above, or search again if needed.` }] }];
+            };
+            if (!fitsInput(renderResult('', false), false, 256)) { yield* forceAnswer(); return; }
             trace.message = message;
             yield { research: { round: round + 1, message, queries } };
             stats.queries.push(...queries);

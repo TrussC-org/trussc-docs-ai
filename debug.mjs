@@ -9,6 +9,8 @@ export function publicDebug(traces = []) {
         poolSize: number(trace.info.poolSize),
         picked: trace.picked.map(card => ({ id: string(card.id), title: string(card.title), p: number(card.p) })),
         exists: number(trace.info.exists),
+        hintShown: trace.hintShown === true,
+        hintFollowed: trace.hintShown === true && typeof trace.hintFollowed === 'boolean' ? trace.hintFollowed : null,
         path: trace.info.path === 'jev' ? 'jev' : 'fallback',
         haiku: { estInputTokens: (trace.haiku.estInputTokens ?? []).map(number).filter(n => n !== null), ms: number(trace.haiku.ms), inputTokens: number(trace.haiku.inputTokens), outputTokens: number(trace.haiku.outputTokens) },
         jev: { ms: number(trace.info.jevMs), tokens: number(trace.info.jevTokens) },

@@ -150,7 +150,9 @@ Only the boolean `true` enables it. Each round has exactly these fields:
 | `queries` | Search queries executed for that round (raw question first) |
 | `poolSize` | Number of deduplicated candidates in this round's Jev pool |
 | `picked` | This round's selected cards as `{id,title,p}` only; previously shown selections use id references in Haiku's tool result |
-| `exists` | Jev answer-exists probability, or `null` on fallback |
+| `exists` | Jev coverage estimate (can every part of the question be answered from the cards), or `null` on fallback |
+| `hintShown` | `true` when this round's Haiku prompt recommended `search_more` (estimate below `JEV_SEARCH_HINT_BELOW` and `search_more` offered) |
+| `hintFollowed` | `true` if Haiku called `search_more` after the recommendation, `false` if it answered instead, `null` when no recommendation was shown |
 | `path` | `"jev"` or `"fallback"` |
 | `idOnlyCards` | Number of newly picked cards sent by id only because of the whole-request input budget (excludes already-shown references) |
 | `haiku` | `{ms,inputTokens,outputTokens,estInputTokens}`: elapsed milliseconds, reported input/output tokens, and a numeric estimate array in Haiku call order (including recovery/correction) |
@@ -203,6 +205,7 @@ change and a server restart; requests cannot override it.
 | `JEV_PICK_MIN_P` | `0.4` | Threshold probability |
 | `JEV_PICK_MIN` | `4` | Threshold minimum, filled by descending p |
 | `JEV_PICK_MAX` | `16` | Threshold maximum (takes precedence if below minimum) |
+| `JEV_SEARCH_HINT_BELOW` | `0.7` | Haiku always sees the Jev coverage estimate; below this value its prompt also recommends `search_more` (Haiku still decides). Clamped to 0–1 |
 | `JEV_RATE_MAX` | `20` | Jev calls per IP per sliding window |
 | `JEV_RATE_WIN_MS` | `60000` | Sliding window duration |
 | `JEV_DAILY_TOKENS` | `20000000` | Per-process daily token budget, resetting at local midnight |
@@ -472,7 +475,7 @@ One JSON line per request → `stats.jsonl` (gitignored): question, hashed IP, l
 `corrected`, suggested APIs + category, conversation id. Pipeline fields include
 `idOnlyCards` (per-round counts), `idOnlyCardsTotal`, `estInputTokens` (one number per Haiku call),
 `path`, `fallbackReason`, `rounds`, `haikuCalls`, `queries`, Jev `exists`, `jevMs`, `haikuMs`,
-`jevEstimatedTokens`, and per-round `retrievals` (so an earlier fallback stays visible).
+`jevEstimatedTokens`, and per-round `retrievals` (so an earlier fallback stays visible; each carries that round's `exists`, `hintShown` and `hintFollowed`, as in the debug rounds above).
 Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report aggregates
 (volume, distinct visitors, p50/p95, top questions/APIs/categories, by day).

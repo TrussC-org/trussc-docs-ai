@@ -8,6 +8,7 @@ import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { publicDebug } from './debug.mjs';
+import { pipelineStat } from './stats.mjs';
 import { main } from './ask-cli.mjs';
 
 // Future internal fields must not expand the public schema, at any nesting level.
@@ -18,8 +19,15 @@ const trace = {
     info: { ...privateFields, poolSize: 12, path: 'fallback', exists: null, jevMs: 0, jevTokens: 100 },
     haiku: { ...privateFields, ms: 12, inputTokens: 101, outputTokens: 17 }, message: null,
 };
-const expected = { idOnlyCardsTotal: 0, haikuCalls: 0, rounds: [{ idOnlyCards: 0, queries: ['circle'], poolSize: 12, picked: [{ id: 'symbol:drawCircle', title: 'drawCircle', p: .8 }], exists: null, path: 'fallback', haiku: { estInputTokens: [], ms: 12, inputTokens: 101, outputTokens: 17 }, jev: { ms: 0, tokens: 100 }, message: null }] };
+const expected = { idOnlyCardsTotal: 0, haikuCalls: 0, rounds: [{ idOnlyCards: 0, queries: ['circle'], poolSize: 12, picked: [{ id: 'symbol:drawCircle', title: 'drawCircle', p: .8 }], exists: null, hintShown: false, hintFollowed: null, path: 'fallback', haiku: { estInputTokens: [], ms: 12, inputTokens: 101, outputTokens: 17 }, jev: { ms: 0, tokens: 100 }, message: null }] };
 assert.deepEqual(publicDebug([trace]), expected);
+assert.deepEqual(publicDebug([{ ...trace, hintShown: 'PRIVATE', hintFollowed: privateFields }]), expected);
+assert.deepEqual(publicDebug([{ ...trace, hintShown: true, hintFollowed: privateFields }]).rounds[0].hintFollowed, null);
+for (const [hintShown, hintFollowed, expectedFollowed] of [[true, true, true], [true, false, false], [false, true, null], ['PRIVATE', privateFields, null], [true, privateFields, null]]) {
+    const stat = pipelineStat({ retrievals: [{ exists: .29 }], traces: [{ ...trace, hintShown, hintFollowed }] });
+    assert.deepEqual(stat.retrievals, [{ exists: .29, hintShown: hintShown === true, hintFollowed: expectedFollowed }]);
+    assert(!JSON.stringify(stat).includes('PRIVATE'));
+}
 assert(!/reason|budget|rate|prompt|key|private|192\.0\.2/i.test(JSON.stringify(publicDebug([trace]))));
 
 const dir = mkdtempSync(join(tmpdir(), 'docsai-debug-'));

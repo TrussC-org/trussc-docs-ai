@@ -18,7 +18,7 @@ async function fixture(options, test) {
         Object.assign(process.env, { TYPESAFE_API_KEY: 'fake-selector', ANTHROPIC_API_KEY: 'fake-generator',
             GEN_BACKEND: 'anthropic', RETRIEVAL: 'jev', HYBRID: '1', RERANK: '0', REF_BASE: 'https://trussc.org',
             MAX_SEARCH_ROUNDS: '3', JEV_PICK_MIN: '16', JEV_PICK_MAX: '16', JEV_RATE_MAX: '1000', JEV_DAILY_TOKENS: '100000000',
-            JEV_POOL_TOKENS: '28000', JEV_CARD_CHARS: '2000', JEV_TOKENS_PER_CHAR: '.4',
+            JEV_POOL_TOKENS: '28000', JEV_CARD_CHARS: '2000', JEV_TOKENS_PER_CHAR: '.4', JEV_SEARCH_HINT_BELOW: '.7',
             HAIKU_TIMEOUT_MS: '1000', HAIKU_MAX_RESPONSE_BYTES: '1048576', HAIKU_CARD_CHARS: '8000', HAIKU_MAX_INPUT_TOKENS: '24000',
             STATS: '1', RATE_MAX: '1000', EMBEDDED: join(dir, 'corpus.json'), STATS_LOG: join(dir, 'stats.jsonl'), ...options.env });
         writeFileSync(process.env.EMBEDDED, JSON.stringify(options.corpus || [baseCard]));
@@ -30,7 +30,7 @@ async function fixture(options, test) {
             if (url.endsWith('/api/embed')) return Response.json({ embeddings: [[1, 0]] });
             if (url.endsWith('/systemone')) {
                 if (options.jev) return options.jev(opts);
-                return Response.json({ answers: { ...Object.fromEntries(req.state.cards.map((c, i) => [c.card, { noul: options.probability?.(c, i, calls.length) ?? .9 }])), exists: { noul: .1 } } });
+                return Response.json({ answers: { ...Object.fromEntries(req.state.cards.map((c, i) => [c.card, { noul: options.probability?.(c, i, calls.length) ?? .9 }])), exists: { noul: typeof options.exists === 'function' ? options.exists(calls.length) : options.exists ?? .1 } } });
             }
             assert.equal(url, 'https://api.anthropic.com/v1/messages'); calls.push(req);
             return options.generate ? options.generate(req, opts, calls.length) : new Response(text('Use [[drawCircle]].') + stop);
@@ -53,6 +53,97 @@ async function fixture(options, test) {
 }
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
+for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial and search-result prompts: ${exists}`, async () => {
+    await fixture({ exists, env: exists === null ? { TYPESAFE_API_KEY: '' } : {},
+        generate: (_, __, n) => new Response((n === 1 ? tool('coverage') : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
+        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        const debug = JSON.parse(response.data).debug, stat = rows().at(-1);
+        assert.equal(calls.length, 2);
+        for (const [i, req] of calls.entries()) {
+            assert.equal(req.tool_choice, undefined);
+            const content = req.messages.at(-1).content;
+            const prompt = typeof content === 'string' ? content : content[0].content;
+            const hintShown = exists !== null && exists < .7;
+            assert.equal(prompt.includes('Jev coverage estimate:'), exists !== null);
+            if (exists !== null) assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
+            const recommendation = "Below 0.7, calling search_more is recommended unless the question doesn't need TrussC documentation (off-topic chat, greetings).";
+            assert.equal(prompt.includes(recommendation), hintShown);
+            assert(!prompt.includes('answer-exists probability'));
+            if (i) assert(prompt.startsWith('Search completed.'));
+            const expected = { exists, hintShown, hintFollowed: hintShown ? i === 0 : null };
+            for (const record of [debug.rounds[i], stat.retrievals[i]]) {
+                for (const [key, value] of Object.entries(expected)) assert.equal(record[key], value, `${key} round ${i + 1}`);
+            }
+        }
+    });
+});
+test('configured hint threshold is honoured', async () => {
+    for (const [threshold, exists, hintShown] of [[.2, .29, false], [.9, .88, true], [.29, .29, false]]) {
+        await fixture({ exists, env: { JEV_SEARCH_HINT_BELOW: String(threshold) } }, async ({ request, calls, rows }) => {
+            const response = await request('/ask'); assert.equal(response.status, 200);
+            const prompt = calls[0].messages.at(-1).content;
+            assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
+            assert.equal(prompt.includes(`Below ${threshold}, calling search_more is recommended`), hintShown);
+            assert.equal(prompt.includes('calling search_more is recommended'), hintShown);
+            assert.equal(JSON.parse(response.data).debug.rounds[0].hintShown, hintShown);
+            assert.equal(rows().at(-1).retrievals[0].hintShown, hintShown);
+        });
+    }
+});
+test('off-topic answer can decline a low-coverage search recommendation', async () => {
+    await fixture({ exists: .29, generate: () => new Response(text('Hello!') + stop) }, async ({ request, calls, rows }) => {
+        const response = await request('/ask', { question: 'Hello!', debug: true });
+        assert.equal(response.status, 200);
+        const result = JSON.parse(response.data), stat = rows().at(-1);
+        assert.equal(result.answer, 'Hello!'); assert.equal(calls.length, 1);
+        assert(calls[0].tools, 'Haiku must be free to choose search_more');
+        assert.equal(result.debug.rounds.length, 1); assert.equal(stat.rounds, 1);
+        for (const record of [result.debug.rounds[0], stat.retrievals[0]]) {
+            assert.equal(record.exists, .29); assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, false);
+        }
+    });
+});
+test('each round uses its current coverage estimate and hint decision', async () => {
+    await fixture({ exists: n => n === 0 ? .29 : n === 1 ? .88 : .1,
+        generate: (_, __, n) => new Response((n < 3 ? tool(`coverage${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
+        const response = await request('/ask'); assert.equal(response.status, 200);
+        const debug = JSON.parse(response.data).debug, stat = rows().at(-1);
+        assert.equal(calls.length, 3);
+        for (const [i, exists] of [.29, .88, .1].entries()) {
+            const content = calls[i].messages.at(-1).content;
+            const prompt = typeof content === 'string' ? content : content[0].content;
+            assert(prompt.includes(`Jev coverage estimate: ${exists.toFixed(2)}.`));
+            // Round 3 is the last (MAX_SEARCH_ROUNDS=3): search_more is not offered, so it is not recommended.
+            assert.equal(prompt.includes('calling search_more is recommended'), i === 0);
+            for (const record of [debug.rounds[i], stat.retrievals[i]]) {
+                assert.equal(record.exists, exists); assert.equal(record.hintShown, i === 0);
+                assert.equal(record.hintFollowed, i === 0 ? true : null);
+            }
+        }
+    });
+});
+test('no recommendation when search_more is not offered (single round)', async () => {
+    await fixture({ exists: .29, env: { MAX_SEARCH_ROUNDS: '1' }, generate: () => new Response(text('Use [[drawCircle]].') + stop) }, async ({ request, calls, rows }) => {
+        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        assert.equal(calls.length, 1); assert.equal(calls[0].tools, undefined);
+        const prompt = calls[0].messages.at(-1).content;
+        assert(prompt.includes('Jev coverage estimate: 0.29.'));
+        assert(!prompt.includes('calling search_more is recommended'));
+        for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
+            assert.equal(record.hintShown, false); assert.equal(record.hintFollowed, null);
+        }
+    });
+});
+test('invalid-tool recovery stays out of the hint metric', async () => {
+    await fixture({ exists: .29, generate: (req, _, n) => new Response((n === 1 ? tool('bad', { message: '', queries: [] }) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
+        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        assert.equal(calls.length, 2); assert(calls[0].tools); assert.equal(calls[1].tools, undefined);
+        assert(calls[0].messages.at(-1).content.includes('calling search_more is recommended'));
+        for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
+            assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, null);
+        }
+    });
+});
 test('implicit used IDs in ask/chat, including correction', async () => {
     for (const correction of [false, true]) await fixture({ corpus: [baseCard, { ...baseCard, id: 'symbol:Node', title: 'Node', meta: { kind: 'type' } }],
         generate: (_, __, n) => new Response(text(correction && n % 2 ? 'Node::invented' : 'Use [[drawCircle]].') + stop) }, async ({ request }) => {

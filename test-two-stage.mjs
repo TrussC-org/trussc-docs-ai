@@ -18,7 +18,7 @@ for (const mode of ['plain', 'tool', 'max1', 'max3', 'invalid', 'invalid-message
         RERANK: '1', STATS: '1', RATE_MAX: mode === 'request-rate' ? '5' : '1000', HYBRID: '1',
         JEV_URL: 'https://stub.invalid/systemone', JEV_MODEL: 'jev-latest',
         JEV_TOKENS_PER_CHAR: '.4', JEV_TIMEOUT_MS: '3000', JEV_RATE_WIN_MS: '60000',
-        JEV_PICK: 'threshold', JEV_PICK_K: '8', JEV_PICK_MIN_P: '.4', JEV_PICK_MIN: '4', JEV_PICK_MAX: '16',
+        JEV_PICK: 'threshold', JEV_PICK_K: '8', JEV_PICK_MIN_P: '.4', JEV_PICK_MIN: '4', JEV_PICK_MAX: '16', JEV_SEARCH_HINT_BELOW: '.7',
     });
     if (mode === 'default') delete process.env.MAX_SEARCH_ROUNDS;
     await runMode(mode);
@@ -86,7 +86,7 @@ try {
         }
         assert.equal(url, 'https://api.anthropic.com/v1/messages');
         haikuCalls.push(req);
-        assert(JSON.stringify(req.messages).includes('Jev answer-exists probability'));
+        assert.equal(JSON.stringify(req.messages).includes('Jev coverage estimate:'), !['rerank', 'rate', 'pool', 'budget'].includes(mode));
         const tool = !['plain', 'rerank', 'rate', 'pool', 'budget', 'request-rate'].includes(mode) && req.tools;
         let content = frames({ type: 'message_start', message: { usage: { input_tokens: 101, output_tokens: 0 } } });
         if (tool) {
@@ -282,7 +282,7 @@ async function testRoundPools() {
         assert.deepEqual(haiku[1].messages[1], { role: 'assistant', content: [{ type: 'tool_use', id: 'gap-tool', name: 'search_more', input: searchMore }] });
         const toolResult = haiku[1].messages[2].content[0];
         assert.equal(toolResult.type, 'tool_result'); assert.equal(toolResult.tool_use_id, 'gap-tool');
-        assert(toolResult.content.includes('B_CARD') && toolResult.content.includes('Jev answer-exists probability: 0.2'));
+        assert(toolResult.content.includes('B_CARD') && toolResult.content.includes('Jev coverage estimate: 0.20.'));
         assert(toolResult.content.includes('[#symbol:drawCircle] already shown above'));
         assert.equal(JSON.stringify(haiku[1].messages).split('ORIGINAL_CARD').length - 1, 1);
         assert.equal(jev[1].state.cards[0].title, 'drawCircle', 'original question pool comes first');
@@ -334,7 +334,7 @@ function assertTrace(debug, rounds) {
     const keys = (value, expected) => assert.deepEqual(Object.keys(value).sort(), expected.slice().sort());
     keys(debug, ['haikuCalls', 'idOnlyCardsTotal', 'rounds']); assert.equal(typeof debug.haikuCalls, 'number'); assert.equal(debug.rounds.length, rounds);
     for (const round of debug.rounds) {
-        keys(round, ['idOnlyCards', 'queries', 'poolSize', 'picked', 'exists', 'path', 'haiku', 'jev', 'message']);
+        keys(round, ['idOnlyCards', 'queries', 'poolSize', 'picked', 'exists', 'hintShown', 'hintFollowed', 'path', 'haiku', 'jev', 'message']);
         keys(round.haiku, ['estInputTokens', 'ms', 'inputTokens', 'outputTokens']);
         keys(round.jev, ['ms', 'tokens']);
         assert(['jev', 'fallback'].includes(round.path));

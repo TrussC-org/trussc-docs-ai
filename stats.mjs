@@ -30,7 +30,10 @@ export function logStat(rec) {
 
 // Explicit fields keep upstream response objects and credentials out of stats.
 export function pipelineStat(result = {}) {
-  const { path, reason, rounds = 0, queries = [], exists, jevMs = 0, haikuMs = 0, haikuCalls = 0, jevEstimatedTokens = 0, retrievals, errorClass, idOnlyCards = [], idOnlyCardsTotal = 0, estInputTokens = [] } = result;
+  const { path, reason, rounds = 0, queries = [], exists, jevMs = 0, haikuMs = 0, haikuCalls = 0, jevEstimatedTokens = 0, retrievals, traces = [], errorClass, idOnlyCards = [], idOnlyCardsTotal = 0, estInputTokens = [] } = result;
   return { idOnlyCards, idOnlyCardsTotal, estInputTokens, path, fallbackReason: reason, rounds, queries, exists, jevMs, haikuMs, haikuCalls, jevEstimatedTokens,
-    ...(errorClass ? { errorClass } : {}), ...(retrievals ? { retrievals } : {}) };
+    ...(errorClass ? { errorClass } : {}), ...(retrievals ? { retrievals: retrievals.map((info, i) => ({ ...info,
+      hintShown: traces[i]?.hintShown === true,
+      hintFollowed: traces[i]?.hintShown === true && typeof traces[i]?.hintFollowed === 'boolean' ? traces[i].hintFollowed : null,
+    })) } : {}) };
 }

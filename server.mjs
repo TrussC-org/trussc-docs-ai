@@ -17,7 +17,7 @@ import { answer, answerStream, retrieve, chunks, refLink, leanText, getByIds, re
 import { dispatch as mcpDispatch, searchResponse } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES } from './config.mjs';
 import { publicDebug } from './debug.mjs';
-import { logStat, hashIp, suggested, pipelineStat } from './stats.mjs';
+import { logStat, hashIp, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -91,16 +91,6 @@ const toResult = (c, full) => {
     const link = refLink(c);
     return { id: c.id, title: c.title, source: c.source, score: c.score, ...(typeof c.p === 'number' ? { p: c.p } : {}), rrf: c.rrf ?? null, rerank: c.rerank ?? null, link, text: full ? (c.text || '') : leanText({ ...c, link }) };
 };
-// Handlers for the MCP tools — local (no HTTP round-trip; the box has corpus + bge).
-const mcpHandlers = (ip) => ({
-    search: async (query, k, full, lang) => {
-        const retrieved = await retrieve(query, k, { lang, ip });
-        logStat({ ep: 'mcp', ip: hashIp(ip), q: query, ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [query] }) });
-        return searchResponse(retrieved, retrieved.map((c) => toResult(c, full)));
-    },
-    get: async (ids) => getByIds(ids),   // getByIds already returns full text
-});
-
 export const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
@@ -131,13 +121,31 @@ export const server = createServer(async (req, res) => {
 
     if (req.method === 'POST') {
         const ip = (req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').toString();
-        if (rateLimited(ip)) return json(429, { error: 'rate limited' });
+        const t0 = Date.now();
+        const endpoint = url.pathname.slice(1);
+        const tracked = ['chat', 'ask', 'search', 'get', 'mcp'].includes(endpoint);
+        // The stdio proxy still hits /search and /get. Its product UA identifies
+        // those tool requests without adding headers, destinations or server env.
+        const proxy = ['search', 'get'].includes(endpoint) && clientName(req.headers['user-agent']) === 'trussc-mcp-stdio';
+        let body = {};
+        const record = (fields = {}) => {
+            if (!tracked) return;
+            const query = ['chat', 'ask', 'search'].includes(endpoint) && typeof body.question === 'string' ? body.question.trim() : null;
+            logStat({ ep: proxy ? 'mcp' : endpoint,
+                tool: proxy ? (endpoint === 'search' ? 'trussc_search' : 'trussc_get') : null,
+                client: requestClient(proxy ? 'mcp' : endpoint, req.headers, body),
+                ip: hashIp(ip), ms: Date.now() - t0,
+                qLen: query === null ? null : query.length, qLang: query === null ? null : queryLanguage(query), ...fields });
+        };
+        if (rateLimited(ip)) {
+            record({ errorReason: 'rate', errorClass: 'Error' });
+            return json(429, { error: 'rate limited' });
+        }
 
-        let body;
         try { body = await readJson(req); }
         catch (error) {
             const tooLarge = error.reason === 'body';
-            logStat({ ep: url.pathname.slice(1), errorReason: tooLarge ? 'body' : 'body-read' });
+            record({ errorReason: tooLarge ? 'body' : 'body-read', errorClass: 'Error' });
             const message = tooLarge ? 'request too large' : 'request read error';
             return json(tooLarge ? 413 : 400, url.pathname === '/mcp'
                 ? { jsonrpc: '2.0', id: null, error: { code: -32000, message } }
@@ -147,7 +155,40 @@ export const server = createServer(async (req, res) => {
         // Remote MCP gateway (Streamable HTTP, stateless): body is a JSON-RPC message.
         // Retrieval runs locally (mcpSearch); notifications get a 202 with no body.
         if (url.pathname === '/mcp') {
-            const resp = await mcpDispatch(body, mcpHandlers(ip));
+            let pipeline = {}, failure = {}, queryText;
+            const capture = fn => async (...args) => {
+                try { return await fn(...args); }
+                catch (error) {
+                    failure = { ...pipelineStat(error), errorReason: error?.errorReason || 'request', errorClass: error?.errorClass || 'Error' };
+                    throw error;
+                }
+            };
+            const resp = await mcpDispatch(body, {
+                search: capture(async (query, k, full, lang) => {
+                    queryText = query;
+                    const retrieved = await retrieve(query, k, { lang, ip });
+                    pipeline = pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [query] });
+                    return searchResponse(retrieved, retrieved.map(c => toResult(c, full)));
+                }),
+                get: capture(getByIds),
+            });
+            const tool = body.method === 'tools/call' && ['trussc_search', 'trussc_get'].includes(body.params?.name) ? body.params.name : null;
+            // Stateless: initialize metadata belongs to this row only. Never
+            // associate a later call with another request's clientInfo.
+            const clientInfo = body.method === 'initialize' ? {
+                name: typeof body.params?.clientInfo?.name === 'string' ? body.params.clientInfo.name : null,
+                version: typeof body.params?.clientInfo?.version === 'string' ? body.params.clientInfo.version : null,
+            } : null;
+            const failed = resp?.error || resp?.result?.isError;
+            // Use the dispatcher's validated query; never coerce arbitrary JSON
+            // again during logging (an object may have an invalid toString).
+            const query = tool === 'trussc_search' ? queryText ??
+                (typeof body.params?.arguments?.query === 'string' ? body.params.arguments.query.trim() : null) : null;
+            record({ method: typeof body.method === 'string' ? body.method : null, tool,
+                ...(clientInfo ? { clientInfo } : {}),
+                ...(query !== null ? { qLen: query.length, qLang: queryLanguage(query) } : {}),
+                ...(queryText !== undefined && !failed ? { q: queryText } : {}),
+                ...pipeline, ...(failed ? { errorReason: 'mcp', errorClass: 'Error' } : {}), ...failure });
             if (!resp) { res.writeHead(202); return res.end(); }
             return json(200, resp);
         }
@@ -155,7 +196,14 @@ export const server = createServer(async (req, res) => {
         // Fetch full chunks by id (retrieval-only, no question). Powers trussc_get.
         if (url.pathname === '/get') {
             const ids = Array.isArray(body.ids) ? body.ids.filter((x) => typeof x === 'string').slice(0, 20) : [];
-            return json(200, { results: getByIds(ids) });
+            try {
+                const results = getByIds(ids);
+                record();
+                return json(200, { results });
+            } catch (error) {
+                record({ ...pipelineStat(error), errorReason: error?.errorReason || 'request', errorClass: error?.errorClass || 'Error' });
+                return json(500, { error: String(error?.message || error) });
+            }
         }
 
         const rawQuestion = typeof body.question === 'string' ? body.question : '';
@@ -164,7 +212,7 @@ export const server = createServer(async (req, res) => {
             h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string') : [];
         // Bound (security): question and each retained history entry allow 8000 UTF-16 code units. Overflow rejects with 400 and is counted.
         if (rawQuestion.length > 8000 || history.some(h => h.content.length > 8000)) {
-            logStat({ ep: url.pathname.slice(1), errorReason: 'input-fields' });
+            record({ errorReason: 'input-fields', errorClass: 'Error' });
             return json(400, { error: 'question or history too long' });
         }
         const question = rawQuestion.trim();
@@ -173,19 +221,17 @@ export const server = createServer(async (req, res) => {
         // (recent-first). Bounded so a malicious client can't blow up the prompt.
         // Bound (security): retain at most forty pinned ids. Overflow drops later ids and is not counted.
         const pinned = Array.isArray(body.pinned) ? body.pinned.filter((x) => typeof x === 'string').slice(0, 40) : [];
-        if (!question) return json(400, { error: 'no question' });
+        if (!question) {
+            record({ errorReason: 'input', errorClass: 'Error' });
+            return json(400, { error: 'no question' });
+        }
 
         // Per-request stats context (pseudonymized IP + client hints + timer).
-        const t0 = Date.now();
         const debug = body.debug === true && (url.pathname === '/ask' || url.pathname === '/chat');
         const stat = {
             ...(debug ? { debug: true } : {}),
             cid: (typeof body.convId === 'string' ? body.convId.slice(0, 64) : null), // groups rows into a thread
-            ip: hashIp(ip),
-            ua: (req.headers['user-agent'] || '').slice(0, 200) || null,
-            ref: (req.headers['referer'] || req.headers['origin'] || null),
             turns: history.length / 2 | 0,
-            qlen: question.length,
         };
 
         // /search + /ask are awaited inline — wrap so an Ollama/LLM error returns
@@ -197,7 +243,7 @@ export const server = createServer(async (req, res) => {
             const k = Number(body.k || 8);
             const retrieved = await retrieve(question, k, { lang: body.lang, ip });   // body.lang:'lua' for TrussSketch; else C++ (default)
             const results = retrieved.map((c) => toResult(c, !!body.full));
-            logStat({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [question] }), ep: 'search', ms: Date.now() - t0, ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
+            record({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [question] }), ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             const info = retrievalInfo(retrieved);
             return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
         }
@@ -209,13 +255,13 @@ export const server = createServer(async (req, res) => {
         if (url.pathname === '/ask') {
             const result = await answer(question, history, page, pinned, undefined, { ip });
             const { retrieved, links, text, corrected, usedIds, rounds, queries } = result;
-            logStat({ ...pipelineStat(result), ep: 'ask', ms: Date.now() - t0, ...stat, q: question, a: (text || '').slice(0, 4000), corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
+            record({ ...pipelineStat(result), ...stat, q: question, a: text || '', corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             const response = { answer: text, links, sources: sources(retrieved), corrected, usedIds, rounds, queries };
             if (debug) response.debug = publicDebug(result.traces);
             return json(200, response);
         }
         } catch (e) {
-            logStat({ ep: url.pathname.slice(1), ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e), errorReason: e?.errorReason, errorClass: e?.errorClass, haikuCalls: e?.haikuCalls ?? 0, idOnlyCards: e?.idOnlyCards ?? [], idOnlyCardsTotal: e?.idOnlyCardsTotal ?? 0, estInputTokens: e?.estInputTokens ?? [] });
+            record({ ...pipelineStat(e), ...stat, q: question, error: String((e && e.message) || e), errorReason: e?.errorReason || 'request', errorClass: e?.errorClass || 'Error' });
             return json(500, { error: String((e && e.message) || e) });
         }
 
@@ -246,10 +292,10 @@ export const server = createServer(async (req, res) => {
                         send('done', { corrected, usedIds: ev.usedIds || [], rounds: ev.rounds, queries: ev.queries });   // client folds usedIds into its pin ledger
                     }
                 }
-                logStat({ ...finalStats, ep: 'chat', ms: Date.now() - t0, ...stat, q: question, a: answerText.slice(0, 4000), corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
+                record({ ...finalStats, ...stat, q: question, a: answerText, corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
             } catch (e) {
                 send('error', String((e && e.message) || e));
-                logStat({ ep: 'chat', ms: Date.now() - t0, ...stat, q: question, error: String((e && e.message) || e), errorReason: e?.errorReason, errorClass: e?.errorClass, haikuCalls: e?.haikuCalls ?? 0, idOnlyCards: e?.idOnlyCards ?? [], idOnlyCardsTotal: e?.idOnlyCardsTotal ?? 0, estInputTokens: e?.estInputTokens ?? [] });
+                record({ ...pipelineStat(e), ...stat, q: question, error: String((e && e.message) || e), errorReason: e?.errorReason || 'request', errorClass: e?.errorClass || 'Error' });
             }
             return res.end();
         }

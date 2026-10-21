@@ -2,71 +2,173 @@
 //   node report.mjs                 # all-time
 //   node report.mjs --include-debug # include debug requests
 //   node report.mjs 7              # last 7 days
+//   node report.mjs --live /path/stats.jsonl --archive-dir /path/archive
 //   STATS_LOG=/path node report.mjs
 //   EXCLUDE_IP=hash1,hash2 node report.mjs   # drop your own hashed IP(s) to see real users
-import { readFileSync, existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
+import { opendir } from 'node:fs/promises';
+import { Transform } from 'node:stream';
+import { createInterface } from 'node:readline';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { STATS_LOG } from './config.mjs';
 
 const args = process.argv.slice(2);
-const days = Number(args.find(arg => arg !== '--include-debug') || 0);
-if (!existsSync(STATS_LOG)) { console.log(`no stats yet (${STATS_LOG})`); process.exit(0); }
-
-let rows = readFileSync(STATS_LOG, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-if (!args.includes('--include-debug')) rows = rows.filter(r => r.debug !== true);
-if (days > 0) {
-  const cutoff = Date.now() - days * 86400000;
-  rows = rows.filter((r) => Date.parse(r.ts) >= cutoff);
+let live = STATS_LOG, archive = join(homedir(), 'TrussC-dev/docs-ai-stats'), days = 0;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--include-debug') continue;
+  if (args[i] === '--live' || args[i] === '--archive-dir') {
+    const flag = args[i], value = args[++i];
+    if (!value || value.startsWith('--')) throw new Error(`missing value for ${flag}`);
+    if (flag === '--live') live = value; else archive = value;
+  } else if (/^\d+$/.test(args[i])) days = Number(args[i]);
+  else throw new Error(`unknown argument: ${args[i]}`);
 }
-// Exclude given hashed IPs (e.g. your own) so the stats reflect other users only.
-const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map((s) => s.trim()).filter(Boolean));
-if (exclude.size) {
-  const before = rows.length;
-  rows = rows.filter((r) => !exclude.has(r.ip));
-  console.log(`(excluded ${before - rows.length} rows from ${exclude.size} hashed IP(s))`);
+const cutoff = days > 0 ? Date.now() - days * 86400000 : -Infinity;
+if (days > 0 && !Number.isFinite(new Date(cutoff).getTime())) throw new Error('date range out of bounds');
+// One month earlier: a rotation files rows under the previous UTC day's month,
+// so a manual run on the 1st can put a new month's rows in the previous file.
+const cutoffMonth = days > 0 ? new Date(Date.UTC(new Date(cutoff).getUTCFullYear(), new Date(cutoff).getUTCMonth() - 1, 1)).toISOString().slice(0, 7) : '';
+const includeDebug = args.includes('--include-debug');
+const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map(s => s.trim()).filter(Boolean));
+
+// Bound (report memory): read 16 KiB chunks and admit at most 256 KiB per line
+// (excluding LF, including any CR). Discard/count longer lines BEFORE readline
+// can buffer them, including oversized unterminated tails. Never retain rows.
+const MAX_LINE_BYTES = 256 * 1024, READ_BYTES = 16 * 1024;
+let oversized = 0, malformed = 0, excluded = 0, n = 0, first = Infinity, last = -Infinity;
+function lineGuard() {
+  const pending = Buffer.alloc(MAX_LINE_BYTES);
+  let length = 0, dropping = false;
+  return new Transform({
+    transform(chunk, encoding, done) {
+      let start = 0;
+      while (start < chunk.length) {
+        const newline = chunk.indexOf(10, start);
+        const end = newline < 0 ? chunk.length : newline;
+        if (!dropping) {
+          if (length + end - start > MAX_LINE_BYTES) {
+            oversized++; dropping = true; length = 0;
+          } else {
+            chunk.copy(pending, length, start, end); length += end - start;
+          }
+        }
+        if (newline >= 0) {
+          if (!dropping) { this.push(Buffer.from(pending.subarray(0, length))); this.push('\n'); }
+          length = 0; dropping = false;
+        }
+        start = end + 1;
+      }
+      done();
+    },
+    flush(done) {
+      if (length && !dropping) { this.push(Buffer.from(pending.subarray(0, length))); this.push('\n'); }
+      done();
+    },
+  });
 }
 
-const n = rows.length;
+// Bound (aggregate memory): each dimension keeps at most 256 distinct keys of
+// at most 1024 UTF-16 code units. Additional/oversized keys fold into "other";
+// count overflow observations, not distinct dropped keys (which are unknowable).
+const MAX_KEYS = 256, MAX_KEY_UNITS = 1024;
+const dimensions = Object.fromEntries(['endpoint', 'tool', 'client', 'visitor', 'conversation',
+  'latency', 'question', 'API', 'category', 'day'].map(name => [name, { counts: new Map(), overflow: 0 }]));
+function add(name, key) {
+  if (key == null) return;
+  const d = dimensions[name];
+  if ((typeof key !== 'string' && typeof key !== 'number') || String(key).length > MAX_KEY_UNITS ||
+      (!d.counts.has(key) && d.counts.size >= MAX_KEYS)) { d.overflow++; return; }
+  const previous = d.counts.get(key);
+  if (previous !== undefined) { d.counts.set(key, previous + 1); return; }
+  // Copy new string keys so a short sliced string cannot pin a whole JSON line.
+  if (typeof key === 'string') key = Buffer.from(key, 'utf16le').toString('utf16le');
+  d.counts.set(key, 1);
+}
+let latencyMax = 0, answered = 0, corrected = 0;
+async function read(file) {
+  const input = createReadStream(file, { highWaterMark: READ_BYTES });
+  const guarded = lineGuard();
+  input.on('error', error => guarded.destroy(error));
+  const lines = createInterface({ input: input.pipe(guarded), crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      let row, ts;
+      try {
+        row = JSON.parse(line);
+        ts = typeof row?.ts === 'string' ? Date.parse(row.ts) : NaN;
+        if (!Number.isFinite(ts)) throw new Error('invalid timestamp');
+      } catch { malformed++; continue; }
+      if (ts < cutoff || (!includeDebug && row.debug === true)) continue;
+      if (exclude.has(row.ip)) { excluded++; continue; }
+      n++; first = Math.min(first, ts); last = Math.max(last, ts);
+      add('endpoint', row.ep); add('tool', row.tool); add('client', row.client || 'unknown');
+      if (row.ip) add('visitor', row.ip);
+      if (row.cid) add('conversation', row.cid);
+      if (Number.isFinite(row.ms) && row.ms >= 0) {
+        add('latency', row.ms); latencyMax = Math.max(latencyMax, row.ms);
+      }
+      if (row.corrected != null) { answered++; if (row.corrected) corrected++; }
+      add('question', row.q); add('day', row.ts.slice(0, 10));
+      if (Array.isArray(row.sym)) for (const symbol of row.sym) {
+        add('API', symbol?.name); add('category', symbol?.category);
+      }
+    }
+  } finally { lines.close(); input.destroy(); guarded.destroy(); }
+}
+
+// Stream directory entries too: do not retain a list of every archive. Rotation
+// names use the copy month; later archives can contain older rows, so read every
+// month >= the cutoff month and filter each row by ts before aggregation.
+if (existsSync(archive)) {
+  const directory = await opendir(archive);
+  for await (const entry of directory) {
+    if (/^\d{4}-(?:0[1-9]|1[0-2])\.jsonl$/.test(entry.name) && entry.name.slice(0, 7) >= cutoffMonth) {
+      await read(join(archive, entry.name));
+    }
+  }
+}
+if (existsSync(live)) await read(live);
+if (exclude.size) console.log(`(excluded ${excluded} rows from ${exclude.size} hashed IP(s))`);
+if (oversized || malformed) console.log(`(skipped ${oversized} oversized lines; ${malformed} malformed lines)`);
+for (const [name, d] of Object.entries(dimensions)) if (d.overflow) {
+  console.log(`(${name}: ${d.overflow} observations folded into other; key limit ${MAX_KEYS}, key length ${MAX_KEY_UNITS})`);
+}
 if (!n) { console.log('no requests in range'); process.exit(0); }
 
-const count = (arr, key) => { const m = new Map(); for (const x of arr) { const k = key(x); if (k == null) continue; m.set(k, (m.get(k) || 0) + 1); } return [...m.entries()].sort((a, b) => b[1] - a[1]); };
-const pct = (sorted, p) => { if (!sorted.length) return 0; return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]; };
-const bar = (rowsArr, max = 15) => rowsArr.slice(0, max).map(([k, c]) => `    ${String(c).padStart(4)}  ${k}`).join('\n');
-
-const span = `${rows[0].ts.slice(0, 10)} … ${rows[n - 1].ts.slice(0, 10)}`;
+const sorted = name => {
+  const { counts, overflow } = dimensions[name];
+  const entries = new Map(counts);
+  if (overflow) entries.set('other', (entries.get('other') || 0) + overflow);
+  return [...entries].sort((a, b) => b[1] - a[1]);
+};
+const bar = (name, max = 15) => sorted(name).slice(0, max).map(([k, c]) => `    ${String(c).padStart(4)}  ${k}`).join('\n');
+const span = `${new Date(first).toISOString().slice(0, 10)} … ${new Date(last).toISOString().slice(0, 10)}`;
 console.log(`\n=== TrussC docs-ai usage  (${n} requests, ${span}${days ? `, last ${days}d` : ''}) ===\n`);
-
-console.log('by endpoint:');
-console.log(bar(count(rows, (r) => r.ep)));
-
-const visitors = new Set(rows.map((r) => r.ip).filter(Boolean));
-console.log(`\ndistinct visitors (hashed IP): ${visitors.size}`);
-
-const convs = new Map();
-for (const r of rows) if (r.cid) convs.set(r.cid, (convs.get(r.cid) || 0) + 1);
-if (convs.size) {
-  const sizes = [...convs.values()];
-  const avg = (sizes.reduce((a, b) => a + b, 0) / convs.size).toFixed(1);
-  console.log(`conversations: ${convs.size}  (avg ${avg} msgs/conv, max ${Math.max(...sizes)})`);
+for (const name of ['endpoint', 'tool', 'client']) console.log(`by ${name}:\n${bar(name)}\n`);
+const visitors = dimensions.visitor;
+console.log(`distinct visitors (hashed IP): ${visitors.overflow ? '>=' : ''}${visitors.counts.size}`);
+const convs = dimensions.conversation;
+if (convs.counts.size) {
+  const sizes = [...convs.counts.values()];
+  const avg = (sizes.reduce((a, b) => a + b, 0) / convs.counts.size).toFixed(1);
+  console.log(`${convs.overflow ? 'tracked conversations' : 'conversations'}: ${convs.counts.size}  (avg ${avg} msgs/conv, max ${Math.max(...sizes)})`);
 }
-
-const lat = rows.map((r) => r.ms).filter((x) => x != null).sort((a, b) => a - b);
-if (lat.length) console.log(`latency ms: p50=${pct(lat, 0.5)}  p95=${pct(lat, 0.95)}  max=${lat[lat.length - 1]}`);
-
-const answered = rows.filter((r) => r.corrected != null);
-if (answered.length) {
-  const corr = answered.filter((r) => r.corrected).length;
-  console.log(`verify-pass fired (corrected): ${corr}/${answered.length} (${(100 * corr / answered.length).toFixed(1)}%)`);
+const lat = dimensions.latency;
+if (lat.counts.size || lat.overflow) {
+  const entries = [...lat.counts].sort((a, b) => a[0] - b[0]);
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
+  const pct = p => {
+    if (lat.overflow) return 'unavailable';
+    const rank = Math.floor(total * p);
+    let seen = 0;
+    for (const [value, count] of entries) { seen += count; if (seen > rank) return value; }
+  };
+  console.log(`latency ms: p50=${pct(0.5)}  p95=${pct(0.95)}  max=${latencyMax}`);
 }
-
-console.log('\ntop questions:');
-console.log(bar(count(rows, (r) => r.q), 20));
-
-console.log('\ntop suggested APIs:');
-console.log(bar(count(rows.flatMap((r) => r.sym || []), (s) => s.name)));
-
-console.log('\ntop categories:');
-console.log(bar(count(rows.flatMap((r) => r.sym || []), (s) => s.category)));
-
-console.log('\nby day:');
-console.log(bar(count(rows, (r) => r.ts.slice(0, 10)), 30));
-console.log();
+if (answered) console.log(`verify-pass fired (corrected): ${corrected}/${answered} (${(100 * corrected / answered).toFixed(1)}%)`);
+console.log(`\ntop questions:\n${bar('question', 20)}`);
+console.log(`\ntop suggested APIs:\n${bar('API')}`);
+console.log(`\ntop categories:\n${bar('category')}`);
+console.log(`\nby day:\n${bar('day', 30)}\n`);

@@ -13,7 +13,7 @@ const API = (process.env.TRUSSC_DOCS_API || 'https://api.trussc.org').replace(/\
 
 async function post(path, payload) {
     const r = await fetch(`${API}${path}`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
+        method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'trussc-mcp-stdio/0.1.0' },
         body: JSON.stringify(payload),
     });
     if (!r.ok) throw new Error(`${path} ${r.status}: ${await r.text()}`);

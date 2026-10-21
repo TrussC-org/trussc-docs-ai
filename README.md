@@ -476,13 +476,15 @@ backups before pulling if both migrations apply.
 
 ## Stats
 
-One JSON line per request → `stats.jsonl` (gitignored): question, hashed IP, latency,
+One JSON line per request → `stats.jsonl` (gitignored). See [STATS.md](STATS.md)
+for the common endpoint/client/token schema, retained text fields, examples,
+external monthly rotation and live-plus-archive reporting. Existing details: question, hashed IP, latency,
 `corrected`, suggested APIs + category, conversation id. Pipeline fields include
 `idOnlyCards` (per-round counts), `idOnlyCardsTotal`, `estInputTokens` (one number per Haiku call),
 `path`, `fallbackReason`, `rounds`, `haikuCalls`, `queries`, Jev `exists`, `jevMs`, `haikuMs`,
 `jevEstimatedTokens`, and per-round `retrievals` (so an earlier fallback stays visible; each carries that round's `exists`, `hintShown` and `hintFollowed`, as in the debug rounds above).
 Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report aggregates
-(volume, distinct visitors, p50/p95, top questions/APIs/categories, by day).
+(volume by endpoint/tool/client/day, distinct visitors, p50/p95, top questions/APIs/categories).
 
 Offline model/effort, thinking-off and base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md), including per-call usage and latency measurements. These internal options are unavailable over HTTP. The production model default is Haiku 5.5 at effort low; it uses adaptive thinking by default and rejects manual thinking budgets. Haiku 5.5 also gets one extra system-prompt rule allowing clearly implied facts when the answer names the evidence (it otherwise declines to state what the cards only imply); Haiku 4.5's prompt is unchanged.

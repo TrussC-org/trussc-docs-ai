@@ -1,6 +1,9 @@
 // Offline allowlist, report and CLI checks. No model endpoints or credentials.
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, createReadStream } from 'node:fs';
+import { opendir } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { Transform } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -38,19 +41,19 @@ try {
     // Execute the real report with stubbed imports, keeping this test independent
     // of child-process capture and operator environment/configuration.
     const report = readFileSync(new URL('./report.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
-    const runReport = args => {
+    const runReport = async args => {
         const output = [];
-        vm.runInNewContext(report, { readFileSync, existsSync: () => true, STATS_LOG: statsLog,
+        await vm.runInNewContext(`(async () => { ${report} })()`, { Buffer, Transform, createReadStream, createInterface, opendir, existsSync, homedir: () => dir, join, STATS_LOG: statsLog,
             process: { argv: ['node', 'report.mjs', ...args], env: {}, exit() { throw new Error('unexpected early exit'); } },
             console: { log: (...args) => output.push(args.join(' ')) },
         });
         return output.join('\n');
     };
-    assert(runReport([]).includes('(1 requests,'));
-    assert(!runReport([]).includes('debug question'));
+    assert((await runReport([])).includes('(1 requests,'));
+    assert(!(await runReport([])).includes('debug question'));
     for (const args of [['--include-debug'], ['7', '--include-debug'], ['--include-debug', '7']]) {
-        assert(runReport(args).includes('(2 requests,'));
-        assert(runReport(args).includes('debug question'));
+        assert((await runReport(args)).includes('(2 requests,'));
+        assert((await runReport(args)).includes('debug question'));
     }
 
     // An in-memory HTTP stub server exercises the CLI's --json request/response

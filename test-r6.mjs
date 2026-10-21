@@ -114,9 +114,18 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         req.emit('data', Buffer.from(JSON.stringify({question:'q'.repeat(8000), history:Array.from({length:7}, () => ({role:'user', content:'h'.repeat(8000)}))}))); req.emit('end');
         assert.equal((await done).status, 200); assert.equal(calls.at(-1)[1].length, 6);
     });
-    await test('body rejections record reason only', () => {
+    await test('body rejections keep the common schema without body text', () => {
         const rows = readFileSync(process.env.STATS_LOG, 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
-        assert.equal(rows.length, 6); for (const row of rows) assert.deepEqual(Object.keys(row).sort(), ['ep','errorReason','ts']);
+        assert.equal(rows.length, 6);
+        for (const row of rows) {
+            assert.equal(row.errorClass, 'Error'); assert(row.ms >= 0);
+            assert.equal(row.qLen, null); assert.equal(row.qLang, null);
+            assert.equal(row.path, null); assert.equal(row.fallbackReason, null);
+            assert.equal(row.rounds, 0); assert.equal(row.haikuCalls, 0);
+            assert.deepEqual(row.haiku, {in:null, out:null, thinking:null});
+            assert.match(row.ip, /^[a-f0-9]{16}$/);
+            for (const field of ['q','a','ua','ref','headers']) assert(!Object.hasOwn(row, field));
+        }
     });
     await test('retained pool and tool limits have bound annotations', () => {
         for (const [file, fragment] of [['rag.mjs','export function buildPool'], ['rag.mjs','export function buildRoundPool'], ['rag.mjs','export function validSearchInput'], ['jev.mjs','if (perQuestionTokens']]) {

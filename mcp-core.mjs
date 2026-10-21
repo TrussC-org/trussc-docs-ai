@@ -21,12 +21,10 @@ export const TOOLS = [{
         'query, e.g. "draw a filled circle in a color", "load and play a sound file". ' +
         'Set lang:"lua" for TrussSketch (the in-browser Lua playground) to get Lua-flavored ' +
         'cards (colon methods, Type.new, end_fbo/end_shader/end_cam) instead of the C++ API. ' +
-        'Search flags leading type/function names absent from loaded documentation and weak coverage. ' +
-        'Qualified names check only the leading owner. Core ids/components or any case-insensitive ' +
-        'whole-word addon mention suppress name warnings for every namespace; this does not verify an API. ' +
-        'Dot/colon spellings, filenames ' +
-        'and operator syntax are not checked. Cards show ids and ' +
-        'Other possibly related titles + ids for follow-up with trussc_get. Search output is capped at 256 KiB.',
+        'Results may include a line saying a name does not appear in the documentation, ' +
+        'near names, or a notice that the results probably do not answer the query. ' +
+        'These results are labelled as closest matches. Cards show ids, followed by ' +
+        'Other possibly related titles and ids for follow-up with trussc_get.',
     inputSchema: {
         type: 'object',
         properties: {
@@ -58,7 +56,7 @@ export const TOOLS = [{
 // bare words with an internal lower-to-upper transition (drawCircle / CudaGraph).
 // Dot/colon spellings, filenames and operators abstain. Sentence-case English,
 // acronyms and short bare words are ignored. Members cannot be enumerated reliably.
-const NON_API_WORDS = new Set(['TrussC', 'TrussSketch', 'openFrameworks', 'OpenFrameworks', 'OpenGL', 'OpenAL', 'OpenCV', 'WebGL', 'WebGPU', 'GitHub', 'JavaScript', 'TypeScript', 'macOS', 'iOS']);
+const NON_API_WORDS = new Set(['TrussC', 'TrussSketch', 'openFrameworks', 'OpenFrameworks', 'OpenGL', 'OpenAL', 'OpenCV', 'WebGL', 'WebGPU', 'GitHub', 'JavaScript', 'TypeScript', 'macOS', 'iOS', 'std', 'chrono', 'filesystem', 'this_thread', 'ranges']);
 const normalizeSymbol = name => name.replace(/^(?:tc|tcx)::/i, '');
 // Bound (lexical work/allocation): spans longer than 96 code units are skipped
 // BEFORE slicing, normalizing or regex matching. Only that span is skipped;
@@ -100,7 +98,13 @@ function identifiers(query) {
     // Classify whole whitespace-delimited chunks BEFORE splitting identifiers.
     // Bound (chunk work/allocation): only the bounded query prefix is copied or
     // scanned. Omit a cut final chunk; never infer a name from its partial path.
-    const filtered = input.slice(0, limit).replace(/\S+/g, (chunk, start) => {
+    // A quoted path or filename may contain spaces: blank the whole quoted span
+    // first, keeping its length so positions still match the input.
+    // Bound (quote work): a quoted span is at most 512 code units on one line.
+    const pathLike = s => /[\\/]/.test(s) || /\.[A-Za-z0-9_]+$/.test(s.trim());
+    const unquoted = input.slice(0, limit).replace(/(["'`])([^"'`\n]{1,512})\1|“([^”\n]{1,512})”/g,
+        (m, q, plain, curly) => pathLike(plain ?? curly) ? '!'.repeat(m.length) : m);
+    const filtered = unquoted.replace(/\S+/g, (chunk, start) => {
         if (start + chunk.length === limit && limit < input.length && !/\s/.test(input[limit])) return '!';
         // A non-whitespace barrier keeps spaced qualifiers from crossing a path.
         if (/[\\/]|[A-Za-z0-9_]-[A-Za-z0-9_]/.test(chunk) || /\.[A-Za-z0-9_]+[^\w\s]*$/.test(chunk)) return '!';
@@ -114,6 +118,7 @@ function identifiers(query) {
         if (NON_API_WORDS.has(raw)) return;
         if (!raw.includes('::') && (raw.length < 4 || !/[a-z][A-Z]/.test(raw))) return;
         const name = normalizeSymbol(raw).split('::')[0];
+        if (NON_API_WORDS.has(name)) return;
         if (!found.includes(name)) found.push(name);
         return found.length < 8;
     }, filtered.length, true);
@@ -139,26 +144,24 @@ function nearDistance(a, b) {
     return row[b.length];
 }
 export function createSymbolChecker(corpus) {
-    const names = new Map(), core = new Set(), addon = new Set();
-    const addName = (raw, isAddon) => {
+    const names = new Map(), known = new Set();
+    const addName = raw => {
         const name = normalizeSymbol(raw), lower = name.toLowerCase();
-        if (!names.has(lower)) names.set(lower, name);
+        // Only suggestions need canonical spellings; exact membership is separate.
+        if (names.size < 2048 && !names.has(lower)) names.set(lower, name);
         for (const part of lower.split('::')) {
-            if (isAddon) admit(part);
-            else core.add(part);
+            if (admit(part) === false) break;
         }
     };
-    const isAddonCard = c => c.source === 'addon' || c.id?.startsWith('addon:') ||
-        c.source === 'example' && (c.meta?.addon || /^example:tcx[^/]+\//.test(c.id || ''));
-    // Bound (addon scan work): at most 1 Gi code units across addon title/text
+    // Bound (corpus scan work): at most 1 Gi code units across ALL card title/text
     // fields, twice the full 512 MiB external cache, with headroom for the
-    // ~64 MiB embedding-heavy production JSON. Core bodies/vectors are not scanned.
-    // Bound (addon memory): at most 1,000,000 distinct words/id components, each
+    // ~64 MiB embedding-heavy production JSON. Vectors are never scanned.
+    // Bound (index memory): at most 1,000,000 distinct words/id components, each
     // <= 96 code units. Overall scan/count overflow abstains globally.
     let remaining = 1024 ** 3, complete = true;
     const admit = part => {
-        if (!addon.has(part) && addon.size === 1000000) { complete = false; return false; }
-        addon.add(part);
+        if (!known.has(part) && known.size === 1000000) { complete = false; return false; }
+        known.add(part);
     };
     // Core symbol/Lua/example ids and their components establish membership. Addon ids
     // use the same case-insensitive lookup as whole-word mentions below.
@@ -166,7 +169,7 @@ export function createSymbolChecker(corpus) {
         if (/^(symbol|lua|example|addon):/.test(c.id || '')) {
             const raw = c.id.slice(c.id.indexOf(':') + 1);
             // Bound (id work): skip names over 96 chars before regex/normalizing.
-            if (raw.length <= 96 && symbolPattern.test(raw)) addName(raw, c.id.startsWith('addon:'));
+            if (raw.length <= 96 && symbolPattern.test(raw)) addName(raw);
         }
         if (!complete) break;
     }
@@ -188,10 +191,8 @@ export function createSymbolChecker(corpus) {
         }
     };
     for (const c of corpus) {
-        if (isAddonCard(c)) {
-            scan(c.title);
-            scan(c.text);
-        }
+        scan(c.title);
+        scan(c.text);
         if (!complete) break;
     }
     if (!complete) {
@@ -207,8 +208,8 @@ export function createSymbolChecker(corpus) {
         for (const name of identifiers(query)) {
             const lower = name.toLowerCase();
             // All judged names use their leading owner, independent of prefix
-            // or qualification. Addon mentions abstain; they do not prove an API.
-            if (!core.has(lower) && !addon.has(lower)) missing.add(name);
+            // or qualification. Any card's word abstains; it does not prove an API.
+            if (!known.has(lower)) missing.add(name);
         }
         return [...missing].map(name => ({ name,
             suggestions: candidates.map(([lower, canonical]) => ({ name: canonical, distance: nearDistance(name.toLowerCase(), lower) }))

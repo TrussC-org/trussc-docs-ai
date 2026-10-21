@@ -1116,9 +1116,9 @@ for (const query of ['tween: getValue()', 'tween : getValue()',
 }
 test('spaced qualifiers check only the owner in all paths', async () => {
     await fixture({ corpus: documentedCorpus, exists: .9 }, async api => {
-        for (const query of ['A :: b', 'tc :: CudaGraph :: begin', 'tc :: CudaGraph :: beginFrame',
+        for (const query of ['AbsentOwner :: b', 'tc :: CudaGraph :: begin', 'tc :: CudaGraph :: beginFrame',
             'tc:: CudaGraph::beginFrame', 'tcx :: CudaGraph :: beginFrame'])
-            await assertNameSignals(api, query, [query === 'A :: b' ? 'A' : 'CudaGraph']);
+            await assertNameSignals(api, query, [query === 'AbsentOwner :: b' ? 'AbsentOwner' : 'CudaGraph']);
         for (const query of ['tc :: Vec2 :: missingName', 'tcx :: RemoteClient :: missingName'])
             await assertNameSignals(api, query);
     });
@@ -1290,7 +1290,7 @@ for (const query of ['How do I include myApp-config.h?',
         await fixture({ corpus: r7ExampleCorpus, exists: .9 }, async api => {
             const transports = { ...api, checkStdio: true };
             await assertNameSignals(transports, query);
-            for (const name of ['CudaGraph', 'circle']) await assertNameSignals(transports, `tc::${name}`, [name]);
+            for (const name of ['CudaGraph', 'setupGui']) await assertNameSignals(transports, `tc::${name}`, [name]);
         });
     });
 }
@@ -1300,14 +1300,26 @@ test('r7 whole chunks abstain before identifier splitting without hiding adjacen
         for (const chunk of ['mySketch-backup.cpp', 'myApp-config', 'myApp/path', 'MyProject\\src\\tcApp.cpp',
             '`myApp-config.h`', '<myApp-config.h>', 'myApp(config.h)', 'tc::CudaGraph/path', 'tc::CudaGraph-backup']) {
             await assertNameSignals(transports, `Include ${chunk}?`);
-            for (const name of ['CudaGraph', 'circle'])
+            for (const name of ['CudaGraph', 'setupGui'])
                 await assertNameSignals(transports, `${chunk}\t tc::${name}`, [name]);
         }
         // A chunk cut by the work bound must not manufacture a name or path.
         assert.deepEqual(api.missingSymbols(' '.repeat(7988) + 'tc::CudaGraph/path'), []);
     });
 });
-test('symbol components and addon words suppress warnings but core titles alone do not', async () => {
+test('r9 quoted paths and filenames with spaces abstain as a whole', async () => {
+    await fixture({ corpus: r7ExampleCorpus, exists: .9 }, async api => {
+        const transports = { ...api, checkStdio: true };
+        for (const quoted of ['"MyProject Files/src/tcApp.cpp"', "'My Sketch Folder\\tcApp.h'", '`MyProject Files/main.cpp`', '“MyProject Files/tcApp.cpp”', '"MyApp Notes.txt"']) {
+            await assertNameSignals(transports, `Where should I put drawCircle in ${quoted}?`);
+            // Names outside the quoted path are still judged.
+            await assertNameSignals(transports, `${quoted} and tc::CudaGraph`, ['CudaGraph']);
+        }
+        // Quoted code that is not a path keeps being judged.
+        await assertNameSignals(transports, 'Is "tc::CudaGraph" available?', ['CudaGraph']);
+    });
+});
+test('symbol components and every card title or text suppress warnings', async () => {
     const corpus = [baseCard,
         { ...baseCard, id: 'symbol:OuterType::InnerType::runNow', title: 'OuterType::InnerType::runNow' },
         { ...baseCard, id: 'doc:alias', title: 'TitleOwner', text: 'Mention ProseGhost and circle.' },
@@ -1315,8 +1327,8 @@ test('symbol components and addon words suppress warnings but core titles alone 
     await fixture({ corpus, exists: .9 }, async api => {
         for (const query of ['InnerType', 'OuterType', 'runNow',
             'OuterType::anything::else', 'tc::RemoteClient', 'tcx::RemoteClient::anything']) await assertNameSignals(api, query);
-        await assertNameSignals(api, 'ProseGhost', ['ProseGhost']);
-        await assertNameSignals(api, 'TitleOwner::anything', ['TitleOwner']);
+        await assertNameSignals(api, 'ProseGhost');
+        await assertNameSignals(api, 'TitleOwner::anything');
     });
 });
 for (const [label, text] of [
@@ -1334,7 +1346,7 @@ for (const [label, text] of [
         assert(!api.output.some(line => line.includes('[symbol-check] unavailable')));
     });
 });
-// Core prose does not suppress warnings; addon whole-word mentions abstain.
+// Whole-word mentions in core and addon cards both abstain.
 
 const ownerCorpus = [baseCard,
     { ...baseCard, id: 'symbol:Fbo', title: 'Fbo', meta: { kind: 'type' }, text: 'Draw a circle in a color.' },
@@ -1342,7 +1354,6 @@ const ownerCorpus = [baseCard,
 ];
 for (const [query, name] of [
     ['tc::CudaGraph::begin', 'CudaGraph'], ['tcx::CudaGraph::begin', 'CudaGraph'],
-    ['tc::circle', 'circle'], ['tc::begins', 'begins'],
 ]) test(`unknown owner or global warns in all paths: ${query}`, async () => {
     await fixture({ corpus: ownerCorpus, exists: .9 }, async ({ request, calls }) => {
         const response = await request('/search', { question: query });
@@ -1364,6 +1375,28 @@ test('known owner accepts unenumerated members and dot calls in all paths', asyn
         for (const query of ['Fbo::drawCircle', 'Fbo.drawCircle()', 'node.drawCircle()']) await assertNameSignals(api, query);
     });
 });
+test('core prose words abstain in all paths', async () => {
+    await fixture({ corpus: ownerCorpus, exists: .9 }, async api => {
+        for (const query of ['tc::circle', 'tc::begins']) await assertNameSignals({ ...api, checkStdio: true }, query);
+    });
+});
+for (const [id, source] of [['symbol:Owner', 'reference'], ['lua:Owner', 'sketch-lua'],
+    ['doc:owner', 'for-ai'], ['concept:owner', 'for-ai'], ['example:owner', 'example']]) {
+    test(`core inline names abstain across all transports: ${id}`, async () => {
+        const corpus = [baseCard, { id, source, title: 'TitleOnlyOwner',
+            text: 'Members: onMouseDrag sampleRate EaseFunction MatrixScope earlyUpdate\n' +
+                '// CommentOwner "StringOwner" pre_CudaGraph_post CudaGraphSuffix', vector: [1, 0] }];
+        await fixture({ corpus, exists: .9 }, async api => {
+            const transports = { ...api, checkStdio: true };
+            for (const name of ['onMouseDrag', 'sampleRate', 'EaseFunction', 'MatrixScope', 'earlyUpdate',
+                'TitleOnlyOwner', 'CommentOwner', 'StringOwner']) {
+                for (const query of [name, `TC::${name.toLowerCase()}::member`]) await assertNameSignals(transports, query);
+            }
+            for (const name of ['CudaGraph', 'setupGui', 'loadFromUrlAsync', 'FboSettings', 'drawRoundedRect'])
+                await assertNameSignals(transports, `how do I use ${name}`, [name]);
+        });
+    });
+}
 test('addon text above the former corpus cap still checks absent symbols', async () => {
     const corpus = [...ownerCorpus, ...Array.from({ length: 3000 }, (_, i) => ({
         ...baseCard, id: `symbol:KnownType${i}`, title: `KnownType${i}`, text: 'A documented type.', meta: { kind: 'type' },
@@ -1395,7 +1428,10 @@ for (const injected of [false, true]) test(`retrieval survives repeated requests
     });
 });
 test('missing symbol fact reaches search and chat through the same loaded ids', async () => {
-    await fixture({ corpus: [baseCard], exists: .9 }, api => assertNameSignals(api, 'tc::circle', ['circle']));
+    await fixture({ corpus: [baseCard], exists: .9 }, async api => {
+        await assertNameSignals(api, 'tc::circle');
+        await assertNameSignals(api, 'tc::setupGui', ['setupGui']);
+    });
     const corpus = [baseCard, ...['Fbo', 'Fbo::begin', 'CudaGraphs'].map(name => ({ ...baseCard, id: `symbol:${name}`, title: name }))];
     await fixture({ corpus, exists: .9 }, async ({ request, calls }) => {
         for (const query of ['tc::CudaGraph', 'drawCircle', 'Fbo::begin', 'tc::Fbo', 'draw a circle']) {

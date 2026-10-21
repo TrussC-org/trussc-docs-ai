@@ -7,12 +7,16 @@ import { join } from 'node:path';
 import { TOOLS, formatResults, formatSearchResults, createSymbolChecker, relatedCandidates, dispatch } from './mcp-core.mjs';
 
 const search = TOOLS.find(tool => tool.name === 'trussc_search');
-for (const internal of ['BM25', 'RRF', 'bge-m3', 'cross-encoder', 'reranker', 'Jev']) {
-    assert(!search.description.includes(internal), `description leaks retrieval internals: ${internal}`);
+for (const internal of ['BM25', 'RRF', 'bge-m3', 'cross-encoder', 'reranker', 'Jev',
+    'leading owner', 'ids/components', 'case-insensitive', 'whole-word', 'suppress',
+    'syntax', 'namespace;', '256 KiB', 'not checked']) {
+    assert(!search.description.includes(internal), `description leaks internals: ${internal}`);
 }
 for (const guidance of ['full:true', 'trussc_get', 'lang:"lua"', 'TAU not PI']) {
     assert(search.description.includes(guidance), `description keeps usage guidance: ${guidance}`);
 }
+for (const guidance of ['does not appear in the documentation', 'closest matches', 'Other possibly related'])
+    assert(search.description.includes(guidance), `description explains visible output: ${guidance}`);
 const withP = formatResults([{ source: 'api', title: 'drawCircle', p: 0.873, rrf: 0.0123, score: 0.51, rerank: 0.9, text: 'body' }], 'circle');
 assert(withP.includes('(relevance 0.87)'));
 for (const internal of ['rrf', 'cos ', 'rr ']) assert(!withP.includes(internal), `score line leaks ${internal}`);
@@ -24,6 +28,9 @@ assert.deepEqual(unknown.map(c => c.name), ['CudaGraph']);
 assert.equal(unknown[0].suggestions.length, 3);
 assert.deepEqual(unknown[0].suggestions, ['CudaGrap', 'CudaGraphs', 'CudaGraps']);
 for (const query of ['drawCircle', 'Fbo::begin', 'tc::Fbo', 'tcx::Fbo', 'TC::fBO', 'FBO::BEGIN', 'draw a circle in a color', 'How can I draw a circle?', 'e.g. draw a circle', 'load docs from trussc.org', 'TrussC and openFrameworks on macOS']) assert.deepEqual(check(query), [], query);
+for (const name of ['std', 'chrono', 'filesystem', 'this_thread', 'ranges']) {
+    for (const query of [name, `${name}::someFunction()`, `tc::${name}`]) assert.deepEqual(check(query), [], query);
+}
 assert.deepEqual(check('UnknownClass::method').map(c => c.name), ['UnknownClass']);
 assert.equal(check('tc::' + 'X'.repeat(100)).length, 0);
 assert.equal(check(Array.from({ length: 30 }, (_, i) => `missingName${i}`).join(' ')).length, 8);

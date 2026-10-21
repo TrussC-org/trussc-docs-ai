@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # External operator job; the API never reads the archive or runs this script.
 # Usage: bash deploy/rotate-stats.sh [LIVE_STATS_JSONL [ARCHIVE_DIR]]
-# Archive by rotation's current UTC month, not each row's ts month.
+# Archive by the UTC month of the day before the rotation, not each row's ts
+# month. The timer runs at 00:05 UTC, so that is the month of the rotated rows.
 set -euo pipefail
 umask 077
 if (( $# > 2 )); then echo 'usage: rotate-stats.sh [stats.jsonl [archive-dir]]' >&2; exit 2; fi
@@ -26,7 +27,7 @@ done
 [[ -e $live ]] || exit 0
 [[ -f $live ]] || { echo 'stats.jsonl is not a regular file' >&2; exit 2; }
 [[ -s $live ]] || exit 0
-monthly="$archive/$(date -u +%Y-%m).jsonl"
+monthly="$archive/$(date -u -d yesterday +%Y-%m).jsonl"
 if [[ -L $monthly ]]; then echo 'symlink archive refused' >&2; exit 2; fi
 # Snapshot the byte count so a growing file cannot prolong the copy indefinitely.
 # Copytruncate: a few concurrent appends between the snapshot and truncate can

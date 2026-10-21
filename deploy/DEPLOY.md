@@ -162,7 +162,8 @@ reads the archives, and needs no new read/write permissions, destinations or
 environment variables. Do not put the rotation job inside the API unit.
 
 The script requires Bash and standard Linux `flock`, `stat`, `head`, `date`,
-`truncate`, and `chmod`. It archives by the **rotation's current UTC month** to
+`truncate`, and `chmod`. It archives by the **UTC month of the day before the rotation** (the timer runs
+at 00:05 UTC, so that is the month the rotated rows belong to) to
 `~/TrussC-dev/docs-ai-stats/YYYY-MM.jsonl`, then truncates the live file in place.
 A few concurrent appends may be lost at the copytruncate boundary. Missing/empty
 live files are OK. Rotations share a short, nonblocking archive lock. Archive

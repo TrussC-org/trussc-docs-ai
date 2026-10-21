@@ -48,6 +48,15 @@ try {
   assert.match(report(['--include-debug'], { EXCLUDE_IP: 'excluded' }), /\(3 requests,/);
   console.log('PASS historical archive >55 MB streams under 32 MiB heap; month selection and early filters');
 
+  // A rotation files rows under the previous UTC day's month (a manual run on
+  // the 1st): the report still reads that file for a 1-day window.
+  const d = new Date(now), prevMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+  const previous = join(archive, prevMonth + '.jsonl');
+  writeFileSync(monthly, ''); writeFileSync(live, ''); writeFileSync(previous, row({ q: 'filed under previous month' }));
+  assert.match(report(), /\(1 requests,/);
+  rmSync(previous);
+  console.log('PASS rows filed under the previous month stay in range');
+
   // Neither readline nor JSON.parse may receive this 40 MiB line, including
   // an unterminated tail. Also exercise UTF-8 and valid rows after a long line.
   writeFileSync(monthly, ''); writeFileSync(live, '');

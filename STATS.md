@@ -118,9 +118,10 @@ Failure on `/ask`:
 
 `deploy/rotate-stats.sh [stats.jsonl [archive-dir]]` defaults to the
 worktree's `stats.jsonl` and `~/TrussC-dev/docs-ai-stats`. The live filename must
-be `stats.jsonl`. Each rotation appends its snapshot to **the current UTC month's**
+be `stats.jsonl`. Each rotation appends its snapshot to **the previous UTC day's month's**
 `YYYY-MM.jsonl`, irrespective of each row's `ts`. Thus late/historical rows can
-be in a later archive file. Reporting groups by each row's own `ts` date.
+be in a later archive file. A manual rotation on the 1st of a month files that
+day's rows under the previous month. Reporting groups by each row's own `ts` date.
 
 The operator script sets `umask 077`, enforces mode `0700` on the archive
 directory and `0600` on monthly archives and the persistent lock, and reapplies
@@ -147,9 +148,10 @@ The report streams monthly JSONL archives plus the live file line by line,
 tolerates either being absent, and summarizes by endpoint, tool, client and row
 timestamp day. A positive day count sets an inclusive lower timestamp cutoff;
 `0` (the default) means all time. Before opening archives, it skips filenames
-whose UTC rotation month precedes the cutoff month. Later months are still read
-because delayed rotation can put older rows there. This assumes records are
-archived in their timestamp month or later; future-dated or manually moved rows
+more than one month before the cutoff month (one extra month covers a manual
+rotation on the 1st). Later months are still read because delayed rotation can
+put older rows there. This assumes records are archived no earlier than the
+month before their timestamp month; future-dated or manually moved rows
 in an earlier archive are outside that selection rule. Each admitted row is
 filtered by timestamp, debug flag and excluded IP before any aggregate changes.
 

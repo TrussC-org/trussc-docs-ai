@@ -26,7 +26,9 @@ for (let i = 0; i < args.length; i++) {
 }
 const cutoff = days > 0 ? Date.now() - days * 86400000 : -Infinity;
 if (days > 0 && !Number.isFinite(new Date(cutoff).getTime())) throw new Error('date range out of bounds');
-const cutoffMonth = days > 0 ? new Date(cutoff).toISOString().slice(0, 7) : '';
+// One month earlier: a rotation files rows under the previous UTC day's month,
+// so a manual run on the 1st can put a new month's rows in the previous file.
+const cutoffMonth = days > 0 ? new Date(Date.UTC(new Date(cutoff).getUTCFullYear(), new Date(cutoff).getUTCMonth() - 1, 1)).toISOString().slice(0, 7) : '';
 const includeDebug = args.includes('--include-debug');
 const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map(s => s.trim()).filter(Boolean));
 

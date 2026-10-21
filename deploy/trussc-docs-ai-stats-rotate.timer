@@ -2,7 +2,7 @@
 Description=Daily TrussC docs-ai stats rotation
 
 [Timer]
-OnCalendar=daily
+OnCalendar=*-*-* 00:05:00 UTC
 Persistent=true
 Unit=trussc-docs-ai-stats-rotate.service
 

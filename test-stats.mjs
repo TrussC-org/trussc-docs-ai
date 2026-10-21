@@ -188,7 +188,7 @@ export async function* answerStream(query) {
     writeFileSync(live,second); assert.equal(rotate().status,0); assert.equal(readFileSync(live,'utf8'),'');
     const monthFiles = readdirSync(archive).filter(f=>f.endsWith('.jsonl'));
     assert.equal(monthFiles.length,1,'rotation month, not each timestamp month');
-    assert.equal(monthFiles[0],new Date().toISOString().slice(0,7)+'.jsonl');
+    assert.equal(monthFiles[0],new Date(Date.now()-86400000).toISOString().slice(0,7)+'.jsonl');
     assert.equal(readFileSync(join(archive,monthFiles[0]),'utf8'),first+second);
     assert.equal(rotate().status,0,'empty file is OK');
     const monthly = join(archive,monthFiles[0]), lock = join(archive,'.rotate.lock');

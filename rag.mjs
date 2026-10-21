@@ -1015,10 +1015,8 @@ export async function* answerStream(question, history = [], page = null, pinned 
         trace.haiku.estInputTokens.push(JSON.stringify(anthropicPayload(input, offerTool, 1536, variants)).length * JEV_TOKENS_PER_CHAR);
         const callIndex = trace.haiku.inputTokens.push(null) - 1;
         const usage = {};
-        let failure;
         const started = Date.now();
         try { return yield* anthropicRound(input, offerTool, 1536, usage, variants); }
-        catch (error) { failure = error; throw error; }
         finally {
             trace.haiku.inputTokens[callIndex] = usage.inputTokens ?? null;
             for (const [field, value] of [['inputTokensTotal', usage.inputTokens], ['outputTokens', usage.outputTokens]]) {
@@ -1030,7 +1028,6 @@ export async function* answerStream(question, history = [], page = null, pinned 
             }
             const elapsed = Date.now() - started;
             stats.haikuMs += elapsed; trace.haiku.ms += elapsed;
-            if (failure) Object.assign(failure, generationCounts(), { rounds: stats.rounds });
         }
     }
     async function* researchAnswer() {
@@ -1117,59 +1114,11 @@ export async function* answerStream(question, history = [], page = null, pinned 
             yield { meta: true };
         }
     }
-    for await (const d of generation) {
-        if (d?.research) { yield { type: 'research', ...d.research }; continue; }
-        if (d?.meta) { yield { type: 'meta', retrieved, links }; continue; }
-        full += d;
-        if (cut >= 0) continue;                  // already past the marker — swallow the rest
-        const idx = full.indexOf(MARK);
-        if (idx >= 0) {
-            const piece = full.slice(emitted, idx).replace(/\s+$/, '');   // last answer bit, sans trailing ws before marker
-            if (piece) { shown += piece; yield { type: 'delta', text: piece }; }
-            emitted = full.length; cut = idx;
-        } else {
-            const safe = full.length - MARK.length;
-            if (safe > emitted) { const piece = full.slice(emitted, safe); emitted = safe; shown += piece; yield { type: 'delta', text: piece }; }
-        }
-    }
-    if (cut < 0 && emitted < full.length) { const piece = full.slice(emitted); shown += piece; yield { type: 'delta', text: piece }; }
-
-    let { answer: text, reported } = splitUsed(full);
-    const bad = findFabrications(text);
-    let usedIds;
-    if (bad.size && (GEN_BACKEND !== 'anthropic' || stats.haikuCalls < MAX_SEARCH_ROUNDS + 1)) {
-        let correction = correctionMessages(messages, text, bad);
-        if (GEN_BACKEND === 'anthropic') {
-            // Only supplemental correction turns may shrink; retained native
-            // search history and previously supplied cards remain intact.
-            while (!fitsInput(correction, false, 0, variants)) {
-                const extra = correction.slice(-2).sort((a, b) => b.content.length - a.content.length)[0];
-                if (extra.content.length < 64) {
-                    const error = new Error('generation service error');
-                    Object.assign(error, { errorReason: 'input', errorClass: 'Error', haikuCalls: stats.haikuCalls });
-                    throw error;
-                }
-                // Bound (security): correction additions must fit beside retained native history. Overflow halves supplemental text and is not counted.
-                extra.content = extra.content.slice(0, Math.floor(extra.content.length / 2));
-            }
-        }
-        ({ answer: text, reported } = splitUsed(await collect(GEN_BACKEND === 'anthropic'
-            ? callHaiku(correction, false) : chatStream(correction))));
-        usedIds = usedIdsOf(reported, text, retrieved);
-        text = resolveLinks(text, sketchMode);
-        yield { type: 'replace', text };
-    } else {
-        // Collect implicit [[...]] ids before deterministic link resolution, from
-        // the final draft or corrected answer (shared by /ask and /chat).
-        usedIds = usedIdsOf(reported, text, retrieved);
-        const resolved = resolveLinks(text, sketchMode);
-        if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }
-        else text = resolved;
-    }
     function generationCounts() {
         const idOnlyCards = traces.map(t => t.idOnlyCards);
         return { haikuCalls: stats.haikuCalls, idOnlyCards, idOnlyCardsTotal: idOnlyCards.reduce((a, b) => a + b, 0),
             estInputTokens: traces.flatMap(t => t.haiku.estInputTokens),
+            inputTokensPerCall: traces.flatMap(t => t.haiku.inputTokens),
             inputTokens: sumUsage('inputTokensTotal'), outputTokens: sumUsage('outputTokens'),
             thinkingTokens: !variants.thinkingBudget ? 0 : traces.some(t => typeof t.haiku.thinkingTokens !== 'number')
                 ? 'included in outputTokens' : sumUsage('thinkingTokens') };
@@ -1178,5 +1127,60 @@ export async function* answerStream(question, history = [], page = null, pinned 
         const values = traces.map(t => t.haiku[field]).filter(n => typeof n === 'number');
         return values.length ? values.reduce((a, b) => a + b, 0) : null;
     }
-    yield { type: 'final', ...generationCounts(), text, corrected: bad.size > 0, usedIds, traces, ...stats, ...info, jevMs: stats.retrievals.reduce((n, r) => n + r.jevMs, 0), jevEstimatedTokens: stats.retrievals.reduce((n, r) => n + r.jevEstimatedTokens, 0) };
+    try {
+        for await (const d of generation) {
+            if (d?.research) { yield { type: 'research', ...d.research }; continue; }
+            if (d?.meta) { yield { type: 'meta', retrieved, links }; continue; }
+            full += d;
+            if (cut >= 0) continue;                  // already past the marker — swallow the rest
+            const idx = full.indexOf(MARK);
+            if (idx >= 0) {
+                const piece = full.slice(emitted, idx).replace(/\s+$/, '');   // last answer bit, sans trailing ws before marker
+                if (piece) { shown += piece; yield { type: 'delta', text: piece }; }
+                emitted = full.length; cut = idx;
+            } else {
+                const safe = full.length - MARK.length;
+                if (safe > emitted) { const piece = full.slice(emitted, safe); emitted = safe; shown += piece; yield { type: 'delta', text: piece }; }
+            }
+        }
+        if (cut < 0 && emitted < full.length) { const piece = full.slice(emitted); shown += piece; yield { type: 'delta', text: piece }; }
+
+        let { answer: text, reported } = splitUsed(full);
+        const bad = findFabrications(text);
+        let usedIds;
+        if (bad.size && (GEN_BACKEND !== 'anthropic' || stats.haikuCalls < MAX_SEARCH_ROUNDS + 1)) {
+            let correction = correctionMessages(messages, text, bad);
+            if (GEN_BACKEND === 'anthropic') {
+                // Only supplemental correction turns may shrink; retained native
+                // search history and previously supplied cards remain intact.
+                while (!fitsInput(correction, false, 0, variants)) {
+                    const extra = correction.slice(-2).sort((a, b) => b.content.length - a.content.length)[0];
+                    if (extra.content.length < 64) {
+                        const error = new Error('generation service error');
+                        Object.assign(error, { errorReason: 'input', errorClass: 'Error', haikuCalls: stats.haikuCalls });
+                        throw error;
+                    }
+                    // Bound (security): correction additions must fit beside retained native history. Overflow halves supplemental text and is not counted.
+                    extra.content = extra.content.slice(0, Math.floor(extra.content.length / 2));
+                }
+            }
+            ({ answer: text, reported } = splitUsed(await collect(GEN_BACKEND === 'anthropic'
+                ? callHaiku(correction, false) : chatStream(correction))));
+            usedIds = usedIdsOf(reported, text, retrieved);
+            text = resolveLinks(text, sketchMode);
+            yield { type: 'replace', text };
+        } else {
+            // Collect implicit [[...]] ids before deterministic link resolution, from
+            // the final draft or corrected answer (shared by /ask and /chat).
+            usedIds = usedIdsOf(reported, text, retrieved);
+            const resolved = resolveLinks(text, sketchMode);
+            if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }
+            else text = resolved;
+        }
+        yield { type: 'final', ...generationCounts(), text, corrected: bad.size > 0, usedIds, traces, ...stats, ...info, jevMs: stats.retrievals.reduce((n, r) => n + r.jevMs, 0), jevEstimatedTokens: stats.retrievals.reduce((n, r) => n + r.jevEstimatedTokens, 0) };
+    } catch (error) {
+        // Preserve completed/partial call usage even when later retrieval or packing fails.
+        Object.assign(error, generationCounts(), { rounds: stats.rounds });
+        throw error;
+    }
 }

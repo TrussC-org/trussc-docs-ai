@@ -26,6 +26,9 @@ export const RRF_K = Number(process.env.RRF_K || 60);         // Reciprocal Rank
 export const RERANK = process.env.RERANK === '1';
 export const RERANK_URL = (process.env.RERANK_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
 export const RERANK_CANDIDATES = Number(process.env.RERANK_CANDIDATES || 30);
+// Bound (realtime): one reranker request (800-char rerank text: median 1.65 s, p90 2.25 s on
+// 2026-10-27). Overflow aborts the request; the fallback keeps the RRF order and logs one line.
+export const RERANK_TIMEOUT_MS = numberEnv('RERANK_TIMEOUT_MS', 5000);
 
 // Generation context window. Bigger = more room for history + rich chunks, but more
 // KV-cache VRAM. ~24k is generous for several turns; tune once we measure how many

@@ -763,6 +763,13 @@ const chunks = [...concept, ...docs, ...symbols, ...examples, ...addonExamples, 
 // scores; a clean "title + English desc + signatures" restores sharp rr. NOT embedded
 // (vectors unchanged) — only fed to the reranker at query time (rag.rerankCandidates).
 const CJK = /[぀-ヿ㐀-鿿가-힯]/;
+// Bound (realtime): reranker input per symbol/doc/example/issue card, in characters. No line
+// limit, so notes and pitfalls past the signatures reach the reranker. Every batch pads to its
+// longest text, so rerank time grows with this cap (2026-10-27, 815 improvement questions,
+// Jev judge: 500 → 1418/1630 at 0.83 s median, 800 → 1452 at 1.65 s, 2000 → 1472 at 2.63 s);
+// 800 keeps the overload fallback's rerank short. The reranker itself stops at 512 tokens. Overflow is
+// cut at build time and is not reported.
+const RERANK_CHARS = 800;
 function rerankRepr(c) {
     // Addons: the substance for reranking is the one-line pitch + the curated
     // keywords, NOT the README boilerplate (author / install command / WIP badge /
@@ -801,18 +808,20 @@ function rerankRepr(c) {
     if (c.source === 'issue') {
         const body = (c.text || '').split('\n').map((s) => s.trim())
             .filter((t) => t && !t.startsWith('[') && !t.startsWith('#') && !t.startsWith('('));
-        return `${c.title}\n${body.join(' ')}`.slice(0, 500);
+        return `${c.title}\n${body.join(' ')}`.slice(0, RERANK_CHARS);
     }
     const keep = [];
+    let length = c.title.length;
     for (const raw of (c.text || '').split('\n')) {
         const t = raw.trim();
         if (!t || t.startsWith('```') || t.startsWith('# ') || t.startsWith('// =====')) continue;
         if (/^openFrameworks:/.test(t) || /^keywords:/i.test(t)) continue;
         if (CJK.test(t)) continue;                          // drop ja/ko desc lines
         keep.push(t);
-        if (keep.length >= 6) break;
+        length += 1 + t.length;
+        if (length >= RERANK_CHARS) break;                  // the rest is cut below anyway
     }
-    return `${c.title}\n${keep.join('\n')}`.slice(0, 500);
+    return `${c.title}\n${keep.join('\n')}`.slice(0, RERANK_CHARS);
 }
 for (const c of chunks) c.rerankText = rerankRepr(c);
 

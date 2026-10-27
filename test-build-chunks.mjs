@@ -124,3 +124,17 @@ test('an inherited member keeps its full card when the declaring card is not emi
     assert.ok(card.text.includes('Only copy of this prose.'));
     assert.equal(card.meta.base, undefined);
 });
+
+const rr = {};
+vm.runInNewContext(`${source.slice(source.indexOf('const CJK = /'), source.indexOf('for (const c of chunks) c.rerankText'))}\nglobalThis.rerankRepr = rerankRepr; globalThis.RERANK_CHARS = RERANK_CHARS;`, rr);
+test('rerank text keeps English lines past the old six-line limit and stops at the char cap', () => {
+    const notes = Array.from({ length: 12 }, (_, i) => `note ${i}`);
+    const text = ['# Type::method   (method of Type)', 'Does work.', '日本語の説明', '```cpp', ...notes, 'keywords: lookup'].join('\n');
+    assert.equal(rr.rerankRepr({ source: 'symbol', title: 'Type::method', text }), ['Type::method', 'Does work.', '```cpp', ...notes].filter((t) => !t.startsWith('```')).join('\n'));
+    assert.equal(rr.RERANK_CHARS, 800);   // chosen on the 815 improvement set (2026-10-27)
+    const long = rr.rerankRepr({ source: 'symbol', title: 'T', text: 'x'.repeat(5000) });
+    assert.equal(long.length, rr.RERANK_CHARS);
+    const issue = rr.rerankRepr({ source: 'issue', title: 'Bug', text: '[open as of today]\n## Summary\n' + 'y'.repeat(5000) });
+    assert.equal(issue.length, rr.RERANK_CHARS);
+    assert.ok(issue.startsWith('Bug\nyyy'));
+});

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createSymbolChecker, noSymbolFact, relatedCandidates } from './mcp-core.mjs';
 import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
 import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, JEV_SEARCH_HINT_BELOW, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, HAIKU_EFFORT, HAIKU_THINKING, EFFORT_LEVELS, HAIKU_ADAPTIVE_MAX_TOKENS, transportClass } from './config.mjs';
-import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
+import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, RERANK_TIMEOUT_MS, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
 
 let _chunks = null;
 export function chunks() {
@@ -179,10 +179,15 @@ async function rerankCandidates(query, cand) {
     const texts = cand.map((c) => c.rerankText || `${c.title}\n${(c.text || '').slice(0, 600)}`);
     const r = await fetch(`${RERANK_URL}/rerank`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query, texts }),
+        body: JSON.stringify({ query, texts }), signal: AbortSignal.timeout(RERANK_TIMEOUT_MS),
     });
-    if (!r.ok) throw new Error(`rerank ${r.status}: ${await r.text()}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const { results } = await r.json();   // [{index, score}] desc
+    // Every candidate exactly once with a finite score; anything else keeps the RRF order.
+    const seen = new Set();
+    const valid = Array.isArray(results) && results.length === cand.length && results.every((s) =>
+        Number.isInteger(s?.index) && s.index >= 0 && s.index < cand.length && !seen.has(s.index) && seen.add(s.index) && Number.isFinite(s.score));
+    if (!valid) throw new Error('malformed results');
     return results.map((s) => ({ ...cand[s.index], rerank: s.score }));
 }
 
@@ -197,7 +202,12 @@ async function finalize(sorted, k, supK, query) {
             const cand = sorted.slice(0, RERANK_CANDIDATES);
             const reranked = await rerankCandidates(query, cand);   // rr-descending, carries .rerank
             sorted = [...reranked, ...sorted.slice(RERANK_CANDIDATES)];
-        } catch { /* keep RRF order on any reranker error */ }
+        } catch (e) {
+            // Keep the RRF order on any reranker error: timeout, refused connection, HTTP error or bad body.
+            const why = e?.name === 'TimeoutError' ? 'timeout' : e?.name === 'SyntaxError' ? 'bad JSON'
+                : /^(HTTP \d+|malformed results)$/.test(e?.message) ? e.message : 'unreachable';
+            console.warn(`Warning: reranker unavailable (${why}); keeping the RRF order`);
+        }
     }
     return fillQuota(sorted, k, supK, supK);
 }

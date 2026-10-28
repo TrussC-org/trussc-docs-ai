@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { createSymbolChecker, noSymbolFact, relatedCandidates } from './mcp-core.mjs';
+import { createSymbolChecker, noSymbolFact, relatedCandidates, buildRelatedList } from './mcp-core.mjs';
 import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
 import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, JEV_SEARCH_HINT_BELOW, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, HAIKU_EFFORT, HAIKU_THINKING, EFFORT_LEVELS, HAIKU_ADAPTIVE_MAX_TOKENS, transportClass } from './config.mjs';
 import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, RERANK_TIMEOUT_MS, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
@@ -75,7 +75,8 @@ export function leanText(c) {
 export function getByIds(ids) {
     const out = [];
     for (const id of (ids || [])) {
-        const c = chunkById(id);
+        // Normalize here so /get also accepts ids copied from [#id] tags.
+        const c = chunkById(typeof id === 'string' ? id.replace(/^#/, '') : id);
         if (c) out.push({ id: c.id, title: c.title, source: c.source, score: null, rrf: null, link: refLink(c), text: c.text || '' });
     }
     return out;
@@ -307,8 +308,11 @@ async function selectOrFallback(sorted, question, k, supK, opts, roundPools = nu
     const picked = selection.path === 'jev' ? selection.picked : await finalize(ranked, k, supK, question);
     // Preserve the full Jev p order, including cards beyond the min/max picks.
     // Fallback titles retain pre-rerank RRF order. Metadata contains no card text.
+    Object.defineProperty(picked, 'rankedIds', { value: relatedCandidates(ranked).map(c => c.id) });
+    const relatedFor = shown => buildRelatedList({ shown, ranked, corpus: chunks() }).map(({ source, ...c }) => c);
+    Object.defineProperty(picked, 'relatedFor', { value: relatedFor });
     Object.defineProperty(picked, 'search', { value: { missingSymbols: missingSymbols(original),
-        candidates: relatedCandidates(ranked) } });
+        get candidates() { return relatedFor(picked); } } });
     return withRetrieval(picked, info);
 }
 export async function retrieve(question, k = TOP_K, opts = {}) {

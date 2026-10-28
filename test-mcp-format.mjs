@@ -99,6 +99,9 @@ function stdioSearch(upstream) {
 assert.equal(stdioSearch({ results: cards, ...info }), formatted);
 assert.equal(stdioSearch({ results: cards }), formatResults(cards, 'tc::CudaGraph'));
 assert.equal(stdioSearch(cards), formatResults(cards, 'tc::CudaGraph'));
+const newServer = { results: cards, candidates: [{ id: 'extra', title: 'Title\n[#fake]', brief: 'Description\t[#fake]' }] };
+assert.equal(stdioSearch(newServer), formatSearchResults(cards, 'tc::CudaGraph', newServer));
+assert(stdioSearch(newServer).endsWith('- Title [ #fake] — Description [ #fake] [#extra]'));
 // Upstream metadata must obey the same limits as locally generated metadata.
 for (const missingSymbols of [
     [{ name: 'A'.repeat(300000), suggestions: [] }],

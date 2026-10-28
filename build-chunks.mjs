@@ -440,6 +440,21 @@ function exampleApis(src, nameSet) {
     }
     return [...used];
 }
+// Only the first file's leading // block describes the example. Never scan code
+// (including log messages) or later files for prose. addBriefs sanitizes/caps this.
+function exampleBrief(files, apis, boilerplate) {
+    const prose = [];
+    for (const raw of files[0].src.trimStart().split('\n')) {
+        const comment = /^\s*\/\/(.*)$/s.exec(raw);
+        if (!comment) break;
+        const line = briefText(comment[1]);
+        if (!line || /^[-=*_\/\s]+$/.test(line)) continue;
+        const filename = line.replace(/^[-=*_\s]+|[-=*_\s]+$/g, '');
+        if (/^(?:file:\s*)?[\w./\\-]+\.(?:cpp|h|hpp|cc|cxx|glsl)$/i.test(filename)) continue;
+        prose.push(line);
+    }
+    return prose.join(' ') || (apis.length ? `APIs used: ${apis.join(', ')}` : boilerplate);
+}
 // Addon examples: each official addon ships example-*/ dirs whose src/ shows how to
 // actually USE the addon (the physics Mod pattern, joints, etc.) — content README
 // never covers. Ingest them through the SAME shape as core examples (source:'example',
@@ -478,11 +493,13 @@ function chunkAddonExamples(reg, addonDirs, nameSet) {
             const name = e.name.replace(/^example-/, '');
             const label = `${a.name}/${name}`;
             const apis = exampleApis(files.map((f) => f.src).join('\n'), nameSet);
-            const head = [`# ${label}  (${a.name} addon example)`, `A usage example for the ${a.name} addon.`, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
+            const boilerplate = `A usage example for the ${a.name} addon.`;
+            const brief = exampleBrief(files, apis, boilerplate);
+            const head = [`# ${label}  (${a.name} addon example)`, boilerplate, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
             const block = (f) => `// ===== ${f.rel} =====\n\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``;
             const text = `${head}\n\n${files.map(block).join('\n\n')}`;
             const embedTexts = files.map((f) => `${label} (${a.name} addon example) — ${f.rel}\n${f.src}`);
-            chunks.push({ id: 'example:' + label, source: 'example', lang: 'cpp', title: `${label} (addon example)`, text, embedTexts, meta: { group: `${a.name} addon`, addon: a.name, webSupported: false, apis, files: files.map((f) => f.rel) } });
+            chunks.push({ id: 'example:' + label, source: 'example', lang: 'cpp', title: `${label} (addon example)`, text, embedTexts, meta: { group: `${a.name} addon`, addon: a.name, webSupported: false, apis, files: files.map((f) => f.rel), brief } });
         }
     }
     return chunks;
@@ -505,13 +522,15 @@ function chunkExamples(jsonPath, srcRoot, nameSet) {
             if (!files.length) continue;
             const web = it.webSupported !== false;
             const apis = exampleApis(files.map((f) => f.src).join('\n'), nameSet);
-            const head = [`# ${it.name}  (example — ${group})`, `A TrussC example${web ? ' (runs in the web player)' : ''}.`, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
+            const boilerplate = `A TrussC example${web ? ' (runs in the web player)' : ''}.`;
+            const brief = exampleBrief(files, apis, boilerplate);
+            const head = [`# ${it.name}  (example — ${group})`, boilerplate, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
             const block = (f) => `// ===== ${f.rel} =====\n\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``;
             const text = `${head}\n\n${files.map(block).join('\n\n')}`;
             // Per-file embed vectors; the header line carries the example name/group so
             // a file vector also responds to "<name> example" / "<group>" queries.
             const embedTexts = files.map((f) => `${it.name} (example — ${group}) — ${f.rel}\n${f.src}`);
-            chunks.push({ id: 'example:' + it.name, source: 'example', lang: 'cpp', title: `${it.name} (example)`, text, embedTexts, meta: { group, webSupported: web, apis, files: files.map((f) => f.rel) } });
+            chunks.push({ id: 'example:' + it.name, source: 'example', lang: 'cpp', title: `${it.name} (example)`, text, embedTexts, meta: { group, webSupported: web, apis, files: files.map((f) => f.rel), brief } });
         }
     }
     return chunks;
@@ -824,6 +843,61 @@ function rerankRepr(c) {
     return `${c.title}\n${keep.join('\n')}`.slice(0, RERANK_CHARS);
 }
 for (const c of chunks) c.rerankText = rerankRepr(c);
+
+// Bound (output): briefs fit 160 UTF-8 bytes including an ellipsis; overflow cuts at a character boundary.
+const BRIEF_BYTES = 160;
+function briefText(value) {
+    return String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' ')
+        .replace(/\[#/g, '[ #').replace(/\s+/g, ' ').trim();
+}
+function cutBrief(value) {
+    const text = briefText(value);
+    if (Buffer.byteLength(text) <= BRIEF_BYTES) return text;
+    let out = '', used = 0;
+    for (const ch of text) {
+        const bytes = Buffer.byteLength(ch);
+        if (used + bytes > BRIEF_BYTES - Buffer.byteLength('…')) break;
+        out += ch; used += bytes;
+    }
+    return out.trimEnd() + '…';
+}
+function extractBrief(c) {
+    let fence = null;
+    for (const raw of (c.text || '').split('\n')) {
+        const t = raw.trim();
+        const mark = /^(`{3,}|~{3,})/.exec(t)?.[1];
+        if (mark) {
+            if (!fence) fence = mark;
+            else if (mark[0] === fence[0] && mark.length >= fence.length && new RegExp('^' + mark[0] + '+\\s*$').test(t)) fence = null;
+            continue;
+        }
+        if (fence || !t || t === c.title || t === c.meta?.addon || /^#|^\[|^!\[|^\(|^\||^>|^\/\//.test(t)) continue;
+        if (/^(?:keywords|openFrameworks|Related|Author|Add to a project|APIs used|Methods|Properties|Static methods|Nested types|Examples|Values|Value|Category|Source|Files|Platform):/i.test(t)) continue;
+        if (/^[\w /()-]+:$/.test(t) || /^[-=]{3,}$/.test(t)) continue;
+        // Generated signatures are unfenced, indented C++, after a section label.
+        if (/^\s{2,}\S/.test(raw) || /^(?:[\w:*&<>]+\s+)+[\w:~]+\(.*\)[; const]*$/.test(t)) continue;
+        const prose = briefText(t.replace(/^[-*]\s+/, ''));
+        if (prose) return cutBrief(prose);
+    }
+    return cutBrief(c.title) || cutBrief(c.id) || 'Documentation card';
+}
+function addBriefs(cards) {
+    const byId = new Map(cards.map(c => [c.id, c]));
+    const done = new WeakSet();
+    function fill(c, visiting = new Set()) {
+        if (done.has(c)) return c.meta.brief;
+        if (visiting.has(c.id)) return extractBrief(c);
+        visiting.add(c.id);
+        const base = byId.get('symbol:' + c.meta?.base);
+        const brief = base ? fill(base, visiting) :
+            (c.source === 'example' && cutBrief(c.meta?.brief)) || extractBrief(c);
+        c.meta = { ...c.meta, brief };
+        done.add(c); visiting.delete(c.id);
+        return brief;
+    }
+    for (const c of cards) fill(c);
+}
+addBriefs(chunks);
 
 // Ids are how trussc_get, pinning and [[links]] find a chunk; a duplicate makes all
 // but the first unreachable. Say so loudly rather than ship it silently.

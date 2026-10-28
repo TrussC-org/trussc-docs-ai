@@ -309,6 +309,17 @@ per-IP window; missing credentials make it and the gate fail clearly. The paired
 comparison is unchanged. A first check after changing retrieval may compare
 different selected cards against the accepted retrieval baseline.
 
+### Related-list eval
+
+Run `eval/related/dump.mjs <questions.json> <out.json> --jobs 3 [--resume]` only
+from the docs-ai shell holding the retrieval keys. It runs the real MCP search
+path, forces stats off, and records only question/card ids and retrieval path.
+Then run `eval/related/coverage.mjs <questions.json> <dump.json> [--grid JSON]`
+offline against the same corpus to compare related-list mixes and list bytes.
+Tune on the improvement set; use the held-out set only once. Keep question files
+and run outputs outside the repo. See [related-list eval](eval/related/README.md)
+for schemas, grid controls and source order.
+
 ### Answer eval
 
 Run these commands **only from the docs-ai shell holding the keys**, with the

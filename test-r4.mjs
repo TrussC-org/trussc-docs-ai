@@ -1236,7 +1236,9 @@ test('r6 actual addon builder initializes within a linear scaling bound', async 
         mkdirSync(srcDir, { recursive: true });
         const context = { ADDON_EXAMPLES: 'all', readdirSync: fs.readdirSync, lstatSync: fs.lstatSync,
             readFileSync, regularPath: (...parts) => join(...parts), exampleApis: () => [] };
-        vm.runInNewContext(builderSource.slice(builderSource.indexOf('function chunkAddonExamples('),
+        vm.runInNewContext(builderSource.slice(builderSource.indexOf('function briefText('), builderSource.indexOf('function cutBrief(')) +
+            builderSource.slice(builderSource.indexOf('function exampleBrief('), builderSource.indexOf('// Addon examples:')) +
+            builderSource.slice(builderSource.indexOf('function chunkAddonExamples('),
             builderSource.indexOf('function chunkExamples(')) + '\nglobalThis.build = chunkAddonExamples;', context);
         const build = count => {
             const source = 'const char* help = R"md(\n```\n' + '`/*` '.repeat(count) + '\n```\n)md";\n';
@@ -1463,9 +1465,10 @@ for (const exists of [.29, .3, .8, null]) test(`MCP coverage and related pool or
             assert.equal(result.status, 200, result.data);
             const search = JSON.parse(result.data);
             assert.equal(search.results.length, 4, 'minimum four cards preserved');
-            assert.equal(search.candidates.length, 35);
+            assert.equal(search.candidates.length, 10);
             assert(search.candidates.every(c => Object.keys(c).sort().join(',') === 'id,title'));
-            assert.deepEqual(search.candidates.map(c => c.id), (exists === null ? corpus : [...corpus].reverse()).map(c => c.id));
+            assert.deepEqual(search.candidates.map(c => c.id), (exists === null ? corpus : [...corpus].reverse())
+                .filter(c => !search.results.some(shown => shown.id === c.id)).slice(0, 10).map(c => c.id));
             if (exists !== null) assert(search.results.every(c => typeof c.p === 'number'));
             const rpc = await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: 'facts', k: 4 } } });
             const output = JSON.parse(rpc.data).result.content[0].text;
@@ -1474,11 +1477,81 @@ for (const exists of [.29, .3, .8, null]) test(`MCP coverage and related pool or
             const related = output.split('Other possibly related:\n')[1].split('\n');
             const ids = related.map(line => line.match(/\[#(.+)\]/)[1]);
             assert.deepEqual(ids, search.candidates.filter(c => !search.results.some(shown => shown.id === c.id)).slice(0, 16).map(c => c.id));
-            assert.equal(ids.length, 16);
-            assert.equal(new Set(ids).size, 16);
+            assert.equal(ids.length, 10);
+            assert.equal(new Set(ids).size, 10);
             assert(Buffer.byteLength(output) <= 262144);
             assert.equal(requests.filter(url => url.endsWith('/systemone')).length, exists === null ? 0 : 2);
         } finally { globalThis.fetch = savedFetch; }
+    });
+});
+test('stdio proxy and HTTP MCP build related lists from the actual k shown cards', async () => {
+    const corpus = Array.from({ length: 24 }, (_, i) => ({ ...baseCard, id: `symbol:card${i}`, title: `card ${i}`, text: `facts ${i}`,
+        ...(i === 0 ? { meta: { brief: 'Overview.', related: ['card23'] }, near: ['symbol:card22'] } : {}) }));
+    await fixture({ corpus, exists: .9, env: { JEV_PICK: 'fixed', JEV_PICK_K: '16' } }, async ({ request }) => {
+        const plain = JSON.parse((await request('/search', { question: 'facts', k: 8 })).data);
+        assert.equal(plain.results.length, 16);
+        assert(!plain.candidates.some(c => plain.results.some(shown => shown.id === c.id)));
+        const proxy = JSON.parse((await request('/search', { question: 'facts', k: 8 }, { 'user-agent': 'trussc-mcp-stdio/0.1.0' })).data);
+        assert.equal(proxy.results.length, 8);
+        assert.equal(proxy.candidates[0].id, 'symbol:card8');
+        assert(proxy.candidates.some(c => c.id === 'symbol:card23'));
+        assert(proxy.candidates.some(c => c.id === 'symbol:card22'));
+        const rpc = JSON.parse((await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: 'facts', k: 8 } } })).data);
+        const { formatSearchResults } = await import('./mcp-core.mjs');
+        assert.equal(rpc.result.content[0].text, formatSearchResults(proxy.results, 'facts', proxy));
+    });
+});
+test('get accepts one copied tag prefix in dispatch and /get, preserving received ids in misses', async () => {
+    const corpus = ['symbol:Sound::stop', 'x', '#literal', 'addon:network#usage'].map(id => ({ ...baseCard, id }));
+    await fixture({ corpus }, async ({ request, getByIds, requests }) => {
+        const { dispatch } = await import('./mcp-core.mjs');
+        const rpc = ids => ({ id: 1, method: 'tools/call', params: { name: 'trussc_get', arguments: { ids } } });
+        const call = async ids => [
+            await dispatch(rpc(ids), { get: getByIds }),
+            JSON.parse((await request('/mcp', rpc(ids))).data),
+        ];
+        for (const [received, expected] of [
+            ['#symbol:Sound::stop', 'symbol:Sound::stop'],
+            ['symbol:Sound::stop', 'symbol:Sound::stop'],
+            ['##literal', '#literal'],
+            ['#addon:network#usage', 'addon:network#usage'],
+        ]) {
+            const response = await request('/get', { ids: [received] });
+            assert.equal(response.status, 200, response.data);
+            assert.deepEqual(JSON.parse(response.data).results.map(c => c.id), [expected], received);
+            for (const reply of await call([received])) {
+                assert(!reply.result.isError);
+                assert(reply.result.content[0].text.includes(`[#${expected}]`), received);
+            }
+        }
+        const ids = [' \t##x\n ', '##x', '##symbol:Sound::stop', '#missing',
+            ' symbol:Sound::stop ', ' \t#symbol:Sound::stop\n ', '#symbol:Sound::stop ', '# symbol:Sound::stop'];
+        assert.deepEqual(JSON.parse((await request('/get', { ids })).data).results, []);
+        for (const reply of await call(ids))
+            assert.equal(reply.result.content[0].text, `No chunks found for: ${ids.join(', ')}`);
+        assert.deepEqual(requests, [], 'id lookup requires no service calls');
+    });
+});
+test('get keeps string validation and the 20-id cap before normalization', async () => {
+    const corpus = Array.from({ length: 21 }, (_, i) => ({ ...baseCard, id: `symbol:card${i}` }));
+    await fixture({ corpus }, async ({ request, getByIds }) => {
+        const { dispatch } = await import('./mcp-core.mjs');
+        const { formatResults } = await import('./mcp-core.mjs');
+        const ids = [null, 42, {}, ...corpus.map(c => `#${c.id}`)];
+        const expectedIds = corpus.slice(0, 20).map(c => c.id);
+        const response = await request('/get', { ids });
+        assert.equal(response.status, 200, response.data);
+        assert.deepEqual(JSON.parse(response.data).results.map(c => c.id), expectedIds);
+        const rpc = { id: 1, method: 'tools/call', params: { name: 'trussc_get', arguments: { ids } } };
+        const received = ids.filter(id => typeof id === 'string').slice(0, 20);
+        for (const reply of [await dispatch(rpc, { get: getByIds }), JSON.parse((await request('/mcp', rpc)).data)])
+            assert.equal(reply.result.content[0].text, formatResults(getByIds(expectedIds), received.join(', ')));
+        for (const invalid of [undefined, 'symbol:card0', [null, 42, {}]]) {
+            assert.deepEqual(JSON.parse((await request('/get', { ids: invalid })).data).results, []);
+            const reply = await dispatch({ ...rpc, params: { ...rpc.params, arguments: { ids: invalid } } }, { get: getByIds });
+            assert.equal(reply.result.isError, true);
+            assert.equal(reply.result.content[0].text, 'error: no ids');
+        }
     });
 });
 let failures = 0;

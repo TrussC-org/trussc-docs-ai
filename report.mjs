@@ -1,4 +1,4 @@
-// Summarize monthly usage logs (STATS_DIR/YYYY-MM.jsonl). No deps — just reads the JSONL.
+// Summarize daily and legacy monthly usage logs in STATS_DIR. No deps — just reads the JSONL.
 //   node report.mjs                 # all-time
 //   node report.mjs --include-debug # include debug requests
 //   node report.mjs 7              # last 7 days
@@ -11,6 +11,7 @@ import { Transform } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { STATS_DIR } from './config.mjs';
+import { statsFileDate } from './stats.mjs';
 
 const args = process.argv.slice(2);
 let live = new URL('./stats.jsonl', import.meta.url).pathname, archive = STATS_DIR, days = 0;
@@ -26,7 +27,7 @@ for (let i = 0; i < args.length; i++) {
 const cutoff = days > 0 ? Date.now() - days * 86400000 : -Infinity;
 if (days > 0 && !Number.isFinite(new Date(cutoff).getTime())) throw new Error('date range out of bounds');
 // Include one earlier month for archives created by the former external rotation.
-// Direct monthly writes always use the row timestamp's UTC month.
+// Direct writes always use the row timestamp's UTC day.
 const cutoffMonth = days > 0 ? new Date(Date.UTC(new Date(cutoff).getUTCFullYear(), new Date(cutoff).getUTCMonth() - 1, 1)).toISOString().slice(0, 7) : '';
 const includeDebug = args.includes('--include-debug');
 const exclude = new Set((process.env.EXCLUDE_IP || '').split(',').map(s => s.trim()).filter(Boolean));
@@ -117,12 +118,12 @@ async function read(file) {
   } finally { lines.close(); input.destroy(); guarded.destroy(); }
 }
 
-// Stream directory entries too: do not retain a list of every monthly file.
+// Stream directory entries too: do not retain a list of every stats file.
 // Keep the former rotation's month-selection compatibility and filter by row ts.
 if (existsSync(archive)) {
   const directory = await opendir(archive);
   for await (const entry of directory) {
-    if (/^\d{4}-(?:0[1-9]|1[0-2])\.jsonl$/.test(entry.name) && entry.name.slice(0, 7) >= cutoffMonth) {
+    if (statsFileDate(entry.name) && entry.name.slice(0, 7) >= cutoffMonth) {
       await read(join(archive, entry.name));
     }
   }

@@ -15,15 +15,20 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { answer, answerStream, retrieve, retrieveQueries, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
 import { dispatch as mcpDispatch, searchResponse, searchInput } from './mcp-core.mjs';
-import { WIDGET_FILE, MAX_BODY_BYTES } from './config.mjs';
+import { WIDGET_FILE, MAX_BODY_BYTES, STATS } from './config.mjs';
 import { publicDebug } from './debug.mjs';
-import { logStat, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
+import { logStat, pruneStats, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const DEMO = fileURLToPath(new URL('./demo.html', import.meta.url));
 
 chunks(); // warm-load the embeddings once at startup
+if (STATS) {
+    await pruneStats();
+    // Bound (retention cadence): prune every 6 hours; overdue eligible files wait until the next run; the timer does not keep the process alive.
+    setInterval(() => pruneStats(), 6 * 60 * 60 * 1000).unref();
+}
 
 // Tiny per-IP sliding-window rate limit (app-level defense; Cloudflare adds edge
 // limiting on top). Behind a tunnel the real client IP is in cf-connecting-ip.

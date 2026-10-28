@@ -156,23 +156,26 @@ prompt, and unset it afterwards. Do not put the value in history or the reposito
 
 ## Monthly stats deployment
 
-The API writes directly to `STATS_DIR/YYYY-MM.jsonl`, using each row's `ts` UTC
-month. `STATS_DIR` is defined in `config.mjs`; its default is the worktree's sibling
+This records the earlier stats-directory switch. Existing directory-based
+installations only need the [daily migration step](#monthly-to-daily-stats-migration).
+
+The API writes directly to `STATS_DIR/YYYY-MM-DD.jsonl`, using each row's `ts` UTC
+day. `STATS_DIR` is defined in `config.mjs`; its default is the worktree's sibling
 `../docs-ai-stats/` (`/home/toru/TrussC-dev/docs-ai-stats` in deployment).
 `STATS_LOG` is removed. The directory holds stats only: nothing in it is executed
 or sourced. The operator creates it before the switch with mode `0700`; new
-monthly files use mode `0600`. Missing directories and failed appends drop stats
-with one warning per process and do not fail requests. No rotation timer was
-installed; the former script and unit templates are removed.
+daily files use mode `0600`. Missing directories and failed appends drop stats
+with one warning per process and do not fail requests. The former external
+rotation script and unit templates are removed; retention now runs inside the API.
 
 **Apply the pull and service unit drop-in together.** The sandbox change is
 approved by secaudit, which prepares the drop-in and rollback script separately.
 The drop-in replaces the legacy `stats.jsonl` bind with
 `BindPaths=-/home/toru/TrussC-dev/docs-ai-stats` and adds
 `ReadWritePaths=/home/toru/TrussC-dev/docs-ai-stats`, `UMask=0077` and
-`LimitFSIZE=1G`. `ProtectHome=tmpfs` stays. The only new capability is creating
-`YYYY-MM.jsonl` in `STATS_DIR`; no other read/write access, destination or service
-environment variable is added. The repository does not provide the drop-in or
+`LimitFSIZE=1G`. `ProtectHome=tmpfs` stays. The existing directory mount permits
+creating and deleting stats files in `STATS_DIR`; no additional read/write access
+or destination is needed for retention. The repository does not provide the drop-in or
 rollback script.
 
 Right after the switch, ask runs a one-time migration outside the service:
@@ -185,13 +188,29 @@ counting both the source and its monthly copies. No migration is run by the API.
 
 ```bash
 node report.mjs 7
-STATS_DIR=/path/to/monthly node report.mjs
-node report.mjs --stats-dir /path/to/monthly --live /path/to/stats.jsonl
+STATS_DIR=/path/to/stats node report.mjs
+node report.mjs --stats-dir /path/to/stats --live /path/to/stats.jsonl
 ```
 
 Run reporting outside the API sandbox. `--archive-dir` remains an alias for
-`--stats-dir`. Monthly files and a missing legacy file are supported. Reporting
-streams selected months and applies row filters before aggregation. Oversized
+`--stats-dir`. Daily and legacy monthly files and a missing legacy file are
+supported. Reporting streams selected months and applies row filters before aggregation. Oversized
 lines are skipped/counted, and bounded dimensions fold excess keys into `other`;
 overflow diagnostics explain incomplete distinct counts or unavailable latency
 percentiles. See [STATS.md](../STATS.md) for the schema and exact limits.
+
+## Monthly-to-daily stats migration
+
+With the service stopped, run `node tools/split-stats.mjs /path/to/stats --dry-run`,
+then `node tools/split-stats.mjs /path/to/stats` as the operator outside the API
+sandbox. Check the counts and zero failures before restarting. The tool merges
+existing daily files, fsyncs/renames mode-0600 outputs and verifies line totals
+before deleting each monthly source. Raw line bytes survive sorting and merging
+(LF/CRLF terminators become LF), preserving dashboard raw-line hash deduplication.
+On failure the source stays; reconcile any
+already-written daily outputs before retrying or reporting to avoid duplicates.
+See [STATS.md](../STATS.md#one-time-monthly-to-daily-migration) for odd rows and
+failure behaviour. Startup and six-hour pruning then apply the default 183-day
+retention, keeping the cutoff day; legacy months stay until their last day is
+older than the cutoff. `STATS=0` disables pruning. No unit, sandbox or environment
+file changes are needed; maintenance uses the existing stats directory only.

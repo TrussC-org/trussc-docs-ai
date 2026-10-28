@@ -11,9 +11,9 @@ import { spawnSync } from 'node:child_process';
 const dir = mkdtempSync(join(tmpdir(), 'docsai-stats-'));
 const savedEnv = { ...process.env };
 try {
-    const archive = join(dir, 'monthly with spaces');
+    const archive = join(dir, 'daily with spaces');
     mkdirSync(archive);
-    const live = join(archive, new Date().toISOString().slice(0, 7) + '.jsonl');
+    const live = join(archive, new Date().toISOString().slice(0, 10) + '.jsonl');
     Object.assign(process.env, { STATS: '1', STATS_DIR: archive, STATS_SALT: 'synthetic-test-salt', RATE_MAX: '1000' });
     for (const file of ['stats.mjs', 'config.mjs', 'server.mjs', 'mcp-core.mjs', 'debug.mjs']) {
         writeFileSync(join(dir, file), readFileSync(new URL(file, import.meta.url)));
@@ -91,7 +91,23 @@ export async function* answerStream(query) {
     assert.equal(pipelineStat({ haikuCalls:1, thinkingTokens:'included in outputTokens' }).haiku.thinking, null);
     assert.equal(pipelineStat({ retrievals:[{jevTokens:1}, {jevTokens:2}] }).jevTokens, 3);
     assert.equal(pipelineStat({}).jevTokens, null);
-    const { server } = await import(pathToFileURL(join(dir, 'server.mjs')));
+    const expired = join(archive, '2000-01-01.jsonl');
+    writeFileSync(expired, 'synthetic expired row\n');
+    const interval = globalThis.setInterval;
+    let timer, unrefCalled = false, server;
+    globalThis.setInterval = (callback, delay) => {
+        assert.equal(timer, undefined, 'only one retention timer');
+        timer = { callback, delay };
+        return { unref() { unrefCalled = true; } };
+    };
+    try { ({ server } = await import(pathToFileURL(join(dir, 'server.mjs')))); }
+    finally { globalThis.setInterval = interval; }
+    assert.equal(timer.delay, 6 * 60 * 60 * 1000);
+    assert(unrefCalled, 'retention timer never keeps the server alive');
+    assert(!existsSync(expired), 'startup prunes expired files');
+    writeFileSync(expired, 'synthetic expired row\n');
+    assert.equal((await timer.callback()).deleted, 1);
+    assert(!existsSync(expired), 'timer callback prunes again');
     const rows = () => existsSync(live) ? readFileSync(live, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
     async function request(path, body, headers = {}, logged = true, remoteAddress = '192.0.2.10') {
         const before = rows().length;
@@ -232,6 +248,9 @@ export async function* answerStream(query) {
             assert.equal(response.status, 200);
         }
         assert.equal(warnings.length, 1);
+        const pruned = await timer.callback();
+        assert.equal(pruned.failures.directory, 1);
+        assert.equal((await request('/get', { ids: ['one'] }, {}, false)).response.status, 200);
         assert(!existsSync(archive), 'logger never creates a directory');
     } finally { console.warn = warn; }
 
@@ -243,35 +262,36 @@ export async function* answerStream(query) {
         };
     }
     try {
-        // UTC year/month boundary, including the final millisecond of a month.
+        // UTC midnight boundaries, including month/year and local-time offsets.
         at('2025-12-31T23:59:59.999Z'); logStat({ ep: 'ask', q: 'December' });
         at('2026-01-01T00:00:00Z'); logStat({ ep: 'mcp', tool: 'trussc_get', client: 'claude' });
         at('2026-01-01T09:00:00+09:00'); logStat({ ep: 'search', q: 'January' });
+        at('2026-01-02T00:00:00Z'); logStat({ ep: 'search', q: 'Next day' });
         const files = readdirSync(archive).sort();
-        assert.deepEqual(files, ['2025-12.jsonl', '2026-01.jsonl']);
+        assert.deepEqual(files, ['2025-12-31.jsonl', '2026-01-01.jsonl', '2026-01-02.jsonl']);
         for (const name of files) {
-            assert.match(name, /^\d{4}-\d{2}\.jsonl$/);
+            assert.match(name, /^\d{4}-\d{2}-\d{2}\.jsonl$/);
             assert.equal(statSync(join(archive, name)).mode & 0o777, 0o600);
             const lines = readFileSync(join(archive, name), 'utf8').trim().split('\n');
             for (const line of lines) {
                 const row = JSON.parse(line);
-                assert.equal(row.ts.slice(0, 7) + '.jsonl', name);
+                assert.equal(row.ts.slice(0, 10) + '.jsonl', name);
                 assert.equal(row.net, null, 'the writer supplies net even without request metadata');
             }
         }
-        assert.equal(readFileSync(join(archive, '2026-01.jsonl'), 'utf8').trim().split('\n').length, 2);
+        assert.equal(readFileSync(join(archive, '2026-01-01.jsonl'), 'utf8').trim().split('\n').length, 2);
         // Expanded ISO years must never create a name outside the allowed pattern.
         at('+010000-01-01T00:00:00Z'); assert.doesNotThrow(() => logStat({ ep: 'get' }));
         assert.deepEqual(readdirSync(archive).sort(), files);
         // Refuse a symlink without changing its target or replacing the link.
         const target = join(dir, 'target'); writeFileSync(target, 'unchanged');
-        const link = join(archive, '2026-02.jsonl'); symlinkSync(target, link);
+        const link = join(archive, '2026-02-01.jsonl'); symlinkSync(target, link);
         at('2026-02-01T00:00:00Z'); assert.doesNotThrow(() => logStat({ ep: 'get' }));
         assert.equal(readFileSync(target, 'utf8'), 'unchanged'); rmSync(link);
         // Failed opens also leave requests usable; existing non-files are refused.
         mkdirSync(link); assert.doesNotThrow(() => logStat({ ep: 'get' })); rmSync(link, { recursive: true });
     } finally { globalThis.Date = RealDate; process.umask(oldUmask); }
-    console.log('PASS UTC month boundary, strict filenames, append, mode 0600 under umask 0, symlink refusal, missing directory and one warning');
+    console.log('PASS UTC day/month/year boundaries, strict filenames, append, mode 0600 under umask 0, symlink refusal, missing directory and one warning');
 
     function report(args = [], statsDir = archive) {
         const out = openSync(join(dir, 'report.out'), 'w'), err = openSync(join(dir, 'report.err'), 'w');
@@ -288,10 +308,10 @@ export async function* answerStream(query) {
         return readFileSync(join(dir, 'report.out'), 'utf8');
     }
     const reportOutput = report();
-    assert.match(reportOutput, /\(3 requests,/);
+    assert.match(reportOutput, /\(4 requests,/);
     for (const label of ['by endpoint:', 'by tool:', 'by client:', 'by day:', 'ask', 'search', 'mcp', 'trussc_get', 'claude', '2025-12-31', '2026-01-01']) assert(reportOutput.includes(label), label);
-    assert.match(report(['--archive-dir', archive], join(dir, 'absent')), /\(3 requests,/);
-    assert.match(report(['--stats-dir', archive], join(dir, 'absent')), /\(3 requests,/);
+    assert.match(report(['--archive-dir', archive], join(dir, 'absent')), /\(4 requests,/);
+    assert.match(report(['--stats-dir', archive], join(dir, 'absent')), /\(4 requests,/);
     assert.match(report([], join(dir, 'absent')), /no requests/);
     console.log('PASS report reads STATS_DIR across months with missing legacy file, directory aliases and absent inputs');
 } finally {

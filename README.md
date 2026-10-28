@@ -569,13 +569,14 @@ backups before pulling if both migrations apply.
 
 ## Stats
 
-One JSON line per request → `STATS_DIR/YYYY-MM.jsonl`, using the UTC month of
+One JSON line per request → `STATS_DIR/YYYY-MM-DD.jsonl`, using the UTC day of
 the row's `ts`. `STATS_DIR` defaults to the worktree's sibling `../docs-ai-stats/`
 and replaces `STATS_LOG`. The directory must already exist; new files use mode
 `0600` and refuse symlinks. Failed appends drop the row and warn once per process.
 See [STATS.md](STATS.md)
 for the common endpoint/client/token schema, retained text fields, examples,
-direct monthly writes and streaming monthly/legacy reporting. Existing details:
+direct daily writes and streaming daily/monthly/legacy reporting. Retention
+defaults to 183 days, pruned at startup and every six hours. Existing details:
 question, hashed IP, latency,
 `corrected`, suggested APIs + category, conversation id. Pipeline fields include
 `idOnlyCards` (per-round counts), `idOnlyCardsTotal`, `estInputTokens` (one number per Haiku call),
@@ -584,10 +585,11 @@ question, hashed IP, latency,
 Debug request rows carry `debug:true`; `node report.mjs [days]` excludes them by
 default. Pass `--include-debug` to include them. The report reads `STATS_DIR` plus
 an optional legacy `stats.jsonl`; a missing legacy file is OK. `--archive-dir` remains an alias for `--stats-dir`.
-Apply the service unit drop-in together with the pull; secaudit prepares the
-drop-in and rollback script. The directory holds stats only; nothing in it is
+The earlier stats-directory switch required a service unit drop-in; existing
+directory-based installations need no further sandbox change for retention.
+The directory holds stats only; nothing in it is
 executed or sourced. See [the deploy note](deploy/DEPLOY.md#monthly-stats-deployment)
-for sandbox settings and one-time migration. The report aggregates
+for sandbox settings and the [daily migration step](deploy/DEPLOY.md#monthly-to-daily-stats-migration). The report aggregates
 (volume by endpoint/tool/client/day, distinct visitors, p50/p95, top questions/APIs/categories).
 
 Offline model/effort, thinking-off and base/filler/extended-thinking comparisons: see [the variant runner](eval/answers/README.md), including per-call usage and latency measurements. These internal options are unavailable over HTTP. The production model default is Haiku 5.5 at effort low; it uses adaptive thinking by default and rejects manual thinking budgets. Haiku 5.5 also gets one extra system-prompt rule allowing clearly implied facts when the answer names the evidence (it otherwise declines to state what the cards only imply); Haiku 4.5's prompt is unchanged.

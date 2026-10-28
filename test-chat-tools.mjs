@@ -61,7 +61,7 @@ async function fixture(run, options = {}) {
             const res = new EventEmitter(); Object.assign(res, { status: 200, data: '', setHeader() {}, writeHead(s) { this.status = s; }, write(s) { this.data += s; }, end(s = '') { this.data += s; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
-        const rows = () => readFileSync(join(dir, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        const rows = () => readFileSync(join(dir, new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
         await run({ ...rag, dir, request, rows, haiku, jev, embeds, reranks, stateTokens, perQuestionTokens,
             generate: fn => { generate = fn; } });
     } finally {

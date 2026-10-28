@@ -49,6 +49,7 @@ export const Buffer = new Proxy(Native, { get(target, name) {
 export const chunks = () => [];
 export const refLink = () => ''; export const leanText = () => '';
 export const getByIds = () => []; export const retrievalInfo = () => ({});
+export const retrieveQueries = (queries, ...args) => retrieve(queries.join(' '), ...args);
 export const retrieve = async () => [];
 export const answer = async () => ({text:'ok', retrieved:[], links:[]});
 export async function* answerStream() { yield {type:'final'}; }

@@ -92,7 +92,7 @@ try {
         if (tool) {
             // Text accompanying a tool call must never reach the user.
             content += frames({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'MUST NOT LEAK' } });
-            content += frames({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: `tool${haikuCalls.length}`, name: mode === 'invalid-name' ? 'other' : 'search_more', input: {} } });
+            content += frames({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: `tool${haikuCalls.length}`, name: mode === 'invalid-name' ? 'other' : 'trussc_search', input: {} } });
             const input = { message: mode === 'invalid-message' ? 'x'.repeat(301) : '調べます', queries: mode === 'invalid' ? [] : mode === 'invalid-count' ? ['a','b','c','d'] : mode === 'invalid-query' ? ['x'.repeat(201)] : ['drawCircle'] };
             const json = mode === 'invalid-json' ? '{broken' : JSON.stringify(input);
             for (const partial_json of [json.slice(0, 5), json.slice(5)]) content += frames({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json } });
@@ -254,7 +254,7 @@ async function testRoundPools() {
             haiku.push(req);
             const frame = value => `data: ${JSON.stringify(value)}\n\n`;
             return new Response((haiku.length === 1
-                ? frame({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'gap-tool', name: 'search_more', input: { message, queries } } })
+                ? frame({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'gap-tool', name: 'trussc_search', input: { message, queries } } })
                 : frame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Use [[drawCircle]].\n\n@@USED: A:25, B:0, symbol:drawCircle' } }))
                 + frame({ type: 'message_stop' }));
         };
@@ -265,13 +265,13 @@ async function testRoundPools() {
         assert.equal(jev.length, 2, 'one Jev call per round');
         assert.deepEqual(Object.keys(jev[0].state).sort(), ['cards', 'question']);
         assert.equal(jev[1].state.question, 'circle');
-        assert.deepEqual(jev[1].state.search_more, searchMore);
+        assert.deepEqual(jev[1].state.trussc_search, searchMore);
         assert(jev[0].state.cards.some(card => card.text.includes('ONLY_ROUND_ONE')));
         assert(!jev[1].state.cards.some(card => card.text.includes('ONLY_ROUND_ONE')), 'no carried picks in gap state');
         assert(jev[1].state.cards.some(card => card.text.startsWith('B_CARD')), 'query B survives many strong A matches');
         assert(!JSON.stringify(jev[1]).includes('HIDDEN_LUA'));
         assert(!JSON.stringify(jev[1]).includes('INHERITED_STUB'));
-        assert(jev[1].questions.c1.instructions.includes('state.search_more'));
+        assert(jev[1].questions.c1.instructions.includes('state.trussc_search'));
         assert(stateTokens('circle', result.traces[1].picked, undefined, searchMore) <= 28000);
         assert(JSON.stringify(jev[1].state).length * .4 <= 28000);
         assert(result.traces[1].info.poolSize === jev[1].state.cards.length);
@@ -280,7 +280,7 @@ async function testRoundPools() {
         assert(result.text.includes('/reference/'));
         assert.deepEqual(haiku[1].messages[0], haiku[0].messages[0], 'round-1 user turn stays intact');
         assert(!haiku[1].tools);
-        assert.deepEqual(haiku[1].messages[1], { role: 'assistant', content: [{ type: 'tool_use', id: 'gap-tool', name: 'search_more', input: searchMore }] });
+        assert.deepEqual(haiku[1].messages[1], { role: 'assistant', content: [{ type: 'tool_use', id: 'gap-tool', name: 'trussc_search', input: searchMore }] });
         const toolResult = haiku[1].messages[2].content[0];
         assert.equal(toolResult.type, 'tool_result'); assert.equal(toolResult.tool_use_id, 'gap-tool');
         assert(toolResult.content.includes('B_CARD') && toolResult.content.includes('cover about 20% of what is needed'));
@@ -335,7 +335,7 @@ function assertTrace(debug, rounds) {
     const keys = (value, expected) => assert.deepEqual(Object.keys(value).sort(), expected.slice().sort());
     keys(debug, ['haikuCalls', 'idOnlyCardsTotal', 'rounds']); assert.equal(typeof debug.haikuCalls, 'number'); assert.equal(debug.rounds.length, rounds);
     for (const round of debug.rounds) {
-        keys(round, ['idOnlyCards', 'queries', 'poolSize', 'picked', 'exists', 'hintShown', 'hintFollowed', 'path', 'haiku', 'jev', 'message']);
+        keys(round, ['idOnlyCards', 'queries', 'poolSize', 'picked', 'exists', 'hintShown', 'hintFollowed', 'path', 'haiku', 'jev', 'message', ...(round.tool ? ['tool'] : [])]);
         keys(round.haiku, ['estInputTokens', 'ms', 'inputTokens', 'inputTokensTotal', 'outputTokens']);
         keys(round.jev, ['ms', 'tokens']);
         assert(['jev', 'fallback'].includes(round.path));

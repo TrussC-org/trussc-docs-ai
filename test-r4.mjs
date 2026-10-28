@@ -25,7 +25,7 @@ const est = req => JSON.stringify(req).length * (/^claude-haiku-5-5(-|$)/.test(r
 const frame = value => `data: ${JSON.stringify(value)}\n\n`;
 const stop = frame({ type: 'message_stop' });
 const text = value => frame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: value } });
-const tool = (id, input = { message: 'Look again', queries: ['gap'] }) => frame({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id, name: 'search_more', input } });
+const tool = (id, input = { message: 'Look again', queries: ['gap'] }) => frame({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id, name: 'trussc_search', input } });
 const baseCard = { id: 'symbol:drawCircle', title: 'drawCircle', source: 'reference', text: 'drawCircle draws a circle.', meta: { kind: 'function' }, vector: [1, 0] };
 async function fixture(options, test) {
     const env = { ...process.env }, savedFetch = globalThis.fetch;
@@ -89,7 +89,7 @@ for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial an
             const hintShown = exists !== null && exists < .7;
             assert.equal(prompt.includes('An independent relevance checker estimates'), exists !== null);
             if (exists !== null) assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed to answer every part of the question.`));
-            const recommendation = "Instead of answering now, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).";
+            const recommendation = "Instead of answering now, call trussc_search to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).";
             assert.equal(prompt.includes(recommendation), hintShown);
             assert(!prompt.includes('answer-exists probability'));
             if (i) assert(prompt.startsWith('Search completed.'));
@@ -112,7 +112,7 @@ test('configured hint threshold is honoured', async () => {
             const response = await request('/ask'); assert.equal(response.status, 200);
             const prompt = calls[0].messages.at(-1).content;
             assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
-            assert.equal(prompt.includes('Instead of answering now, call search_more'), hintShown);
+            assert.equal(prompt.includes('Instead of answering now, call trussc_search'), hintShown);
             assert.equal(JSON.parse(response.data).debug.rounds[0].hintShown, hintShown);
             assert.equal(rows().at(-1).retrievals[0].hintShown, hintShown);
         });
@@ -124,9 +124,9 @@ test('off-topic answer can decline a low-coverage search recommendation', async 
         assert.equal(response.status, 200);
         const result = JSON.parse(response.data), stat = rows().at(-1);
         assert.equal(result.answer, 'Hello!'); assert.equal(calls.length, 1);
-        assert(calls[0].tools, 'Haiku must be free to choose search_more');
+        assert(calls[0].tools, 'Haiku must be free to choose trussc_search');
         const messageSchema = calls[0].tools[0].input_schema.properties.message;
-        assert(messageSchema.description.startsWith('One short line shown to the user while you search, written in the same language as the user\'s question (an English question gets English, Japanese gets Japanese)'));
+        assert.equal(messageSchema.description, "one short line shown to the user while you search, in the user's language");
         assert.equal(messageSchema.maxLength, 300);
         assert.equal(result.debug.rounds.length, 1); assert.equal(stat.rounds, 1);
         for (const record of [result.debug.rounds[0], stat.retrievals[0]]) {
@@ -144,8 +144,8 @@ test('each round uses its current coverage estimate and hint decision', async ()
             const content = calls[i].messages.at(-1).content;
             const prompt = typeof content === 'string' ? content : content[0].content;
             assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
-            // Round 3 is the last (MAX_SEARCH_ROUNDS=3): search_more is not offered, so it is not recommended.
-            assert.equal(prompt.includes('Instead of answering now, call search_more'), i === 0);
+            // Round 3 is the last (MAX_SEARCH_ROUNDS=3): trussc_search is not offered, so it is not recommended.
+            assert.equal(prompt.includes('Instead of answering now, call trussc_search'), i === 0);
             for (const record of [debug.rounds[i], stat.retrievals[i]]) {
                 assert.equal(record.exists, exists); assert.equal(record.hintShown, i === 0);
                 assert.equal(record.hintFollowed, i === 0 ? true : null);
@@ -153,13 +153,13 @@ test('each round uses its current coverage estimate and hint decision', async ()
         }
     });
 });
-test('no recommendation when search_more is not offered (single round)', async () => {
+test('no recommendation when trussc_search is not offered (single round)', async () => {
     await fixture({ exists: .29, env: { MAX_SEARCH_ROUNDS: '1' }, generate: () => new Response(text('Use [[drawCircle]].') + stop) }, async ({ request, calls, rows }) => {
         const response = await request('/ask'); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 1); assert.equal(calls[0].tools, undefined);
         const prompt = calls[0].messages.at(-1).content;
         assert(prompt.includes('cover about 29% of what is needed'));
-        assert(!prompt.includes('Instead of answering now, call search_more'));
+        assert(!prompt.includes('Instead of answering now, call trussc_search'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, false); assert.equal(record.hintFollowed, null);
         }
@@ -169,7 +169,7 @@ test('invalid-tool recovery stays out of the hint metric', async () => {
     await fixture({ exists: .29, generate: (req, _, n) => new Response((n === 1 ? tool('bad', { message: '', queries: [] }) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
         const response = await request('/ask'); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 2); assert(calls[0].tools); assert.equal(calls[1].tools, undefined);
-        assert(calls[0].messages.at(-1).content.includes('Instead of answering now, call search_more'));
+        assert(calls[0].messages.at(-1).content.includes('Instead of answering now, call trussc_search'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
             assert.equal(record.hintShown, true); assert.equal(record.hintFollowed, null);
         }
@@ -347,31 +347,31 @@ test('variant options validate before any calls, default and explicit-off payloa
         await answer('circle');
         const result = await answer('circle', [], null, [], undefined, { fillerTokens: 0, thinkingBudget: 0 });
         assert.equal(rawCalls[0], rawCalls[1]);
-        // Frozen against the pre-variant implementation using this synthetic fixture.
-        assert.equal(createHash('sha256').update(rawCalls[0]).digest('hex'), 'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf');
+        // Frozen shared-tool payloads using this synthetic fixture (PR4 intentionally changes tools/context).
+        assert.equal(createHash('sha256').update(rawCalls[0]).digest('hex'), '4cdd34d1fbb9e3dff967fc31be9a0ee9e64d216f4c4f76e3bbff1a6b5652e72c');
         assert.equal(calls[0].max_tokens, 1536);
         for (const field of ['thinking', 'temperature', 'top_k', 'tool_choice']) assert(!(field in calls[0]));
         assert.deepEqual(result.traces[0].haiku.inputTokens, [null]);
         assert.equal(result.traces[0].haiku.estInputTokens.length, 1);
     });
 });
-test('default native tool-round payloads match pre-variant byte snapshots', async () => {
+test('default native tool-round payloads match shared-tool byte snapshots', async () => {
     await fixture({ generate: (_, __, n) => new Response((n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, rawCalls }) => {
         await answer('circle');
         assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
-            'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf',
-            '35ad8bdc11470cfcfb03ca7926342b00a78a6f5e37eca70a119ef97f03b50bc3',
-            'caf817dfc7315d06b9a3d7b814f4b6c8882c2c25d3738bd0000420706e23e50b',
+            '4cdd34d1fbb9e3dff967fc31be9a0ee9e64d216f4c4f76e3bbff1a6b5652e72c',
+            'dab7c5722bb0426bb736e904e83a82678ba876981ff2dd58027e4ca511900eea',
+            '70afd6ebf004b1f4dcbf5c4aaebc24171970dbed6f21fcc118203a13aa308b56',
         ]);
     });
 });
-test('manual thinking native tool-round payloads match pre-change byte snapshots', async () => {
+test('manual thinking native tool-round payloads match shared-tool byte snapshots', async () => {
     await fixture({ generate: (_, __, n) => new Response((n < 3 ? tool(`t${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ answer, rawCalls }) => {
         await answer('circle', [], null, [], undefined, { thinkingBudget: 1024 });
         assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
-            '45110e3fa55abc9102f2f65faaea7aa2f25b9436e6b9412fabc504554d02c537',
-            '311101b96760f555bc88547aaa83c47ada2c11c108a8d8e5e5eafe7dde1083e5',
-            '751ef85991e29256336f3d599c52d5ea65823c8a06455d5ec83da96dbb1dbeec',
+            '6df580344f2eaa4b62b5b1d5c0a28444e7c523359b5d87e53ff3643a52f5403d',
+            '448367448427fc8039cdcbf090c9c3415b26936a8cfdd7fc5fd965e0e3db1933',
+            '27424b4d5df078ad35d36d745025128c7d94e17f3662e42010c8ca50db35532b',
         ]);
     });
 });
@@ -426,9 +426,9 @@ test('thinking off payloads, effort bounds, env validation and 4.5 byte identity
     async ({ answer, rawCalls, calls }) => {
         await answer('circle', [], null, [], undefined, { thinking: 'off' });
         assert.deepEqual(rawCalls.map(raw => createHash('sha256').update(raw).digest('hex')), [
-            'bc731377fae5ac31bcaebbc89e9ec3f300a489f5941397413fb4c616a113d6cf',
-            '35ad8bdc11470cfcfb03ca7926342b00a78a6f5e37eca70a119ef97f03b50bc3',
-            'caf817dfc7315d06b9a3d7b814f4b6c8882c2c25d3738bd0000420706e23e50b',
+            '4cdd34d1fbb9e3dff967fc31be9a0ee9e64d216f4c4f76e3bbff1a6b5652e72c',
+            'dab7c5722bb0426bb736e904e83a82678ba876981ff2dd58027e4ca511900eea',
+            '70afd6ebf004b1f4dcbf5c4aaebc24171970dbed6f21fcc118203a13aa308b56',
         ]);
         assert(calls.every(call => !('thinking' in call)));
     });
@@ -732,7 +732,7 @@ for (const adaptive of [false, true]) for (const mode of ['total', 'line', 'even
         if (mode === 'total' || mode === 'line') content += frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'x'.repeat(mode === 'total' ? 1400 : 65536) } });
         if (mode === 'event') content += ': ' + 'x'.repeat(40000) + '\n: ' + 'x'.repeat(40000) + '\n\n';
         if (mode === 'tool-json') content += tool('large') + frame({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'x'.repeat(8193) } });
-        if (mode === 'tool-blocks') for (let i = 3; i < 12; i++) content += frame({ type: 'content_block_start', index: i, content_block: { type: 'tool_use', id: `t${i}`, name: 'search_more', input: {} } });
+        if (mode === 'tool-blocks') for (let i = 3; i < 12; i++) content += frame({ type: 'content_block_start', index: i, content_block: { type: 'tool_use', id: `t${i}`, name: 'trussc_search', input: {} } });
         return new Response(content + stop);
     } }, async ({ answer }) => {
         await assert.rejects(answer('circle', [], null, [], undefined, adaptive ? {} : { thinkingBudget: 1024 }), e => e.errorReason === (mode.startsWith('tool-') ? mode === 'tool-json' ? 'tool-input' : 'tool-blocks' : 'oversize'));

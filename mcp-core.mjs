@@ -21,6 +21,8 @@ export const TOOLS = [{
         'default (header + start of source); pass full:true, or call trussc_get with the ' +
         'chunk id, to get the whole multi-file source. Use a specific natural-language ' +
         'query, e.g. "draw a filled circle in a color", "load and play a sound file". ' +
+        'Provide exactly one of query or queries (1–3 nonempty strings, each at most 200 characters). ' +
+        'Optional message is one short line shown to the user while you search, in the user\'s language (at most 300 characters). ' +
         'Set lang:"lua" for TrussSketch (the in-browser Lua playground) to get Lua-flavored ' +
         'cards (colon methods, Type.new, end_fbo/end_shader/end_cam) instead of the C++ API. ' +
         'Results may include a line saying a name does not appear in the documentation, ' +
@@ -30,12 +32,15 @@ export const TOOLS = [{
     inputSchema: {
         type: 'object',
         properties: {
-            query: { type: 'string', description: 'Natural-language description of what you want to do in TrussC.' },
+            query: { type: 'string', description: 'Natural-language description of what you want to do in TrussC. Exactly one of query or queries is required.' },
+            // Bound (cost): reject queries outside 1–3 nonempty strings of <= 200 characters; never truncate.
+            queries: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 }, description: 'Several searches merged into one retrieval. Exactly one of query or queries is required.' },
+            // Bound (output): reject non-string messages or messages over 300 characters; never truncate.
+            message: { type: 'string', maxLength: 300, description: "one short line shown to the user while you search, in the user's language" },
             k: { type: 'number', description: 'Max total results to return (default 8).' },
             full: { type: 'boolean', description: 'Return full untrimmed text for every result (default false; examples are trimmed). Prefer trussc_get for a specific chunk.' },
             lang: { type: 'string', enum: ['cpp', 'lua'], description: 'API flavor: "cpp" (default, the C++ framework) or "lua" (TrussSketch playground — prefers the Lua twin of each symbol, hides nothing else).' },
         },
-        required: ['query'],
     },
 }, {
     name: 'trussc_get',
@@ -53,6 +58,29 @@ export const TOOLS = [{
         required: ['ids'],
     },
 }];
+
+// Shared validation for MCP, HTTP (question aliases query), and native chat tools.
+// Bound (cost): reject both/neither inputs, invalid 1–3 queries of <=200 characters, or messages over 300 characters; never truncate. Legacy query coercion/length handling is retained.
+export function searchInput(args = {}) {
+    const hasQuery = Object.hasOwn(args, 'query'), hasQueries = Object.hasOwn(args, 'queries');
+    if (hasQuery === hasQueries) throw new Error('exactly one of query or queries is required');
+    if (Object.hasOwn(args, 'message') && (typeof args.message !== 'string' || args.message.length > 300))
+        throw new Error('message must be a string of at most 300 characters');
+    if (hasQueries) {
+        if (!Array.isArray(args.queries) || args.queries.length < 1 || args.queries.length > 3 ||
+            !args.queries.every(q => typeof q === 'string' && q.trim() && q.length <= 200))
+            throw new Error('queries must contain 1–3 nonempty strings of at most 200 characters');
+        const queries = args.queries.map(q => q.trim());
+        return { query: queries.join(' '), queries };
+    }
+    const query = String(args.query || '').trim();
+    if (!query) throw new Error('empty query');
+    return { query, queries: [query] };
+}
+// Bound (security): retain only strings and the first 20 ids, matching the existing MCP handling; overflow is omitted before getByIds strips one leading #.
+export function getInput(args = {}) {
+    return Array.isArray(args.ids) ? args.ids.filter(id => typeof id === 'string').slice(0, 20) : [];
+}
 
 // Conservative query heuristic: judge only the leading owner of :: names, or
 // bare words with an internal lower-to-upper transition (drawCircle / CudaGraph).
@@ -322,7 +350,7 @@ export function searchResponse(retrieved, results) {
     return { results, path: info.path, exists: info.exists, ...search,
         ...(retrieved.relatedFor ? { candidates: retrieved.relatedFor(results) } : {}) };
 }
-export function formatSearchResults(results, query, info = {}) {
+export function formatSearchResults(results, query, info = {}, packing) {
     const missing = boundedMissingSymbols(info.missingSymbols);
     const low = info.path === 'jev' && typeof info.exists === 'number' && info.exists < LOW_COVERAGE;
     const facts = noSymbolFact(missing, true);
@@ -336,30 +364,63 @@ export function formatSearchResults(results, query, info = {}) {
     const related = relatedCandidates(Array.isArray(info.candidates) ? info.candidates.slice(0, 40) : []).filter(c => !shown.has(c.id)).slice(0, 16);
     const tail = relatedText(related);
     // Bound (output): the entire search text fits 256 KiB, including warnings and
-    // related titles. Overflow truncates card text with a get hint; not counted.
+    // related titles. Packing keeps overflow id-only; unbudgeted MCP output
+    // retains its existing truncation marker.
     const head = intro ? intro + '\n\n' : '';
     const marker = '\n… (search output truncated; use trussc_get for full cards)';
     const budget = 262144 - Buffer.byteLength(head + tail);
-    let body = formatResults(results, query);
+    let body = formatResults(results, query, packing && { ...packing,
+        fits: text => Buffer.byteLength(text) <= budget && (!packing.fits || packing.fits(head + text + tail)) &&
+            (packing.maxBytes === undefined || Buffer.byteLength(head + text + tail) <= packing.maxBytes), maxBytes: undefined });
+    if (body === null) return null;
     if (Buffer.byteLength(body) > budget) body = utf8Prefix(body, budget - Buffer.byteLength(marker)) + marker;
     const output = head + body + tail;
     // Cap the final text as well, including the head, at both MCP boundaries.
     return Buffer.byteLength(output) > 262144 ? utf8Prefix(output, 262144 - Buffer.byteLength(marker)) + marker : output;
 }
 
+// Optional packing accepts maxBytes or fits(text), a predicate that can account for
+// the complete serialized token budget; shownIds/cardText/onPacked serve chat packing.
 // Render results. On the Jev path each card carries its relevance probability p,
 // which is the only score a caller can act on; fallback scores are internal.
 function scoreLine(c) {
     return typeof c.p === 'number' && Number.isFinite(c.p) ? `  (relevance ${c.p.toFixed(2)})` : '';
 }
-export function formatResults(results, query) {
+// Bound (output): optional byte/request-token budgets replace overflowing cards with [#id], highest p first; if even references do not fit, return null. Previously shown cards stay references.
+export function formatResults(results, query, packing) {
+    if (packing) {
+        const shown = packing.shownIds || new Set(), added = [];
+        const parts = results.map(c => `[#${c.id}]${shown.has(c.id) ? ' already shown above' : ''}`);
+        const join = () => parts.join('\n\n---\n\n');
+        const fits = text => (packing.maxBytes === undefined || Buffer.byteLength(text) <= packing.maxBytes) && (!packing.fits || packing.fits(text));
+        if (!results.length) return fits(`No TrussC matches for "${query}".`) ? `No TrussC matches for "${query}".` : null;
+        if (!fits(join())) return null;
+        const priority = results.map((card, i) => ({ card, i })).sort((a, b) => (b.card.p ?? -1) - (a.card.p ?? -1));
+        for (const { card, i } of priority) {
+            if (shown.has(card.id)) continue;
+            const old = parts[i];
+            parts[i] = formatResults([{ ...card, text: packing.cardText ? packing.cardText(card) : card.text }], query);
+            if (fits(join())) added.push(card.id); else parts[i] = old;
+        }
+        packing.onPacked?.({ added, idOnlyCards: results.filter(c => !shown.has(c.id) && !added.includes(c.id)).length });
+        return join();
+    }
     if (!results || !results.length) return `No TrussC matches for "${query}".`;
     return results.map((c) =>
         `### [${c.source}] ${c.title}${c.id ? ` [#${c.id}]` : ''}${c.link ? `  ·  ${c.link}` : ''}${scoreLine(c)}\n${c.text || ''}`
     ).join('\n\n---\n\n');
 }
 
-// handlers: { search(query, k, full, lang) -> search response, get(ids) -> results[] }.
+// Get shares the full-card formatter and the same empty-result wording across chat/MCP.
+export function formatGetResults(results, ids, packing) {
+    if (results.length) return formatResults(results, ids.join(', '), packing);
+    const text = `No chunks found for: ${ids.join(', ')}`;
+    // Bound (output): empty-get notices must also fit the optional byte/request budget; overflow returns null.
+    return packing && ((packing.maxBytes !== undefined && Buffer.byteLength(text) > packing.maxBytes) ||
+        (packing.fits && !packing.fits(text))) ? null : text;
+}
+
+// handlers: { search(query, k, full, lang, queries?) -> search response, get(ids) -> results[] }.
 export async function dispatch(msg, handlers) {
     const { id, method, params } = msg || {};
     if (id === undefined || id === null) return null;   // notification: no reply
@@ -379,20 +440,18 @@ export async function dispatch(msg, handlers) {
             const args = (params && params.arguments) || {};
             try {
                 if (name === 'trussc_search') {
-                    const query = String(args.query || '').trim();
-                    if (!query) return toolText('error: empty query', true);
+                    const { query, queries } = searchInput(args);
                     const k = Math.max(1, Math.min(20, Number(args.k) || 8));
                     const lang = args.lang === 'lua' ? 'lua' : 'cpp';
-                    const response = await handlers.search(query, k, !!args.full, lang);
+                    const response = await handlers.search(query, k, !!args.full, lang, Object.hasOwn(args, 'queries') ? queries : undefined);
                     const results = (Array.isArray(response) ? response : response.results).slice(0, k);
                     return toolText(formatSearchResults(results, query, response));
                 }
                 if (name === 'trussc_get') {
-                    const ids = Array.isArray(args.ids) ? args.ids.filter((x) => typeof x === 'string').slice(0, 20) : [];
+                    const ids = getInput(args);
                     if (!ids.length) return toolText('error: no ids', true);
                     const results = await handlers.get(ids);
-                    if (!results.length) return toolText(`No chunks found for: ${ids.join(', ')}`);
-                    return toolText(formatResults(results, ids.join(', ')));
+                    return toolText(formatGetResults(results, ids));
                 }
                 return err(-32602, `unknown tool: ${name}`);
             } catch (e) {

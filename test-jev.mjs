@@ -32,7 +32,7 @@ try {
     assert.deepEqual(body.questions.c1.criteria, { true: 'Yes', false: 'No' });
     await s.selectCards('question', pool, { searchMore: { message: 'Missing details', queries: ['details'] } });
     const round2 = JSON.parse(requests.at(-1).opts.body);
-    const gap = ' Focus on the gap described by state.search_more.message and state.search_more.queries.';
+    const gap = ' Focus on the gap described by state.trussc_search.message and state.trussc_search.queries.';
     assert.equal(round2.questions.exists.instructions, instructions + gap);
     assert.deepEqual(round2.questions.exists.criteria, criteria);
     assert.equal(round2.questions.c1.instructions, body.questions.c1.instructions + gap);

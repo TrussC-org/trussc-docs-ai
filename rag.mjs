@@ -1,7 +1,7 @@
 // Shared RAG core: embeddings, retrieval, prompt assembly, streaming chat.
 // Used by ask.mjs (CLI), server.mjs (HTTP), and eval.mjs (quality check).
 import { readFileSync } from 'node:fs';
-import { createSymbolChecker, noSymbolFact, relatedCandidates, buildRelatedList } from './mcp-core.mjs';
+import { createSymbolChecker, noSymbolFact, relatedCandidates, buildRelatedList, TOOLS, searchInput, getInput, formatSearchResults, formatResults, formatGetResults } from './mcp-core.mjs';
 import { selectCards, stateTokens, perQuestionTokens } from './jev.mjs';
 import { JEV_POOL_TOKENS, JEV_TOKENS_PER_CHAR, JEV_SEARCH_HINT_BELOW, RETRIEVAL, MAX_SEARCH_ROUNDS, HAIKU_TIMEOUT_MS, HAIKU_MAX_RESPONSE_BYTES, HAIKU_CARD_CHARS, HAIKU_MAX_INPUT_TOKENS, HAIKU_EFFORT, HAIKU_THINKING, EFFORT_LEVELS, HAIKU_ADAPTIVE_MAX_TOKENS, transportClass } from './config.mjs';
 import { OLLAMA, GEN_MODEL, EMBED_MODEL, EMBEDDED, TOP_K, PIN_K, HYBRID, RRF_K, RERANK, RERANK_URL, RERANK_CANDIDATES, RERANK_TIMEOUT_MS, REF_BASE, NUM_CTX, EMBED_ON_CPU, THINK, KEEP_ALIVE, GEN_BACKEND, ANTHROPIC_KEY, ANTHROPIC_MODEL } from './config.mjs';
@@ -275,7 +275,7 @@ export function buildPool(sorted, question) {
 }
 // Each query owns an equal share, including its share of state overhead. Fill
 // before deduplication: an overlap keeps its first slot, with no budget transfer.
-// Bound (security): split the configured pool and 32000 per-question budget evenly across query pools. Overflow stops each share and is not counted.
+// Bound (cost): 1 or 3 queries share the unchanged pool/32000 cap, one Jev and one merged fallback rerank (top 30); only bge-m3 embeddings grow. Overflow stops each share and is not counted.
 export function buildRoundPool(pools, question, searchMore) {
     if (!pools.length) return [];
     const tokens = cards => stateTokens(question, cards, undefined, searchMore);
@@ -319,12 +319,18 @@ export async function retrieve(question, k = TOP_K, opts = {}) {
     return retrieveMulti([question], k, { ...opts, question });
 }
 
+// Single-query public calls deliberately take exactly the legacy retrieve path.
+export async function retrieveQueries(queries, k = TOP_K, opts = {}) {
+    return queries.length === 1 ? retrieve(queries[0], k, opts)
+        : retrieveMulti(queries, k, { ...opts, question: queries.join(' '), multiQuery: true });
+}
+
 // Re-search uses independent per-query RRF pools. Other callers and the existing
 // fallback retain max-pooled dense vectors plus fused BM25 query terms.
 export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
     const lang = opts.lang === 'lua' ? 'lua' : 'cpp';   // 'cpp' = default (Lua hidden); 'lua' = sketch (prefer Lua twin)
     const normalized = (opts.searchMore ? [opts.question, ...opts.searchMore.queries] : queries).map(q => (q || '').trim()).filter(Boolean);
-    const qs = opts.searchMore ? normalized : [...new Set(normalized)];
+    const qs = opts.searchMore || opts.multiQuery ? normalized : [...new Set(normalized)];
     const cs = chunks();
     const vecs = await Promise.all((qs.length ? qs : ['']).map((q) => embed(q)));
 
@@ -332,11 +338,11 @@ export async function retrieveMulti(queries, k = TOP_K, opts = {}) {
     // k=8→3. They never crowd a small result, but grow when the caller asks for more.
     const supK = Math.max(0, Math.floor((k - 1) / 2));
 
-    // Fallback reranking sees all variants from search_more, or the raw question
+    // Fallback reranking sees all variants from trussc_search, or the raw question
     // on the first round and on MCP/search.
     const rerankQuery = qs.join(' ');
 
-    if (opts.searchMore) {
+    if (opts.searchMore || opts.multiQuery) {
         // RRF is independent for the original question and every gap query. The
         // legacy fused ranking is computed only if selection needs fallback.
         const pools = qs.map((q, qi) => rankPool(cs, [vecs[qi]], [q], lang));
@@ -550,18 +556,14 @@ async function* anthropicStream(messages) {
     yield* anthropicRound(messages, false);
 }
 
-const SEARCH_TOOL = {
-    name: 'search_more', description: 'Search the TrussC documentation again when some part of the question (another feature, API or library it combines) is not covered by the cards. Use 1–3 short queries naming the missing parts, in English API terms when possible.',
-    input_schema: { type: 'object', properties: {
-        message: { type: 'string', maxLength: 300, description: 'One short line shown to the user while you search, written in the same language as the user\'s question (an English question gets English, Japanese gets Japanese), addressed to them, e.g. \'Looking for how to serve a web page from the app\' / 「顔認識の機能を探しています」. Not a note about the user.' },
-        queries: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 200 } },
-    }, required: ['message', 'queries'], additionalProperties: false },
-};
-// Bound (security): allow a 300-character message and 1–3 queries of at most 200 characters each. Overflow forces a tool-free answer and is not counted.
+const CHAT_TOOLS = TOOLS.map(({ name, description, inputSchema }) => ({ name, description, input_schema: inputSchema }));
+// Bound (security): shared MCP validation rejects invalid search input. Overflow forces a tool-free answer and is not counted.
 export function validSearchInput(input) {
-    return input && typeof input.message === 'string' && input.message.trim().length > 0 && input.message.length <= 300
-        && Array.isArray(input.queries) && input.queries.length >= 1 && input.queries.length <= 3
-        && input.queries.every((q) => typeof q === 'string' && q.trim().length > 0 && q.length <= 200);
+    try { searchInput(input); return true; } catch { return false; }
+}
+function validTool(tool) {
+    return !tool.invalidJson && typeof tool.id === 'string' && tool.id && (tool.name === 'trussc_search'
+        ? validSearchInput(tool.input) : tool.name === 'trussc_get' && getInput(tool.input || {}).length > 0);
 }
 export function mergeSelections(previous, fresh) {
     const byId = new Map();
@@ -632,7 +634,7 @@ function anthropicPayload(messages, offerTool, variants = validateVariants()) {
         ...(variants.effort !== undefined && capabilities.effort ? { output_config: { effort: variants.effort } } : {}),
         system: [...messages.filter(m => m.role === 'system').map(m => m.content), ...(capabilities.impliedEvidence ? [IMPLIED_EVIDENCE_RULE] : [])].join('\n\n'),
         messages: messages.filter(m => m.role !== 'system'), stream: true,
-        ...(offerTool ? { tools: [SEARCH_TOOL] } : {}) };
+        ...(offerTool ? { tools: CHAT_TOOLS } : {}) };
 }
 function fitsInput(messages, offerTool, reserveChars = 0, variants = validateVariants()) {
     return (JSON.stringify(anthropicPayload(messages, offerTool, variants)).length + reserveChars) * generationTokensPerChar(variants.model) <= HAIKU_MAX_INPUT_TOKENS;
@@ -760,11 +762,16 @@ async function* anthropicRound(messages, offerTool, metrics, variants = validate
         if (stopReason === 'max_tokens') throw new GenerationFailure('max_tokens');
         if (blocks.size || stopReason === 'tool_use') {
             if (!offerTool) throw new GenerationFailure('unexpected-tool');
-            if (blocks.size !== 1) return { invalid: true };
-            const tool = [...blocks.values()][0];
-            try { tool.input = tool.json ? JSON.parse(tool.json) : tool.input; } catch { return { invalid: true }; }
-            if (tool.name !== 'search_more' || typeof tool.id !== 'string' || !tool.id || !validSearchInput(tool.input)) return { invalid: true };
-            return { tool, thinking: [...reasoning.entries()].sort(([a], [b]) => a - b).map(([, block]) => block) };
+            const tools = [...blocks.values()];
+            for (const tool of tools) {
+                try { tool.input = tool.json ? JSON.parse(tool.json) : tool.input; } catch { tool.input = {}; tool.invalidJson = true; }
+                // Rejected inputs still replay beside a valid call; Messages requires objects.
+                if (tool.input === null || typeof tool.input !== 'object' || Object.getPrototypeOf(tool.input) !== Object.prototype) tool.input = {};
+            }
+            const tool = tools.find(validTool);
+            if (!tool || tools.some(t => typeof t.id !== 'string' || !t.id) || new Set(tools.map(t => t.id)).size !== tools.length) return { invalid: true };
+            return { tool, tools: tools.map(({ json, bytes, invalidJson, ...t }) => t),
+                thinking: [...reasoning.entries()].sort(([a], [b]) => a - b).map(([, block]) => block) };
         }
         if (metrics && firstTextMs !== undefined) metrics.ttftMs = firstTextMs;
         for (const d of text) yield d;
@@ -890,7 +897,7 @@ async function prep(question, history, k, page, pinned = [], opts = {}) {
     // Sketch mode passes 'sketch' straight through so buildMessages activates the Lua
     // persona (pageChunk('sketch') is null, so it never travels as a reference-page hint).
     const pageName = sketchMode ? 'sketch' : (pc ? pc.title : null);
-    return { retrieved: ordered, links, info: retrievalInfo(fresh), pageName, messages: buildMessages(question, ordered, history, pageName) };
+    return { retrieved: ordered, relatedFor: fresh.relatedFor, search: fresh.search, links, info: retrievalInfo(fresh), pageName, messages: buildMessages(question, ordered, history, pageName) };
 }
 
 // Parse the model's `@@USED:` trail off the end of its answer → { answer, reported }.
@@ -1049,19 +1056,15 @@ export async function answer(question, history = [], page = null, pinned = [], k
 //   { type:'final', text, corrected }   once, at the end (for logging)
 // The draft streams live; the (rare) correction can't stream because the check needs
 // the full draft first — so it's delivered as a single whole-text replace.
-// Bound (security): pack full capped cards by descending p within the serialized input budget. Overflow keeps cards by id only and is counted.
-function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256, variants = validateVariants()) {
-    const parts = cards.map(card => shownIds.has(card.id) ? `[#${card.id}] already shown above` : `[#${card.id}]`);
-    if (!fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars, variants)) return null;
-    const added = [];
-    const priority = cards.map((card, i) => ({ card, i })).sort((a, b) => (b.card.p ?? -1) - (a.card.p ?? -1));
-    for (const { card, i } of priority) {
-        if (shownIds.has(card.id)) continue;
-        const old = parts[i]; parts[i] = `[#${card.id}]\n${generationText(card)}`;
-        if (fitsInput(render(parts.join('\n\n---\n\n'), offerTool), offerTool, reserveChars, variants)) added.push(card.id);
-        else parts[i] = old;
-    }
-    return { idOnlyCards: cards.filter(card => !shownIds.has(card.id) && !added.includes(card.id)).length, messages: render(parts.join('\n\n---\n\n'), offerTool), added };
+// Bound (security): shared formatting packs capped cards within the serialized input budget; overflow keeps [#id] references and is counted, or returns null if references do not fit.
+function packGenerationCards(cards, shownIds, render, offerTool, reserveChars = 256, variants = validateVariants(), search = null) {
+    let packed = { added: [], idOnlyCards: 0 };
+    const budget = { shownIds, cardText: generationText,
+        fits: text => fitsInput(render(text, offerTool), offerTool, reserveChars, variants),
+        onPacked: result => { packed = result; } };
+    const text = search?.ids ? formatGetResults(cards, search.ids, budget)
+        : search ? formatSearchResults(cards, search.query, search.info, budget) : formatResults(cards, '', budget);
+    return text === null ? null : { ...packed, messages: render(text, offerTool) };
 }
 export async function* answerStream(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
     const requestStarted = Date.now();
@@ -1122,15 +1125,15 @@ export async function* answerStream(question, history = [], page = null, pinned 
         }
     }
     async function* researchAnswer() {
-        // The estimate is always shown; the search_more recommendation only when that tool is offered.
+        // The estimate is always shown; the trussc_search recommendation only when that tool is offered.
         const recommends = offerTool => offerTool && typeof info.exists === 'number' && info.exists < JEV_SEARCH_HINT_BELOW;
         const existsHint = offerTool => {
             if (typeof info.exists !== 'number') return '';
             return `An independent relevance checker estimates these cards cover about ${Math.round(info.exists * 100)}% of what is needed to answer every part of the question.` + (recommends(offerTool)
-                ? ' Instead of answering now, call search_more to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).' : '');
+                ? ' Instead of answering now, call trussc_search to look for the missing parts (for example a separate feature or library the question combines), unless the question does not need TrussC documentation (off-topic chat, greetings).' : '');
         };
         const finalNote = '\nThis is the final round. Answer now using the available evidence and state any gaps.';
-        messages[0].content += '\nUse search_more only when more evidence is needed. When calling it, provide no answer text. Its message must be short and in the user\'s language.';
+        messages[0].content += '\nUse trussc_search or trussc_get only when more evidence is needed. Call one tool per turn; put several searches into queries. Fetch [#id] cards and Other possibly related cards with trussc_get. When calling a tool, provide no answer text. Fill message for trussc_search with a short line in the user\'s language. Search lang is determined by the page; k and full arguments are ignored.';
         let noMoreSearch = false;
         const renderInitial = (context, offerTool) => {
             const user = buildMessages(question, [], [], prepared.pageName, context).at(-1);
@@ -1138,15 +1141,16 @@ export async function* answerStream(question, history = [], page = null, pinned 
             if (hint) user.content += `\n\n${hint}`;
             return [...messages.slice(0, -1), user];
         };
-        let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1, 256, variants);
+        const initialSearch = { query: question, info: { ...info, ...prepared.search, candidates: prepared.relatedFor?.(retrieved) || [] } };
+        let packed = packGenerationCards(retrieved, new Set(), renderInitial, MAX_SEARCH_ROUNDS > 1, 256, variants, initialSearch);
         if (!packed) {
             // Bound (security): fixed history, system and question must fit the input budget. Overflow drops oldest external turns and disables search and is not counted.
             noMoreSearch = true;
             while (!packed && messages.length > 2) {
                 messages.splice(1, 1);
-                packed = packGenerationCards(retrieved, new Set(), renderInitial, false, 256, variants);
+                packed = packGenerationCards(retrieved, new Set(), renderInitial, false, 256, variants, initialSearch);
             }
-            packed ??= packGenerationCards(retrieved, new Set(), renderInitial, false, 0, variants);
+            packed ??= packGenerationCards(retrieved, new Set(), renderInitial, false, 0, variants, initialSearch);
         }
         if (!packed) {
             const error = new Error('generation service error');
@@ -1161,7 +1165,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
             final[0].content += finalNote;
             return yield* callHaiku(fitsInput(final, false, 0, variants) ? final : messages, false);
         }
-        // Bound (security): cap search rounds at MAX_SEARCH_ROUNDS. Overflow forces an answer without tools and is not counted.
+        // Bound (realtime): cap answer rounds, including search/get turns, at MAX_SEARCH_ROUNDS. Overflow forces an answer without tools and is not counted.
         for (let round = 1; round <= MAX_SEARCH_ROUNDS; round++) {
             stats.rounds = round;
             const offerTool = round < MAX_SEARCH_ROUNDS && !noMoreSearch;
@@ -1176,30 +1180,44 @@ export async function* answerStream(question, history = [], page = null, pinned 
             }
             trace.hintFollowed = trace.hintShown ? Boolean(response.tool) : null;
             if (!response.tool) return;
-            const { message, queries } = response.tool.input;
-            const assistant = { role: 'assistant', content: [...response.thinking, { type: 'tool_use', id: response.tool.id, name: 'search_more', input: response.tool.input }] };
+            const isSearch = response.tool.name === 'trussc_search';
+            const queries = isSearch ? searchInput(response.tool.input).queries : [];
+            const ids = isSearch ? [] : getInput(response.tool.input);
+            const message = isSearch ? response.tool.input.message ??
+                (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(question) ? '関連する資料を調べます。' : 'Looking for more documentation.') : null;
+            const assistant = { role: 'assistant', content: [...response.thinking, ...response.tools.map(t => ({ type: 'tool_use', id: t.id, name: t.name, input: t.input }))] };
             const renderResult = (cards, offerTool) => {
                 const hint = existsHint(offerTool);
-                return [...messages, assistant, { role: 'user', content: [{ type: 'tool_result', tool_use_id: response.tool.id,
-                    content: `Search completed.\n\n${cards}${hint ? `\n\n${hint}` : ''}\nAnswer the original question using all cards shown above, or search again if needed.` }] }];
+                return [...messages, assistant, { role: 'user', content: response.tools.map(t => t.id === response.tool.id
+                    ? { type: 'tool_result', tool_use_id: t.id,
+                        content: `${isSearch ? 'Search' : 'Fetch'} completed.\n\n${cards}${hint ? `\n\n${hint}` : ''}\nAnswer the original question using all cards shown above, or use trussc_search / trussc_get if needed.` }
+                    : { type: 'tool_result', tool_use_id: t.id, is_error: true, content: 'call one tool per turn; put several searches into `queries`' }) }];
             };
             if (!fitsInput(renderResult('', false), false, 256, variants)) { yield* forceAnswer(); return; }
             trace.message = message;
-            yield { research: { round: round + 1, message, queries } };
+            // The demo renders empty queries as an empty search label; the site widget still adds filler. Get emits no research event.
+            if (isSearch) yield { research: { round: round + 1, message, queries } };
             stats.queries.push(...queries);
-            const fresh = await retrieveMulti([question, ...queries], k, { ...opts, question, searchMore: { message, queries }, lang: sketchMode ? 'lua' : 'cpp' });
-            info = retrievalInfo(fresh); stats.retrievals.push(info);
+            // Search k/full are intentionally ignored; language comes only from the page.
+            const fresh = isSearch
+                ? await retrieveMulti([question, ...queries], k, { ...opts, question, searchMore: { message, queries }, lang: sketchMode ? 'lua' : 'cpp' })
+                : getByIds(ids).map(c => ({ ...chunkById(c.id), ...c }));
+            info = isSearch ? retrievalInfo(fresh) : { ...info, poolSize: 0, jevMs: 0, jevEstimatedTokens: 0, jevTokens: 0 };
+            stats.retrievals.push(info);
+            const search = isSearch ? { query: queries.join(' '), info: { ...info, ...fresh.search, candidates: fresh.relatedFor?.(fresh) || [] } } : { ids };
             const nextTool = round + 1 < MAX_SEARCH_ROUNDS;
-            packed = packGenerationCards(fresh, shownIds, renderResult, nextTool, 256, variants);
+            packed = packGenerationCards(fresh, shownIds, renderResult, nextTool, 256, variants, search);
             if (!packed) {
                 noMoreSearch = true;
-                packed = packGenerationCards(fresh, shownIds, renderResult, false, 0, variants);
+                packed = packGenerationCards(fresh, shownIds, renderResult, false, 0, variants, search);
             }
             if (!packed) { yield* forceAnswer(); return; }
             messages = packed.messages;
             for (const id of packed.added) shownIds.add(id);
             retrieved = mergeSelections(retrieved, fresh);
-            trace = startTrace([question, ...queries], fresh);
+            trace = startTrace(isSearch ? [question, ...queries] : [], fresh);
+            trace.tool = response.tool.name;
+            if (!isSearch) trace.ids = ids;
             trace.idOnlyCards = packed.idOnlyCards;
             links = buildLinks(retrieved);
             yield { meta: true };

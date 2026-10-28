@@ -21,7 +21,7 @@ async function post(path, payload) {
     return path === '/search' ? data : data.results || [];
 }
 const handlers = {
-    search: (query, k, full, lang) => post('/search', { question: query, k, full, lang }),
+    search: (query, k, full, lang, queries) => post('/search', { ...(queries ? { queries } : { question: query }), k, full, lang }),
     get: (ids) => post('/get', { ids }),
 };
 

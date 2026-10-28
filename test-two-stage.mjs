@@ -59,7 +59,7 @@ try {
     // Separate module graphs exercise real env-based configuration without child processes.
     for (const name of ['config.mjs', 'rag.mjs', 'jev.mjs', 'stats.mjs', 'server.mjs', 'mcp-core.mjs', 'debug.mjs']) writeFileSync(join(dir, name), readFileSync(new URL(name, import.meta.url)));
     process.env.STATS_DIR = dir;
-    const statRows = () => readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const statRows = () => readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
     const corpus = [
         { id: 'symbol:drawCircle', title: 'drawCircle', source: 'reference', lang: 'cpp', meta: { kind: 'function' }, text: 'drawCircle draws a circle.', vector: [1, 0] },
         ...Array.from({ length: 7 }, (_, i) => ({ id: `example:${i}`, title: `circle example ${i}`, source: 'example', text: 'drawCircle example', vector: [1, .1] })),

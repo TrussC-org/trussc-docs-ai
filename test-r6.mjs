@@ -116,7 +116,7 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         assert.equal((await done).status, 200); assert.equal(calls.at(-1)[1].length, 6);
     });
     await test('body rejections keep the common schema without body text', () => {
-        const rows = readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
+        const rows = readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
         assert.equal(rows.length, 6);
         for (const row of rows) {
             assert.equal(row.errorClass, 'Error'); assert(row.ms >= 0);

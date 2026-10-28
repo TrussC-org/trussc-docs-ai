@@ -57,6 +57,18 @@ try {
   rmSync(previous);
   console.log('PASS rows filed under the previous month stay in range');
 
+  const daily = join(archive, now.slice(0, 10) + '.jsonl');
+  writeFileSync(monthly, row({ q: 'legacy month question' }));
+  writeFileSync(daily, row({ q: 'daily question' }) + row({ ts: '2000-01-01T00:00:00Z', q: 'old daily row' }));
+  mkdirSync(join(archive, '2026-02-30.jsonl'));
+  writeFileSync(join(archive, '2026-2-01.jsonl'), row({ q: 'nonmatching name' }));
+  output = report();
+  assert.match(output, /\(2 requests,/);
+  assert(output.includes('legacy month question')); assert(output.includes('daily question'));
+  assert(!output.includes('old daily row')); assert(!output.includes('nonmatching name'));
+  rmSync(daily);
+  console.log('PASS mixed daily/monthly archives retain row date-window filters and strict filenames');
+
   // Neither readline nor JSON.parse may receive this 40 MiB line, including
   // an unterminated tail. Also exercise UTF-8 and valid rows after a long line.
   writeFileSync(monthly, ''); writeFileSync(live, '');

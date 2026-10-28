@@ -65,7 +65,7 @@ async function fixture(options, test) {
             const res = new EventEmitter(); Object.assign(res, { status: 200, data: '', setHeader() {}, writeHead(status) { this.status = status; }, write(data) { this.data += data; return true; }, end(data = '') { this.data += data; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
-        const rows = () => { try { return readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 7) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
+        const rows = () => { try { return readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse); } catch { return []; } };
         const { selectCards } = await import(join(dir, 'jev.mjs'));
         await test({ ...rag, selectCards, request, calls, rawCalls, requests, output, rows, dir });
     } finally {

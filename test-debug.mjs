@@ -11,7 +11,7 @@ import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { publicDebug } from './debug.mjs';
-import { pipelineStat } from './stats.mjs';
+import { pipelineStat, statsFileDate } from './stats.mjs';
 import { main } from './ask-cli.mjs';
 
 // Future internal fields must not expand the public schema, at any nesting level.
@@ -44,7 +44,7 @@ try {
         .replace("new URL('./stats.jsonl', import.meta.url).pathname", JSON.stringify(statsLog));
     const runReport = async args => {
         const output = [];
-        await vm.runInNewContext(`(async () => { ${report} })()`, { Buffer, Transform, createReadStream, createInterface, opendir, existsSync, join, STATS_DIR: dir,
+        await vm.runInNewContext(`(async () => { ${report} })()`, { Buffer, Transform, createReadStream, createInterface, opendir, existsSync, join, statsFileDate, STATS_DIR: dir,
             process: { argv: ['node', 'report.mjs', ...args], env: {}, exit() { throw new Error('unexpected early exit'); } },
             console: { log: (...args) => output.push(args.join(' ')) },
         });

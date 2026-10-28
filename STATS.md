@@ -1,9 +1,10 @@
 # Usage stats
 
 The API appends one JSON object per tracked POST request to
-`STATS_DIR/YYYY-MM.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/ask`, `/search`,
-`/get`, and `/mcp` share these fields, on success and failure. The month is the UTC
-month of the row's `ts`. The report runs outside the API sandbox.
+`STATS_DIR/YYYY-MM-DD.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/ask`, `/search`,
+`/get`, and `/mcp` share these fields, on success and failure. The day is the UTC
+day of the row's `ts`. Queries and answers are kept for about six months, then
+deleted with their stats file. The report runs outside the API sandbox.
 
 | Field | Meaning / unavailable value |
 | --- | --- |
@@ -13,7 +14,7 @@ month of the row's `ts`. The report runs outside the API sandbox.
 | `client` | `widget`, `http`, or a normalized MCP User-Agent product; missing/empty UA is `unknown`, invalid product is `other`. |
 | `ms` | Request latency in milliseconds, including body reading. |
 | `path`, `fallbackReason` | Pipeline selection path and reason, unchanged from `pipelineStat`; `null` when unavailable. |
-| `rounds`, `haikuCalls` | Pipeline rounds and Haiku attempts; `0` when none are reported/applicable. |
+| `rounds`, `haikuCalls` | Pipeline rounds and Haiku attempts; `0` when none are reported/applicable. Chat's top-level `rounds` is the index of the last generation round in `rag.mjs` (normally 1 + executed search/get tool rounds); see the exceptions below. |
 | `haiku` | Always `{ "in": number\|null, "out": number\|null, "thinking": number\|null }`; reported aggregate token usage. Output includes thinking. Thinking is `null` when not separately reported (including "included in outputTokens"), or when no Haiku call applies. Never log reasoning text. |
 | `jevTokens` | Sum of retrieval token counts, using each retrieval's existing estimate if measured usage is unavailable; `null` when unavailable. No new accounting call. |
 | `qLen` | Query length in UTF-16 code units, using the same trimmed query as the pipeline; `null` for requests without a query. |
@@ -27,13 +28,26 @@ month of the row's `ts`. The report runs outside the API sandbox.
 Rejected question/history-length requests retain query length/language metadata
 when a question is available, while omitting query text as before.
 
-The existing `q` and `a` retention policy is centralized in the `text` object in
-`logStat`; the owner has chosen to keep those fields. Existing optional
+The existing `q` and `a` fields are included by the `text` object in `logStat`;
+their whole-file retention is described below. Existing optional
 pipeline/detail fields remain: `queries`, `exists`, `jevMs`, `haikuMs`,
 `jevEstimatedTokens`, `retrievals`, `idOnlyCards`, `idOnlyCardsTotal`,
 `estInputTokens`, plus `cid`, `turns`, `debug`, `corrected`, `n`, `top`, `links`,
 `sym`, and `error` where already applicable. These are optional detail fields,
 not substitutes for the common fields. Raw `ua` and `ref` headers are removed.
+
+Only the first valid tool call in a model response runs; rejected calls do not
+increment `rounds`. Invalid-only responses force a recovery answer in the same
+round, and a packing failure after a search forces an answer without advancing
+the round index. Thus `rounds` is not an exact tool-call count; `retrievals[]`
+entries with `tool` are the reliable count of executed tool rounds.
+
+`retrievals[]` entries may carry `tool: "trussc_search"` or
+`tool: "trussc_get"`, copied from the corresponding pipeline trace by
+`pipelineStat`. Get rounds may also carry `ids`, the fetched corpus ids (at
+most 20). These fields describe individual retrieval rounds; the top-level
+`tool` still identifies an MCP tool request. MCP search and `/search` rows may
+contain 2–3 `queries`; then `q` is those validated queries joined with spaces.
 
 `/ask` and `/chat` identify the widget from its existing nonempty `page` hint or
 canonical site Origin (`https://trussc.org`, including `www`). Debug alone is not
@@ -129,7 +143,7 @@ Failure on `/ask`:
 {"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":6,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":"transport","errorClass":"TypeError","q":"circle"}
 ```
 
-## Monthly files and reporting
+## Daily files and retention
 
 `STATS_DIR` is defined in `config.mjs` and defaults to the sibling directory
 `new URL('../docs-ai-stats/', import.meta.url)`. In the deployed checkout this is
@@ -137,28 +151,104 @@ Failure on `/ask`:
 the directory before deployment; the API never creates directories. It holds
 stats only, and nothing in it is executed or sourced.
 
-Each row uses one timestamp for both `ts` and its UTC `YYYY-MM.jsonl` filename.
-Only names matching `^\d{4}-\d{2}\.jsonl$` can be created. The writer opens with
+Each row uses one timestamp for both `ts` and its UTC `YYYY-MM-DD.jsonl` filename.
+Only names matching `^\d{4}-\d{2}-\d{2}\.jsonl$` can be created. The writer opens with
 `O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW`, mode `0600`, makes a single append
-write for the complete JSON line and closes the file. Symlinks at the monthly
+write for the complete JSON line and closes the file. Symlinks at the daily
 filename are refused. Missing directories and open/write failures drop the line,
 warn once per process, and never fail request handling. Existing files retain
 their modes; the operator ensures migrated files use `0600`.
-There is no external rotation script, lock file or timer.
+There is no external rotation script or lock file.
+
+`STATS_RETENTION_DAYS` defaults to **183**. It must be an integer from 1 through
+3650; any invalid value (including an empty value) fails startup with a clear
+configuration error. At startup and every six hours the API runs `pruneStats`
+from `stats.mjs`. Its timer is `unref()`ed and does not keep the process alive.
+With `STATS=0`, logging and pruning are disabled and no prune timer is installed.
+
+The cutoff is today's UTC midnight minus the configured number of days. Daily
+files strictly older than that day are deleted; the day equal to the cutoff
+is kept. For example, on 2026-10-28 with 183 days, `2026-04-27.jsonl` is deleted
+and `2026-04-28.jsonl` is kept. Legacy `YYYY-MM.jsonl` files are deleted only
+when their **last** calendar day is strictly older than the cutoff. Until
+migration, that whole-month rule can keep older rows for up to an extra month.
+Eligible files are removed at the next successful prune run (normally within
+six hours); the policy applies to whole files, including query/answer text.
+
+When maintenance starts, pruning resolves the stats directory's real path once
+and records its device/inode. Before every run it checks that recorded path with
+`lstat`; a missing/non-directory/replaced directory skips the run with the fixed
+reason `directory-identity` and no deletion. Failed initialization stays disabled
+until process restart. Node has no directory-fd `unlinkat`; deletion joins the
+recorded real path with an exact-pattern filename containing no separators.
+The identity check is per run, not during a run; production containment against
+concurrent replacement comes from the systemd sandbox (`ProtectHome=tmpfs` with
+the stats directory bind-mounted), where the path is a mount point that cannot
+be renamed and its parent is visible only to the service in its mount namespace.
+Outside that sandbox, the operator must own the directory exclusively.
+Pruning admits only exact daily/monthly names with valid calendar dates, checks
+each eligible entry with `lstat`, and unlinks regular files only. Symlinks,
+directories, invalid dates and unrelated files are ignored; no child paths are
+traversed and no file contents are read. It needs only the existing read/write
+stats directory inside the service sandbox. Each enabled run, including runs
+with zero deletions, logs one line with the deleted-file count, deleted date
+filenames and fixed failure counts (`directory`, `clock`, `scan`, `inspect`,
+`delete`), never directory paths or contents. Stats text (`q`, `a`, rows) must
+never be printed to console or the journal: journald has no retention cap, so
+that would break the six-month deletion promise. Failures do not fail requests;
+other failures can be retried at the next run. The API still does not create a
+missing directory.
+
+## One-time monthly-to-daily migration
+
+Stop the service, then run the tool as the operator outside the API sandbox:
+
+```bash
+node tools/split-stats.mjs /path/to/stats --dry-run
+node tools/split-stats.mjs /path/to/stats
+```
+
+The tool splits each valid `YYYY-MM.jsonl` by row `ts` in UTC. Missing/invalid
+timestamps and timestamps outside that month go to its first day and increment
+the odd-row count. Malformed JSON and blank lines are preserved as odd rows;
+an unterminated final line counts too. Every line's raw bytes are preserved;
+only LF/CRLF line terminators become a single LF. JSON is parsed only to read
+`ts`, never reserialized for output, preserving the dashboard's SHA-256 raw-line
+deduplication while monthly and daily files coexist. Existing daily lines are
+kept and new lines added, then all lines for that day are stably sorted by timestamp. Invalid
+timestamps sort first; ties preserve existing lines before added lines.
+
+Each output is staged in the same directory, mode `0600`, fsynced and renamed.
+The monthly source is deleted only after every output is written and verified
+line totals match (including existing daily lines). Errors leave the monthly
+source and produce a non-zero exit status. Counts and fixed failure reasons are
+printed, never row contents or paths. `--dry-run` validates and prints counts
+without writing anything. Symlink/non-file monthly inputs are ignored and
+symlink/non-file daily destinations are refused. The tool holds one month's
+split/merge data in memory; run it with sufficient operator memory.
+
+If an error occurs after some output renames, those daily files can coexist
+with the monthly source. Inspect and reconcile that month's outputs before
+retrying to avoid adding those rows twice. Reporting during that state also
+counts both copies. Restart the service after a successful migration; startup
+pruning then deletes eligible old daily files. The API never runs migration.
+
+## Reporting
 
 ```bash
 node report.mjs
 node report.mjs 7 --include-debug
-STATS_DIR=/path/to/monthly node report.mjs
-node report.mjs --stats-dir /path/to/monthly --live /path/to/stats.jsonl
+STATS_DIR=/path/to/stats node report.mjs
+node report.mjs --stats-dir /path/to/stats --live /path/to/stats.jsonl
 ```
 
-The report streams monthly files in `STATS_DIR` plus the optional legacy
+The report streams daily and legacy monthly files in `STATS_DIR` plus the optional legacy
 worktree `stats.jsonl`, and tolerates either being absent. `--archive-dir` remains
 an alias for `--stats-dir`; `--live` selects a legacy input. After migration
 renames the legacy file to `stats.jsonl.migrated`, it is no longer read, so the
-monthly copies are counted once. See [deployment](deploy/DEPLOY.md#monthly-stats-deployment)
-for the coordinated switch and one-time migration.
+copies are counted once. The monthly-to-daily tool removes each completed
+monthly source to prevent double counting. See
+[deployment](deploy/DEPLOY.md#monthly-to-daily-stats-migration) for the migration step.
 
 Summaries group by endpoint, tool, client and row timestamp day. A positive day
 count sets an inclusive lower timestamp cutoff; `0` (the default) means all time.
@@ -166,7 +256,7 @@ Before opening files, the report skips filenames more than one month before the
 cutoff month. The extra month preserves compatibility with files from the former
 external rotation; later months are still read for its delayed historical rows.
 This compatibility rule assumes records are filed no earlier than the month
-before their timestamp month. Direct writes always use their timestamp month.
+before their timestamp month. Direct writes always use their timestamp day.
 Each admitted row is filtered by timestamp, debug flag and excluded IP before
 any aggregate changes.
 

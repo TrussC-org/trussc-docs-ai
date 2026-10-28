@@ -1,11 +1,90 @@
-// Usage stats: append one JSON line per request to STATS_DIR/YYYY-MM.jsonl. Deliberately tiny —
+// Usage stats: append one JSON line per request to STATS_DIR/YYYY-MM-DD.jsonl. Deliberately tiny —
 // no DB, no deps, fire-and-forget. Logging must NEVER break a response, so every
 // path is wrapped. Analyze later with jq (see README / report.mjs).
 import { constants, openSync, writeSync, closeSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import { STATS, STATS_DIR, STATS_SALT } from './config.mjs';
+import { STATS, STATS_DIR, STATS_SALT, STATS_RETENTION_DAYS } from './config.mjs';
+
+// Bound (maintenance destinations): only exact daily/monthly calendar filenames are eligible; ignore every other name.
+export function statsFileDate(name) {
+  const match = /^(\d{4}-(?:0[1-9]|1[0-2]))(?:-(\d{2}))?\.jsonl$/.exec(name);
+  if (!match || match[0] !== name) return null;
+  const month = match[1], day = match[2] ? `${month}-${match[2]}` : null;
+  const date = new Date(`${day || month + '-01'}T00:00:00.000Z`);
+  if (!Number.isFinite(date.getTime()) || (day && date.toISOString().slice(0, 10) !== day)) return null;
+  if (!day) { date.setUTCMonth(date.getUTCMonth() + 1); date.setUTCDate(0); }
+  return { month, day, lastDay: date.getTime() };
+}
+
+// Pin each maintenance directory once, including failed initialization (fail closed).
+// Separate injected filesystems keep offline tests independent of production state.
+const pruneDirectories = new WeakMap();
+function pruneDirectory(dir, io) {
+  if (!pruneDirectories.has(io)) pruneDirectories.set(io, new Map());
+  const directories = pruneDirectories.get(io);
+  if (!directories.has(dir)) directories.set(dir, (async () => {
+    try {
+      const path = await io.realpath(dir);
+      const info = await io.lstat(path);
+      return info.isDirectory() ? { path, dev: info.dev, ino: info.ino } : null;
+    } catch { return null; }
+  })());
+  return directories.get(dir);
+}
+
+// Asynchronous directory-only maintenance; failures and diagnostics cannot break requests.
+// Never print stats text (q, a, rows) to console/journal: journald has no retention
+// cap, so doing so would break the six-month deletion promise.
+// Inject the clock, directory and filesystem for offline boundary/failure tests.
+export async function pruneStats({ dir = STATS_DIR, now = () => new Date(), io = fs } = {}) {
+  const counts = { deleted: 0, failures: { directory: 0, clock: 0, scan: 0, inspect: 0, delete: 0 } };
+  if (!STATS) return counts;
+  const deleted = [];
+  try {
+    const pinned = await pruneDirectory(dir, io);
+    // Check identity per run, not during a run. Production containment against
+    // concurrent replacement comes from systemd's ProtectHome=tmpfs with the stats
+    // directory bind-mounted: inside the service's mount namespace the path is a
+    // mount point that cannot be renamed, and only the service sees its parent.
+    // Outside that sandbox, the operator must own the directory exclusively.
+    try {
+      if (!pinned) throw new Error('directory identity');
+      const info = await io.lstat(pinned.path);
+      if (!info.isDirectory() || info.dev !== pinned.dev || info.ino !== pinned.ino) throw new Error('directory identity');
+    } catch { counts.failures.directory++; return counts; }
+    let cutoff;
+    try {
+      const today = new Date(now());
+      today.setUTCHours(0, 0, 0, 0);
+      cutoff = today.getTime() - STATS_RETENTION_DAYS * 86400000;
+      if (!Number.isFinite(cutoff)) throw new Error('invalid clock');
+    } catch { counts.failures.clock++; return counts; }
+    try {
+      const directory = await io.opendir(pinned.path);
+      for await (const entry of directory) {
+        const date = statsFileDate(entry.name);
+        if (!date || date.lastDay >= cutoff) continue;
+        const file = join(pinned.path, entry.name);
+        let info;
+        try { info = await io.lstat(file); }
+        catch { counts.failures.inspect++; continue; }
+        if (!info.isFile()) continue;
+        // Node has no unlinkat with a directory fd: use the recorded real directory
+        // and an exact-pattern name (no separators); unlink removes the entry itself.
+        try { await io.unlink(file); counts.deleted++; deleted.push(entry.name); }
+        catch { counts.failures.delete++; }
+      }
+    } catch { counts.failures.scan++; }
+  } finally {
+    const f = counts.failures;
+    // One count line even for zero deletions; names are validated dates, never rows.
+    try { console.log(`stats prune: deleted=${counts.deleted} files=[${deleted.join(',')}]${f.directory ? ' skipped=directory-identity' : ''} failures(directory=${f.directory},clock=${f.clock},scan=${f.scan},inspect=${f.inspect},delete=${f.delete})`); } catch {}
+  }
+  return counts;
+}
 
 // Pseudonymize the client IP: a salted hash, truncated. Lets us count distinct
 // visitors / spot abuse without storing raw IPs.
@@ -102,15 +181,15 @@ let warned = false;
 export function logStat(rec) {
   if (!STATS) return;
   try {
-    // Existing text fields live ONLY here. Query and answer retention
-    // remains the owner-approved policy.
+    // Never print q, a or rows to console/journal: journald has no retention cap
+    // and would break the six-month deletion promise. Whole-file retention is above.
     const { q, a, ...fields } = rec;
     const text = { ...(typeof q === 'string' ? { q } : {}),
       ...(typeof a === 'string' ? { a: a.slice(0, 4000) } : {}) };
     const ts = new Date().toISOString();
-    const name = ts.slice(0, 7) + '.jsonl';
-    // Bound (stats destination): only a four-digit UTC year/month filename.
-    if (!/^\d{4}-\d{2}\.jsonl$/.test(name)) throw new Error('invalid stats month');
+    const name = ts.slice(0, 10) + '.jsonl';
+    // Bound (stats destination): only a four-digit UTC year/month/day filename; invalid names drop the row.
+    if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) throw new Error('invalid stats day');
     const line = JSON.stringify({ ...fields,
       ts, ep: rec.ep, tool: rec.tool ?? null,
       client: rec.client ?? 'http', ms: rec.ms ?? null,

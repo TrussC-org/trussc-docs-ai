@@ -123,12 +123,18 @@ export const EMBEDDED = process.env.EMBEDDED || new URL('./chunks.embedded.json'
 export const EMBEDDED_NEXT = process.env.EMBEDDED_NEXT || (/\.json$/.test(EMBEDDED) ? EMBEDDED.replace(/\.json$/, '.next.json') : EMBEDDED + '.next');
 
 // --- Usage stats ------------------------------------------------------------
-// One JSON line per request appended to STATS_DIR/YYYY-MM.jsonl (no DB, no deps). Analyze with
+// One JSON line per request appended to STATS_DIR/YYYY-MM-DD.jsonl (no DB, no deps). Analyze with
 // jq later. STATS_SALT keys the per-IP hash — set a real secret in prod so IPs
 // can't be reversed/correlated. Set STATS=0 to disable logging entirely.
 export const STATS = process.env.STATS !== '0';
 export const STATS_DIR = process.env.STATS_DIR || new URL('../docs-ai-stats/', import.meta.url).pathname;
 export const STATS_SALT = process.env.STATS_SALT || 'trussc-docs-ai-dev';
+// Bound (configuration): retention must be an integer in 1..3650 days; invalid/out-of-range values fail startup.
+const retention = process.env.STATS_RETENTION_DAYS ?? '183';
+export const STATS_RETENTION_DAYS = Number(retention);
+if (/^\d+$/.exec(retention)?.[0] !== retention || !Number.isInteger(STATS_RETENTION_DAYS) || STATS_RETENTION_DAYS < 1 || STATS_RETENTION_DAYS > 3650) {
+    throw new Error('STATS_RETENTION_DAYS must be an integer from 1 to 3650');
+}
 
 // Jev card selection. Credentials are read only from the service environment.
 function numberEnv(name, fallback, { integer = false } = {}) {

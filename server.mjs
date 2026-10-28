@@ -168,7 +168,8 @@ export const server = createServer(async (req, res) => {
                     queryText = query;
                     const retrieved = await retrieve(query, k, { lang, ip });
                     pipeline = pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [query] });
-                    return searchResponse(retrieved, retrieved.map(c => toResult(c, full)));
+                    // Bound (output): MCP shows at most k cards (up to 20); excess selections remain eligible for related suggestions.
+                    return searchResponse(retrieved, retrieved.slice(0, k).map(c => toResult(c, full)));
                 }),
                 get: capture(getByIds),
             });
@@ -242,7 +243,8 @@ export const server = createServer(async (req, res) => {
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
             const retrieved = await retrieve(question, k, { lang: body.lang, ip });   // body.lang:'lua' for TrussSketch; else C++ (default)
-            const results = retrieved.map((c) => toResult(c, !!body.full));
+            // Bound (output): the stdio proxy shows at most its requested k; excess selections remain eligible for related suggestions.
+            const results = (proxy ? retrieved.slice(0, k) : retrieved).map((c) => toResult(c, !!body.full));
             record({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [question] }), ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             const info = retrievalInfo(retrieved);
             return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });

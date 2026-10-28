@@ -170,3 +170,10 @@ and query parameters. The public debug schema's existing `haiku.inputTokens` is
 now an array aligned with `estInputTokens`; `inputTokensTotal` retains the round
 sum. No variant configuration, thinking content or thinking-specific counts enter
 the public debug allowlist.
+
+## Related-list coverage
+
+The [related-list eval](../related/README.md) records the real MCP search path
+from the docs-ai key-holding shell, then compares ranked/related/neighbour list
+mixes offline with ids-only output. Tune on the improvement set and use the
+held-out set only once. This evaluates MCP suggestions; chat has no such list yet.

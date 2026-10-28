@@ -14,6 +14,9 @@ export const OLLAMA = process.env.OLLAMA_URL || 'http://localhost:11434';
 export const GEN_MODEL = process.env.GEN_MODEL || 'qwen3.5:4b';  // chosen: fits 8GB w/ headroom + long ctx; accuracy via the verify pass
 export const EMBED_MODEL = process.env.EMBED_MODEL || 'bge-m3'; // multilingual ja/ko/en
 export const TOP_K = Number(process.env.TOP_K || 8);           // non-example chunks fed to the model per question
+// Bound (output): accept up to 10 ranked, 6 related and 6 near cards, inspecting the first 5 neighbours per shown card; stop at 16 unique suggestions. Excess targets are omitted (offline eval may override, e.g. total 24).
+export const RELATED_MIX = Object.freeze({ counts: Object.freeze({ ranked: 10, related: 6, near: 6 }),
+    order: Object.freeze(['ranked', Object.freeze(['related', 'near'])]), nearPerShown: 5, total: 16 });
 export const PIN_K = Number(process.env.PIN_K || 6);           // carried-over "important" chunks from earlier turns (LLM-curated)
 export const HYBRID = process.env.HYBRID !== '0';             // fuse BM25 (lexical) with bge (dense) via RRF; HYBRID=0 to disable
 export const RRF_K = Number(process.env.RRF_K || 60);         // Reciprocal Rank Fusion constant (standard ~60)

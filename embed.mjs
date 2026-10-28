@@ -8,6 +8,7 @@
 // Force a full re-embed with EMBED_FORCE=1.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { OLLAMA, EMBED_MODEL, CHUNKS, EMBEDDED, EMBEDDED_NEXT } from './config.mjs';
 
 const BATCH = 16;   // /api/embed takes an array — batch for throughput
@@ -76,56 +77,130 @@ async function embedBatch(items) {
     return out;
 }
 
-// Cache: hash → vector, recovered from the previous corpus (skipped without vhash,
-// i.e. a corpus written before this scheme — that run just re-embeds everything).
-const cache = new Map();
-if (!FORCE && existsSync(EMBEDDED)) {
-    try {
-        for (const c of JSON.parse(readFileSync(EMBEDDED, 'utf8'))) {
-            if (!Array.isArray(c.vhash) || !Array.isArray(c.vectors)) continue;
-            c.vhash.forEach((h, i) => { if (c.vectors[i]) cache.set(h, c.vectors[i]); });
+// Bound (cache): keep only the nearest 12 non-Lua primary-vector ids per card; lower similarities are discarded.
+export const NEAR_STORE = 12;
+// Bound (memory): primary dimensions must be 1..4096 and the normalization workspace at most 8,388,608 Float64 elements (64 MiB); reject the build before allocating on invalid shape, values or size.
+const MAX_NEAR_DIM = 4096, MAX_NEAR_ELEMENTS = 8 * 1024 * 1024;
+class InvalidPrimaryVector extends Error {}
+export function computeNeighbours(chunks, count = NEAR_STORE) {
+    // Bound (configuration): finite non-negative integer neighbour counts only; invalid values fail before computation.
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('Invalid neighbour count');
+    const cards = chunks.filter(c => c.lang !== 'lua').slice().sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const n = cards.length;
+    let dim = 0;
+    for (const c of cards) {
+        const v = c.vectors?.[0] || c.vector;
+        if (!Array.isArray(v)) throw new InvalidPrimaryVector('Invalid primary vector: expected an array of finite numbers');
+        if (v.length < 1 || v.length > MAX_NEAR_DIM) throw new InvalidPrimaryVector('Invalid primary vector: dimension must be 1..4096');
+        if (dim && v.length !== dim) throw new InvalidPrimaryVector('Invalid primary vector: dimensions must match');
+        dim = v.length;
+        if (n > Math.floor(MAX_NEAR_ELEMENTS / dim)) throw new InvalidPrimaryVector('Invalid primary vector: neighbour workspace exceeds 8388608 elements (64 MiB)');
+        for (let k = 0; k < dim; k++) if (!Number.isFinite(v[k]))
+            throw new InvalidPrimaryVector('Invalid primary vector: expected an array of finite numbers');
+    }
+    const data = new Float64Array(n * dim);
+    cards.forEach((c, i) => {
+        const v = c.vectors?.[0] || c.vector;
+        // Scale first so squaring finite components cannot overflow or erase tiny vectors.
+        let scale = 0;
+        for (let k = 0; k < dim; k++) scale = Math.max(scale, Math.abs(v[k]));
+        scale ||= 1;
+        let norm = 0;
+        for (let k = 0; k < dim; k++) {
+            const value = v[k] / scale;
+            data[i * dim + k] = value;
+            norm += value * value;
         }
-    } catch { /* unreadable/old corpus → treat as a cold cache */ }
-}
-
-const chunks = readFileSync(CHUNKS, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-
-// Each chunk owns a BUNDLE of vectors: its combined text + any extra embedTexts
-// (e.g. per-file slices of an example). Flatten every (chunk, text) into one list,
-// batch-embed, then regroup so chunk.vectors holds all its vectors in order.
-const flat = [];
-for (let ci = 0; ci < chunks.length; ci++) {
-    const texts = [chunks[ci].text, ...(chunks[ci].embedTexts || [])];
-    texts.forEach((text, k) => {
-        const sent = fitBudget(text);
-        flat.push({ ci, id: k ? `${chunks[ci].id}#${k}` : chunks[ci].id, sent, truncated: sent !== text, hash: hashOf(text) });
+        norm = Math.sqrt(norm) || 1;
+        for (let k = 0; k < dim; k++) data[i * dim + k] /= norm;
     });
+    const keep = Math.min(count, Math.max(0, n - 1));
+    const top = Array.from({ length: n }, () => []);
+    function offer(i, j, score) {
+        const list = top[i];
+        let at = list.length;
+        while (at > 0 && (score > list[at - 1].score || (score === list[at - 1].score && j < list[at - 1].j))) at--;
+        if (at >= keep) return;
+        list.splice(at, 0, { j, score });
+        if (list.length > keep) list.pop();
+    }
+    // Normalize once, calculate each pair once, and retain only small sorted top-k lists.
+    if (keep) for (let i = 0; i < n; i++) {
+        const a = i * dim;
+        for (let j = i + 1; j < n; j++) {
+            const b = j * dim;
+            let dot = 0;
+            for (let k = 0; k < dim; k++) dot += data[a + k] * data[b + k];
+            offer(i, j, dot); offer(j, i, dot);
+        }
+    }
+    return new Map(cards.map((c, i) => [c.id, top[i].map(hit => cards[hit.j].id)]));
 }
 
-const vecs = new Array(flat.length);
-const todo = [];                        // indices into flat that the cache can't cover
-flat.forEach((f, idx) => {
-    const hit = cache.get(f.hash);
-    if (hit) vecs[idx] = hit; else todo.push(idx);
-});
-const hits = flat.length - todo.length;
-console.log(`${flat.length} vectors: ${hits} cached, ${todo.length} to embed`);
+export async function main() {
+    // Cache: hash → vector, recovered from the previous corpus (skipped without vhash,
+    // i.e. a corpus written before this scheme — that run just re-embeds everything).
+    const cache = new Map();
+    if (!FORCE && existsSync(EMBEDDED)) {
+        try {
+            for (const c of JSON.parse(readFileSync(EMBEDDED, 'utf8'))) {
+                if (!Array.isArray(c.vhash) || !Array.isArray(c.vectors)) continue;
+                c.vhash.forEach((h, i) => { if (c.vectors[i]) cache.set(h, c.vectors[i]); });
+            }
+        } catch { /* unreadable/old corpus → treat as a cold cache */ }
+    }
 
-for (let i = 0; i < todo.length; i += BATCH) {
-    const slice = todo.slice(i, i + BATCH);
-    const v = await embedBatch(slice.map((idx) => flat[idx]));
-    slice.forEach((idx, j) => { vecs[idx] = v[j]; });
-    process.stdout.write(`\rembedded ${Math.min(i + BATCH, todo.length)}/${todo.length} vectors`);
+    const chunks = readFileSync(CHUNKS, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+    // Each chunk owns a BUNDLE of vectors: its combined text + any extra embedTexts
+    // (e.g. per-file slices of an example). Flatten every (chunk, text) into one list,
+    // batch-embed, then regroup so chunk.vectors holds all its vectors in order.
+    const flat = [];
+    for (let ci = 0; ci < chunks.length; ci++) {
+        const texts = [chunks[ci].text, ...(chunks[ci].embedTexts || [])];
+        texts.forEach((text, k) => {
+            const sent = fitBudget(text);
+            flat.push({ ci, id: k ? `${chunks[ci].id}#${k}` : chunks[ci].id, sent, truncated: sent !== text, hash: hashOf(text) });
+        });
+    }
+
+    const vecs = new Array(flat.length);
+    const todo = [];                        // indices into flat that the cache can't cover
+    flat.forEach((f, idx) => {
+        const hit = cache.get(f.hash);
+        if (hit) vecs[idx] = hit; else todo.push(idx);
+    });
+    const hits = flat.length - todo.length;
+    console.log(`${flat.length} vectors: ${hits} cached, ${todo.length} to embed`);
+
+    for (let i = 0; i < todo.length; i += BATCH) {
+        const slice = todo.slice(i, i + BATCH);
+        const v = await embedBatch(slice.map((idx) => flat[idx]));
+        slice.forEach((idx, j) => { vecs[idx] = v[j]; });
+        process.stdout.write(`\rembedded ${Math.min(i + BATCH, todo.length)}/${todo.length} vectors`);
+    }
+    if (todo.length) process.stdout.write('\n');
+    const cut = todo.filter((idx) => flat[idx].truncated).map((idx) => flat[idx].id);
+    if (cut.length) console.log(`truncated ${cut.length} embed input(s) to ~${TOKEN_BUDGET} tokens: ${cut.slice(0, 40).join(', ')}${cut.length > 40 ? ', …' : ''}`);
+
+    for (const c of chunks) { c.vectors = []; c.vhash = []; }
+    flat.forEach((f, idx) => { chunks[f.ci].vectors.push(vecs[idx]); chunks[f.ci].vhash.push(f.hash); });
+    for (const c of chunks) delete c.embedTexts;
+
+    const nearStarted = performance.now();
+    const neighbours = computeNeighbours(chunks);
+    for (const c of chunks) if (c.lang !== 'lua') c.near = neighbours.get(c.id);
+    console.log(`neighbours: ${neighbours.size} chunks, ${((performance.now() - nearStarted) / 1000).toFixed(3)} s`);
+
+    // The live corpus (EMBEDDED) is only the vector cache; the result goes to EMBEDDED_NEXT.
+    writeFileSync(EMBEDDED_NEXT, JSON.stringify(chunks));
+    const totalVecs = chunks.reduce((n, c) => n + c.vectors.length, 0);
+    console.log(`wrote ${chunks.length} chunks / ${totalVecs} vectors (dim ${chunks[0]?.vectors[0]?.length}) → ${EMBEDDED_NEXT}`);
+
 }
-if (todo.length) process.stdout.write('\n');
-const cut = todo.filter((idx) => flat[idx].truncated).map((idx) => flat[idx].id);
-if (cut.length) console.log(`truncated ${cut.length} embed input(s) to ~${TOKEN_BUDGET} tokens: ${cut.slice(0, 40).join(', ')}${cut.length > 40 ? ', …' : ''}`);
-
-for (const c of chunks) { c.vectors = []; c.vhash = []; }
-flat.forEach((f, idx) => { chunks[f.ci].vectors.push(vecs[idx]); chunks[f.ci].vhash.push(f.hash); });
-for (const c of chunks) delete c.embedTexts;
-
-// The live corpus (EMBEDDED) is only the vector cache; the result goes to EMBEDDED_NEXT.
-writeFileSync(EMBEDDED_NEXT, JSON.stringify(chunks));
-const totalVecs = chunks.reduce((n, c) => n + c.vectors.length, 0);
-console.log(`wrote ${chunks.length} chunks / ${totalVecs} vectors (dim ${chunks[0]?.vectors[0]?.length}) → ${EMBEDDED_NEXT}`);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    try { await main(); } catch (error) {
+        if (!(error instanceof InvalidPrimaryVector)) throw error;
+        console.error(error.message); process.exitCode = 1;
+    }
+}

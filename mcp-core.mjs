@@ -6,6 +6,8 @@
 // {results, path, exists, missingSymbols, candidates} (legacy arrays also work); returns the response
 // object, or null for notifications (nothing to send back).
 
+import { RELATED_MIX } from './config.mjs';
+
 export const TOOLS = [{
     name: 'trussc_search',
     description:
@@ -24,7 +26,7 @@ export const TOOLS = [{
         'Results may include a line saying a name does not appear in the documentation, ' +
         'near names, or a notice that the results probably do not answer the query. ' +
         'These results are labelled as closest matches. Cards show ids, followed by ' +
-        'Other possibly related titles and ids for follow-up with trussc_get.',
+        'Other possibly related titles, short descriptions (when available), and ids for follow-up with trussc_get.',
     inputSchema: {
         type: 'object',
         properties: {
@@ -40,7 +42,7 @@ export const TOOLS = [{
     description:
         'Fetch the FULL text of specific TrussC corpus chunks by id — use after ' +
         'trussc_search to expand a trimmed example (or any chunk) to its complete ' +
-        'multi-file source. Pass ids exactly as shown in results / the [#id] tags: ' +
+        'multi-file source. Pass ids as shown in results / the [#id] tags (a leading # is accepted): ' +
         'API symbols are "symbol:drawCircle" / "symbol:Fbo::begin", plus ' +
         '"example:shaderExample", "addon:tcxOsc", "release:v0.6.2", "issue:257", "doc:...", "concept:...".',
     inputSchema: {
@@ -246,23 +248,79 @@ function utf8Prefix(value, bytes) {
     }
     return out;
 }
+// Shared by corpus-facing search metadata, MCP formatting and offline byte accounting.
+export function sanitizeRelatedText(value, bytes) {
+    // Bound (work): inspect only a UTF-8 prefix of the field's byte budget before cleaning; excess upstream text is discarded.
+    return utf8Prefix(utf8Prefix(typeof value === 'string' ? value : '', bytes).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, ' ')
+        .replace(/\[#/g, '[ #').replace(/\s+/g, ' ').trim(), bytes);
+}
 export function relatedCandidates(ranked) {
     const seen = new Set(), out = [];
-    // Bound (output): retain 40 title/id candidates (20 cards + 20 spare slots).
-    // Titles use at most 192 UTF-8 bytes; ids over 256 bytes are omitted, never
-    // truncated, so trussc_get still receives exact ids. Overflow is not counted.
+    // Bound (output): retain 40 candidates; titles fit 192 bytes and briefs 160. Invalid ids or ids over 256 bytes are omitted, never truncated.
     for (const c of ranked) {
-        if (typeof c?.id !== 'string' || !c.id || c.id.length > 256 || /[\x00-\x1f\x7f]/.test(c.id) || seen.has(c.id) || Buffer.byteLength(c.id) > 256) continue;
+        if (typeof c?.id !== 'string' || !c.id || c.lang === 'lua' || /[\x00-\x1f\x7f-\x9f\u2028\u2029]|\[#/.test(c.id) || seen.has(c.id) || Buffer.byteLength(c.id) > 256) continue;
         seen.add(c.id);
-        out.push({ id: c.id, title: utf8Prefix((typeof c.title === 'string' ? c.title.slice(0, 193) : '').replace(/[\r\n\t]/g, ' '), 192) });
+        const brief = sanitizeRelatedText(c.brief ?? c.meta?.brief, 160);
+        out.push({ id: c.id, title: sanitizeRelatedText(c.title, 192), ...(brief ? { brief } : {}) });
         if (out.length === 40) break;
+    }
+    return out;
+}
+export function relatedText(cards) {
+    return cards.length ? '\n\nOther possibly related:\n' + cards.map(relatedLine).join('\n') : '';
+}
+export function relatedLine(c) {
+    return `- ${c.title}${c.brief ? ` — ${c.brief}` : ''} [#${c.id}]`;
+}
+// Pure: accepts corpus cards (or ids for shown/ranked) and operator/eval mix parameters.
+// order contains sequential phases; an array phase interleaves sources by shown-card order.
+export function buildRelatedList({ shown = [], ranked = [], corpus = [], mix = RELATED_MIX } = {}) {
+    const options = { ...RELATED_MIX, ...mix, counts: { ...RELATED_MIX.counts, ...mix.counts } };
+    const sources = ['ranked', 'related', 'near'];
+    // Bound (configuration): quotas, total and per-shown M must be non-negative safe integers; invalid limits/order fail before filling.
+    if ([options.total, options.nearPerShown, ...sources.map(s => options.counts[s])].some(n => !Number.isSafeInteger(n) || n < 0) ||
+        !Array.isArray(options.order) || options.order.some(p => !(Array.isArray(p) ? p : [p]).every(s => sources.includes(s)))) throw new Error('Invalid related mix');
+    const byId = corpus instanceof Map ? corpus : new Map(corpus.map(c => [c.id, c]));
+    const card = c => typeof c === 'string' ? byId.get(c) : byId.get(c?.id) || c;
+    const shownCards = shown.map(card).filter(Boolean);
+    const seen = new Set(shown.map(c => typeof c === 'string' ? c : c.id)), out = [];
+    const used = { ranked: 0, related: 0, near: 0 };
+    function add(c, source) {
+        if (!c || c.lang === 'lua' || seen.has(c.id) || used[source] >= options.counts[source] || out.length >= options.total) return;
+        const entry = relatedCandidates([c])[0];
+        if (!entry) return;
+        seen.add(c.id); used[source]++;
+        out.push({ ...entry, source });
+    }
+    function targets(source, c) {
+        if (source === 'ranked') return ranked.map(card);
+        if (source === 'near') return (c?.near || []).slice(0, options.nearPerShown).map(id => byId.get(id));
+        return (c?.meta?.related || []).map(name => {
+            if (typeof name !== 'string') return null;
+            const normalized = name.trim().replace(/^tc::/, '').replace(/\(.*$/, '').trim();
+            return byId.get(name) || byId.get('symbol:' + normalized);
+        });
+    }
+    for (const phase of options.order) {
+        if (Array.isArray(phase)) {
+            for (const c of shownCards) {
+                const queues = phase.map(source => targets(source, c));
+                const length = Math.max(0, ...queues.map(q => q.length));
+                for (let i = 0; i < length && out.length < options.total; i++)
+                    phase.forEach((source, j) => add(queues[j][i], source));
+            }
+        } else if (phase === 'ranked') {
+            for (const c of targets(phase)) add(c, phase);
+        } else for (const c of shownCards) for (const target of targets(phase, c)) add(target, phase);
     }
     return out;
 }
 // Both HTTP MCP and the stdio proxy use the same serializable metadata shape.
 export function searchResponse(retrieved, results) {
     const info = retrieved.retrieval || {};
-    return { results, path: info.path, exists: info.exists, ...(retrieved.search || {}) };
+    const search = retrieved.relatedFor ? { missingSymbols: retrieved.search?.missingSymbols } : retrieved.search || {};
+    return { results, path: info.path, exists: info.exists, ...search,
+        ...(retrieved.relatedFor ? { candidates: retrieved.relatedFor(results) } : {}) };
 }
 export function formatSearchResults(results, query, info = {}) {
     const missing = boundedMissingSymbols(info.missingSymbols);
@@ -272,12 +330,11 @@ export function formatSearchResults(results, query, info = {}) {
         low && "These results probably don't answer the query.",
         (low || missing.length > 0) && 'Closest matches:'].filter(Boolean).join('\n');
     const shown = new Set(results.map(c => c.id));
-    // Bound (output): append at most 16 related titles, each <= 192 UTF-8 bytes
-    // with an exact id <= 256 bytes. Overflow is omitted and is not counted.
+    // Bound (output): at most 16 lines, each <= 619 UTF-8 bytes (192 title + 160 brief + 256 id + 11 punctuation); list <= 9919 bytes (9945 with header). Overflow is omitted and is not counted.
     // Bound (work): the stdio upstream may supply arbitrary metadata. Inspect
     // only its first 40 candidate slots, then validate with the producer's limits.
     const related = relatedCandidates(Array.isArray(info.candidates) ? info.candidates.slice(0, 40) : []).filter(c => !shown.has(c.id)).slice(0, 16);
-    const tail = related.length ? '\n\nOther possibly related:\n' + related.map(c => `- ${c.title} [#${c.id}]`).join('\n') : '';
+    const tail = relatedText(related);
     // Bound (output): the entire search text fits 256 KiB, including warnings and
     // related titles. Overflow truncates card text with a get hint; not counted.
     const head = intro ? intro + '\n\n' : '';

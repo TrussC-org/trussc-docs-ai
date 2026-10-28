@@ -108,13 +108,19 @@ and a working example. Prefer APIs that appear in its results; do not invent one
   query." Missing names or low coverage label the cards as closest matches.
   Fallback has no coverage warning. Selection still keeps its minimum four cards
   when available (the caller's `k` may show fewer).
-  After the cards, **Other possibly related** lists up to 16 distinct titles and
-  exact ids, excluding shown cards. Order is Jev relevance on that path and RRF
-  on fallback, even if a fallback reranker reordered the full cards. Titles are
-  capped at 192 UTF-8 bytes and ids at 256 bytes (oversized ids are omitted).
+  After the cards, **Other possibly related** lists up to 16 distinct suggestions,
+  excluding shown cards and Lua cards. It first takes up to 10 ranked leftovers
+  (Jev relevance on that path, RRF on fallback), then visits shown cards in order,
+  interleaving their related targets and stored primary-vector neighbours. Related
+  and neighbour sources each accept up to 6 unique cards; only the first 5 stored
+  neighbours per shown card are considered. Duplicates and unresolved targets do
+  not consume source quotas. Each line is `- title — brief [#id]`, or
+  `- title [#id]` when no brief exists. Titles are capped at 192 UTF-8 bytes,
+  briefs at 160 bytes and ids at 256 bytes (oversized ids are omitted).
   The whole search text is capped at 256 KiB; oversized card output is truncated
-  with a `trussc_get` hint. `/search` carries the same bounded title/id candidate
-  metadata, coverage and missing names for the stdio MCP proxy.
+  with a `trussc_get` hint. `/search` carries the same bounded candidate metadata
+  in final list order: `candidates[]` entries have `id`, `title` and an optional
+  `brief`, alongside coverage and missing names for the stdio MCP proxy.
   - `lang` — API flavor. `"cpp"` (default) is the C++ framework; `"lua"` targets
     **TrussSketch** (the in-browser Lua playground) — it prefers the Lua twin of each
     symbol (colon-call methods, `Type.new(...)`, reserved-word renames like `fbo:end_fbo()`)
@@ -122,6 +128,9 @@ and a working example. Prefer APIs that appear in its results; do not invent one
 - **`trussc_get(ids)`** — fetch the FULL text of specific chunks (e.g. expand a trimmed
   example). Ids are exactly as shown in results / the `[#id]` tags: `symbol:drawCircle`,
   `symbol:Fbo::begin`, `example:shaderExample`, `addon:tcxOsc`, `issue:257`, `doc:...`, `concept:...`.
+  One leading `#` is accepted (for example `#symbol:drawCircle`); exactly one is
+  removed before lookup. All other characters, including surrounding whitespace,
+  are preserved. The same rule applies to `/get` and older stdio proxies.
 
 The intended agent move: `trussc_search` to find the right chunks cheaply, then
 `trussc_get` (or `full:true`) for the one or two you actually need in full.

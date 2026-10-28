@@ -15,8 +15,8 @@ dials out.
 
 ### 1. Node + Ollama
 ```bash
-# Node (v18+; nvm or distro package)
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
+# Node (v24 LTS; nvm or distro package)
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt install -y nodejs
 # Ollama (needs a recent version; qwen3.5:4b requires Ollama ≥ 0.30)
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen3.5:4b   # GEN_MODEL in the systemd unit — must match

@@ -14,7 +14,7 @@ MODEL = os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 # use_fp16 halves VRAM (~2.3GB) with negligible quality loss; uses GPU if torch sees one.
 reranker = FlagReranker(MODEL, use_fp16=True)
 
-# Bound (cache): one request. docs-ai sends RERANK_CANDIDATES (default 30) texts of about
+# Bound (security): one request. docs-ai sends RERANK_CANDIDATES (default 30) texts of about
 # 800 chars at most; its query is the question (<= 8000 chars) joined with up to three
 # re-search queries (<= 200 chars each), about 8600 chars. vault-search sends 12 x 300 chars.
 # Overflow is refused with 413 (body) or 400 (fields), never truncated.

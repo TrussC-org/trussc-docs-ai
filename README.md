@@ -309,6 +309,51 @@ per-IP window; missing credentials make it and the gate fail clearly. The paired
 comparison is unchanged. A first check after changing retrieval may compare
 different selected cards against the accepted retrieval baseline.
 
+### Answer eval
+
+Run these commands **only from the docs-ai shell holding the keys**, with the
+intended corpus and embedding service available. Generation requires
+`GEN_BACKEND=anthropic` and `ANTHROPIC_API_KEY`; Jev retrieval uses the exported
+`TYPESAFE_API_KEY`. The judge uses `~/.config/jev/key` or `$JEV_KEY_FILE`, like
+the fair retrieval judge. Keep question files and run outputs outside the repo.
+Tune on the improvement set; use the held-out set once, with **Jev only** as judge.
+
+```bash
+GEN_BACKEND=anthropic node eval/answers/answer.mjs "$IMPROVEMENT_QUESTIONS" "$RUN_DIR/answers-A.json" --jobs 3
+python3 eval/answers/judge_jev.py "$IMPROVEMENT_QUESTIONS" "$RUN_DIR/answers-A.json" "$RUN_DIR/judge-A.json" --jobs 8
+# Repeat for candidate B on the same questions, then compare:
+python3 eval/answers/compare.py "$IMPROVEMENT_QUESTIONS" "$RUN_DIR/judge-A.json" "$RUN_DIR/judge-B.json" "$RUN_DIR/answers-A.json" "$RUN_DIR/answers-B.json"
+# Optional subset/resume (ids are comma-separated, in question-file order):
+GEN_BACKEND=anthropic node eval/answers/answer.mjs "$IMPROVEMENT_QUESTIONS" "$RUN_DIR/subset.json" --ids a,b,c --limit 2 --resume
+```
+
+The runner consumes `answerStream(question)` with default history/page/k/options,
+records the final user-visible text and usage, and forces stats off. It atomically
+saves after each completion; `--resume` retains existing ids, including failed
+ones. Remove a failed row to retry it. `--limit` applies after `--ids`, before
+resume skips. Resume rejects saved rows with unknown fields, missing fields or
+invalid types before writing or generating answers. Question ids must be unique
+non-empty strings; the runner, judge and comparison reject numeric or blank ids
+with the fixed error `ids must be non-empty strings` (prefixed by the tool name).
+No question field, query strings or traces enter results. `text` is the model's
+answer verbatim as provided by the final event (with resolved links), and can quote
+the question. Answer files are private eval data and must stay outside the repo,
+like the question files.
+
+Jev grades correctness against the reference (0/1/2; certainty below 0.4 scores 1)
+and flags contradictions as `wrong`. Generation errors score 0 with `failed=true`;
+judge errors remain ungraded and return nonzero. Comparison requires identical,
+fully graded id sets, prints B−A totals, better/worse counts and changed ids, splits
+by `lang`/`type`, and optionally reports mean usage and latency. Missing usage is
+excluded from means, with sample counts. See [the output contract](eval/answers/README.md#answer-level-evaluation).
+
+Offline tests (synthetic data, injected HTTP, no keys):
+
+```bash
+node test-answer-eval.mjs
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s eval/answers -p 'test_*.py' -v
+```
+
 The corpus (`chunks.embedded.json`) is **generated at deploy time, not kept in git**:
 it is built from the TrussC and trussc.org checkouts on the server. The GitHub caches
 `releases.json`, `issues.json` and `addon-registry.json` are generated caches too;

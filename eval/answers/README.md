@@ -1,4 +1,69 @@
-# Offline Haiku variants
+# Answer evaluations
+
+## Answer-level evaluation
+
+`answer.mjs <questions.json> <out.json> [--jobs 3] [--limit N] [--ids a,b,c] [--resume]`
+runs the real `answerStream(question)` without history or option overrides. It
+requires `GEN_BACKEND=anthropic` and `ANTHROPIC_API_KEY` in the environment,
+forces `STATS=0` before loading configuration, and inherits the production corpus,
+retrieval and model settings. It never loads key files. Jev retrieval needs
+`TYPESAFE_API_KEY`; the usual service fallback remains available and is recorded.
+
+Each result has `id`, `text` (the final event's resolved answer), `usedIds`,
+`rounds`, `queries` (count including the initial query), `haikuCalls`,
+`inputTokens`, `outputTokens` (reported Haiku totals including correction/recovery),
+`jevEstimatedTokens`, `path` (`jev` / `fallback`, from the final event), and `ms`
+(whole-question elapsed time). Unknown metrics/path are `null`; unavailable counts
+on a failure default to zero. Failed rows have empty `text`/`usedIds` and fixed
+`error: "answer failed"`, and retain any available Haiku usage from the exception.
+`path` describes the final retrieval round, as in the final event.
+
+Rows retain question-file order even with concurrent completion. Every completion
+atomically replaces the output with all finished rows. Resume keeps old rows in
+their existing order and appends new rows in question-file order; existing failed
+ids are skipped too. `--ids` filters before `--limit`, then resume skips ids already
+saved. Resume validates every saved row against the same field whitelist and types
+as new rows; unknown fields, missing fields or invalid values fail with
+`answer: invalid resume results` before writing or generating answers.
+Without resume, the output is replaced. Question ids must be unique non-empty
+strings; numbers and blank strings are rejected by the runner, judge and comparison
+with the fixed error `ids must be non-empty strings` (prefixed by the tool name).
+Invalid arguments, file errors and generation failures return nonzero.
+Errors use fixed messages;
+`ANSWER_EVAL_DEBUG=1` also prints exception details, which may quote questions.
+
+`judge_jev.py <questions.json> <answers.json> <out.json> [--jobs 8]` uses the fair
+judge's Jev endpoint, model (`jev-latest`), key-file handling, redirect refusal,
+bounded response and retries. It grades the supplied answer subset in question-file
+order, sending the full question, reference and chat answer. It asks `correct`
+(all required reference facts answered) and `wrong` (contradicts the reference).
+For correctness probability p, certainty is rounded `|p−0.5|×2`: below the default
+0.4 threshold scores 1; otherwise p≥0.5 scores 2, else 0. Wrong means p≥0.5.
+Optional `--model` and `--threshold` match the retrieval judge's controls.
+Rows contain `id`, `score`, `wrong`, `failed`, and for graded answers `correct_p`,
+`wrong_p`, `certainty`. Generation errors bypass HTTP and score 0 with
+`failed=true`, `wrong=false` (no final claim to judge). Judge errors have null
+score/wrong, `failed=false` and a sanitized `error`; these cause a nonzero exit.
+One summary line goes to stderr (graded, score/max, full, unsure, wrong, failed).
+
+`compare.py <questions.json> <judgeA.json> <judgeB.json> [<answersA> <answersB>]`
+prints JSON aggregates for paired ids: A/B totals and B−A score delta, better/worse/
+tied score counts, and ids whose score, wrong or failed flag changed. Both judge
+files must contain exactly the same fully graded ids, all in the question file;
+subsets are allowed. Each `lang` and `type` group has the same aggregates (missing
+metadata forms a null group). Optional answer files add means for Haiku input,
+output and combined tokens, estimated Jev tokens, rounds and milliseconds, both
+overall and per group. Each mean includes its observed sample count; null usage
+does not count as zero. Failed answers' reported metrics remain included.
+No question, reference or answer text is printed by the judge or comparison.
+
+Only run live evaluations in the docs-ai key-holding shell. Tune on the improvement
+set; use the held-out set once with Jev only. `text` is the model's answer verbatim
+as provided by the final event (with resolved links), and can quote the question.
+Answer files are private eval data and must stay outside this repository, like
+the question files. See the [commands](../../README.md#answer-eval).
+
+## Offline Haiku variants
 
 Run from the checkout with `ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY` already set
 in the environment. The runner never loads credential files or prints credentials.

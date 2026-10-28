@@ -28,6 +28,7 @@ const fail = () => { throw Object.assign(new Error('stub failure'), {
 }); };
 export const getByIds = ids => ids.includes('fail') ? fail() : [{ id:'one', title:'One', text:'full', source:'reference' }];
 export const retrievalInfo = retrieved => retrieved.retrieval;
+export const retrieveQueries = (queries, ...args) => retrieve(queries.join(' '), ...args);
 export const retrieve = async query => {
     if (query === 'fail') fail();
     const retrieved = getByIds([]);

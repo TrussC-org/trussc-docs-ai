@@ -145,6 +145,8 @@ export function pipelineStat(result = {}) {
   return { idOnlyCards, idOnlyCardsTotal, estInputTokens, path, fallbackReason: reason, rounds, queries, exists, jevMs, haikuMs, haikuCalls, jevEstimatedTokens,
     haiku: { in: tokenCount(result.inputTokens), out: tokenCount(result.outputTokens), thinking: haikuCalls ? tokenCount(result.thinkingTokens) : null }, jevTokens,
     ...(errorClass ? { errorClass } : {}), ...(retrievals ? { retrievals: retrievals.map((info, i) => ({ ...info,
+      ...(traces[i]?.tool ? { tool: traces[i].tool } : {}),
+      ...(traces[i]?.ids ? { ids: traces[i].ids } : {}),
       hintShown: traces[i]?.hintShown === true,
       hintFollowed: traces[i]?.hintShown === true && typeof traces[i]?.hintFollowed === 'boolean' ? traces[i].hintFollowed : null,
     })) } : {}) };

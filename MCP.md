@@ -1,7 +1,7 @@
-# trussc_search — MCP grounding tool
+# TrussC MCP grounding tools
 
 `mcp.mjs` is a zero-dependency stdio MCP server that exposes the TrussC docs corpus
-as a single tool, **`trussc_search`**. It is a thin proxy over the `/search` endpoint:
+through **`trussc_search`** and **`trussc_get`**, also used by the chat. It is a thin proxy over the `/search` and `/get` endpoints:
 
 ```
 query → dense + BM25 → RRF pool → Jev probabilities → selected cards
@@ -64,11 +64,41 @@ API names, signatures, conventions (TAU not PI, colors 0–1, `using namespace t
 and a working example. Prefer APIs that appear in its results; do not invent ones.
 ```
 
+`POST /search` accepts exactly one of `question` (the legacy single-query field)
+or `queries`, plus optional `message`, with the same validation (HTTP 400 on
+invalid input). Its existing 8,000-character question limit still applies.
+The stdio proxy sends `question` for `query`, preserving single-query compatibility
+with old servers; it forwards `queries` for the new form. Old proxies keep working
+with the new server. Multi-query calls need a server that supports `queries`.
+
+The chat offers these exact tool definitions. It uses the original question plus
+one pool per search query, fixes language from the page (`sketch` uses Lua), and
+ignores model-supplied `k` and `full`. Each tool-bearing turn, including
+`trussc_get`, consumes a round. Call one tool per turn; put multiple searches in
+`queries`. Cards and the related list count inside the chat input budget; cards
+that do not fit are shown as `[#id]` for `trussc_get`, and previously shown cards
+are referenced rather than repeated. MCP without that budget keeps its existing
+output. Get retains string ids only, keeps the first 20, and strips one leading
+`#` during lookup, matching the existing MCP rules.
+
 ## Tools & behaviour
 
-- **`trussc_search(query, k?, full?, lang?)`** — ranked by hybrid retrieval (BM25 over
+- **`trussc_search({query?, queries?, message?, k?, full?, lang?})`** — ranked by hybrid retrieval (BM25 over
   names + bge-m3 semantic, RRF-fused), then selected by Jev probabilities. Quotas apply only on fallback. Example chunks come back **trimmed** by default
   (header + start of source) to keep the result light; pass `full: true` for whole text.
+  Supply exactly one of `query` or `queries`. `queries` is an array of 1–3
+  nonempty strings, each at most 200 UTF-16 code units (checked before trimming).
+  Both fields are optional in the schema for client compatibility; the server
+  rejects both/neither, invalid arrays/items, or whitespace-only queries as an
+  error tool result (`isError`). Legacy `query` handling has no new length limit.
+  Optional `message` is one short line in the user's language, at most 300 code
+  units; non-strings or longer values are rejected. MCP validates and otherwise
+  ignores it, including in logs. For example:
+  `{"queries":["draw a circle", "serve a web page"],"message":"Looking for examples."}`.
+  Multiple queries get equal shares of the existing candidate-token budget,
+  deduplicate into one result list and make one Jev request with the queries
+  joined by spaces as its question. Only embedding calls grow per query; fallback
+  reranks one merged top-30 list. A one-item `queries` uses exactly the `query` path.
   `k` is the **max total results** (default 8, clamped 1–20). Each card shows its `[#id]` and, on the Jev path, a relevance probability.
   A leading type or function name absent from the loaded documentation gets a
   top-line warning ("No TrussC symbol named `X` appears in the documentation.")

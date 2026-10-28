@@ -22,6 +22,7 @@ try {
 export const chunks = () => [];
 export const refLink = () => ''; export const leanText = () => '';
 export const getByIds = () => []; export const retrievalInfo = () => ({});
+export const retrieveQueries = (queries, ...args) => retrieve(queries.join(' '), ...args);
 export const retrieve = async () => [];
 export const calls = [];
 export const answer = async (...args) => { calls.push(args); return {text:'ok', retrieved:[], links:[]}; };

@@ -5,6 +5,9 @@ const string = value => typeof value === 'string' ? value : null;
 export function publicDebug(traces = []) {
     return { idOnlyCardsTotal: traces.reduce((n, trace) => n + (number(trace.idOnlyCards) ?? 0), 0), haikuCalls: traces.reduce((n, trace) => n + (number(trace.haikuCalls) ?? 0), 0), rounds: traces.map(trace => ({
         queries: trace.queries.map(string),
+        ...(['trussc_search', 'trussc_get'].includes(trace.tool) ? { tool: trace.tool } : {}),
+        // Bound (output): traces retain only the first 20 validated fetched ids; overflow is omitted.
+        ...(trace.tool === 'trussc_get' ? { ids: (trace.ids || []).slice(0, 20).map(string) } : {}),
         idOnlyCards: number(trace.idOnlyCards) ?? 0,
         poolSize: number(trace.info.poolSize),
         picked: trace.picked.map(card => ({ id: string(card.id), title: string(card.title), p: number(card.p) })),

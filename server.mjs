@@ -13,8 +13,8 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, realpathSync } from 'node:fs';
-import { answer, answerStream, retrieve, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
-import { dispatch as mcpDispatch, searchResponse } from './mcp-core.mjs';
+import { answer, answerStream, retrieve, retrieveQueries, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
+import { dispatch as mcpDispatch, searchResponse, searchInput } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES } from './config.mjs';
 import { publicDebug } from './debug.mjs';
 import { logStat, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
@@ -164,10 +164,10 @@ export const server = createServer(async (req, res) => {
                 }
             };
             const resp = await mcpDispatch(body, {
-                search: capture(async (query, k, full, lang) => {
+                search: capture(async (query, k, full, lang, queries) => {
                     queryText = query;
-                    const retrieved = await retrieve(query, k, { lang, ip });
-                    pipeline = pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [query] });
+                    const retrieved = queries ? await retrieveQueries(queries, k, { lang, ip }) : await retrieve(query, k, { lang, ip });
+                    pipeline = pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: queries || [query] });
                     // Bound (output): MCP shows at most k cards (up to 20); excess selections remain eligible for related suggestions.
                     return searchResponse(retrieved, retrieved.slice(0, k).map(c => toResult(c, full)));
                 }),
@@ -216,7 +216,18 @@ export const server = createServer(async (req, res) => {
             record({ errorReason: 'input-fields', errorClass: 'Error' });
             return json(400, { error: 'question or history too long' });
         }
-        const question = rawQuestion.trim();
+        let question = rawQuestion.trim(), searchQueries;
+        if (url.pathname === '/search') {
+            try {
+                const input = searchInput({ ...(Object.hasOwn(body, 'question') ? { query: rawQuestion } : {}),
+                    ...(Object.hasOwn(body, 'queries') ? { queries: body.queries } : {}),
+                    ...(Object.hasOwn(body, 'message') ? { message: body.message } : {}) });
+                question = input.query; searchQueries = input.queries;
+            } catch (error) {
+                record({ errorReason: 'input', errorClass: 'Error' });
+                return json(400, { error: error.message });
+            }
+        }
         const page = typeof body.page === 'string' ? body.page.slice(0, 64) : null;  // symbol the user is viewing
         // Carried-over "important" chunk ids the model curated on earlier turns
         // (recent-first). Bounded so a malicious client can't blow up the prompt.
@@ -242,12 +253,12 @@ export const server = createServer(async (req, res) => {
         // are trimmed unless full:true; each result carries cosine + fused rrf.
         if (url.pathname === '/search') {
             const k = Number(body.k || 8);
-            const retrieved = await retrieve(question, k, { lang: body.lang, ip });   // body.lang:'lua' for TrussSketch; else C++ (default)
+            const retrieved = await retrieveQueries(searchQueries, k, { lang: body.lang, ip });   // body.lang:'lua' for TrussSketch; else C++ (default)
             // Bound (output): the stdio proxy shows at most its requested k; excess selections remain eligible for related suggestions.
             const results = (proxy ? retrieved.slice(0, k) : retrieved).map((c) => toResult(c, !!body.full));
-            record({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: [question] }), ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
+            record({ ...pipelineStat({ ...retrievalInfo(retrieved), rounds: 1, queries: searchQueries }), ...stat, q: question, n: retrieved.length, top: retrieved[0]?.score ?? null, sym: suggested(retrieved) });
             const info = retrievalInfo(retrieved);
-            return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: [question], jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
+            return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: searchQueries, jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
         }
 
         // Generation opts are allowlisted as { ip } here and in /chat below.

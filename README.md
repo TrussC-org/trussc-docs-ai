@@ -20,27 +20,40 @@ probability for the combined answer. Selection defaults to p >= 0.4, filled to a
 least 4 and capped at 16, ordered by probability. Source quotas apply only to fallback.
 
 With `GEN_BACKEND=anthropic`, Haiku receives the selected cards and `exists` as a
-hint. It can answer or call native `search_more({message, queries})` with 1–3
-queries. The server emits `research` and builds a separate dense + BM25 RRF pool
+hint. It can answer or use the same `trussc_search` / `trussc_get` definitions as MCP.
+`trussc_search` accepts exactly one of `query` or `queries` (1–3 nonempty strings,
+at most 200 characters each), plus optional `message` (at most 300 characters). The server
+emits `research` for searches and builds a separate dense + BM25 RRF pool
 for the original question and each query, applying inherited collapse and language
 policy to each. The full pool budget is divided evenly, including state overhead;
 each share fills in its own RRF order. Pools merge original-first, then query order,
 with duplicate ids keeping their first slot and no redistribution of unused shares.
 The combined state stays within `JEV_POOL_TOKENS` and Jev's 32k per-question limit.
 One Jev call selects from that round's new pool. Its state contains the original
-question, the current `search_more` message and queries, and new candidate cards;
+question, the current `trussc_search` message and queries, and new candidate cards;
 earlier-round picks are never carried into Jev. Round 1 uses the raw question and
 one pool, as before.
 
 Haiku's round-1 user turn contains the question, first cards and exists hint and
 stays intact. Each subsequent turn appends the returned assistant `tool_use` and a
 user `tool_result` for its id, containing that round's selected cards and exists
-hint. Repeated cards use `[#id] already shown above` references instead of repeating
+hint. Shared MCP formatting includes card headers and an "Other possibly related"
+list with briefs and `[#id]` tags, including in the initial context. These count
+inside the input budget; overflowing cards keep only their ids. Haiku can fetch
+these ids or related cards with `trussc_get`. Repeated cards use
+`[#id] already shown above` references instead of repeating
 their text. Used-card tracking and links span all rounds' cards. The
-last round has no tool; the default `MAX_SEARCH_ROUNDS=4` allows three re-searches.
+last round has no tool; the default `MAX_SEARCH_ROUNDS=4` allows three tool turns
+(search or get). Every tool-bearing response uses one round. With several calls in
+one response, only the first valid one runs; every other id receives an error
+result asking for one tool per turn. Invalid/unknown calls with no valid tool
+force an answer without tools. The `MAX_SEARCH_ROUNDS + 1` Haiku-call cap includes
+recovery and correction. Search language comes from the page (`sketch` → Lua);
+Haiku-supplied `k` and `full` are ignored. Get uses MCP id normalization and joins
+all fetched cards into the evidence and link ledger.
 When accumulated cards fill `HAIKU_MAX_INPUT_TOKENS`, searching stops earlier and the
 next call answers without the tool.
-`MAX_SEARCH_ROUNDS` bounds search rounds. Total Haiku calls per request are
+`MAX_SEARCH_ROUNDS` bounds answer rounds, including search/get tool turns. Total Haiku calls per request are
 hard-capped at `MAX_SEARCH_ROUNDS + 1`, including one fabrication-correction call
 and any invalid-tool recovery. Stats and debug report numeric `haikuCalls`. Invalid tool
 input forces a tool-free answer without another retrieval. The existing
@@ -108,6 +121,25 @@ at deploy time (the corpus is not in git).
 | `POST /ask` | one-shot JSON `{answer,links,sources,corrected,usedIds,rounds,queries}` — CLI / agents |
 | `POST /search` | retrieval `{results,path,exists,...}` — agents (no generation) |
 
+`trussc_search` has one shared schema for chat and MCP: neither `query` nor
+`queries` is schema-required, with no `anyOf`/`oneOf`; server validation requires
+exactly one. Invalid arrays/items, both/neither forms, empty/whitespace queries,
+or invalid/oversized `message` values return MCP `isError`. Legacy `query` has no
+new length limit. `message` is a short line in the user's language; MCP ignores
+it after validation and never logs it. `k` defaults to 8 (MCP clamps 1–20),
+`full` expands trimmed examples, and `lang` selects `cpp`/`lua`.
+`trussc_get({ids})` keeps string ids only, retains at most 20 and strips one leading
+`#` via lookup. See [MCP.md](MCP.md) for the full tool contract.
+
+`POST /search` accepts exactly one of legacy `question` or new `queries`, with
+the same query-array/message validation (400 on invalid input). Multiple queries
+share the existing pool-token budget equally, make one Jev call, and rerank one
+merged top-30 fallback list. Only embedding calls grow per query. Jev sees the
+space-joined queries, also used as stats `q`; stats `queries` may have 2–3 entries.
+Single-query retrieval is unchanged. The stdio proxy sends `question` for `query`
+so old/new proxy-server pairs work for legacy single-query calls; it forwards
+`queries` for the new form. Multi-query calls need an updated server.
+
 Per-IP rate limit, CORS restricted to `ALLOW_ORIGIN`. Body: `{question, history?, convId?, k?, debug?}`. A request `rounds` field is ignored.
 
 POST bodies are counted incrementally before JSON parsing, including `/get` and
@@ -134,9 +166,14 @@ below. Input and send stay disabled until the response finishes or errors. The s
 widget update is a separate PR.
 
 The `research` SSE payload is `{round,message,queries}`; `round` is the next search
-round (the first re-search is round 2). Sources and links refresh after retrieval.
+round (the first tool call leads to round 2). Missing search `message` uses a
+fixed Japanese line when the question contains Japanese, otherwise English.
+Get emits no `research` event: the demo renders an empty-query search label and
+the production widget would still add a filler message. Sources and links refresh after retrieval.
 `/ask` and `done` include the number of answer rounds and the raw question followed
-by additional queries in execution order.
+by additional search queries in execution order; get adds no query. Chat traces
+may additionally carry `tool` (`trussc_search` or `trussc_get`) and, for get,
+`ids` (the accepted string ids, at most 20).
 
 ## Public debug trace and CLI
 
@@ -153,8 +190,8 @@ Only the boolean `true` enables it. Each round has exactly these fields:
 | `poolSize` | Number of deduplicated candidates in this round's Jev pool |
 | `picked` | This round's selected cards as `{id,title,p}` only; previously shown selections use id references in Haiku's tool result |
 | `exists` | Jev coverage estimate (can every part of the question be answered from the cards), or `null` on fallback |
-| `hintShown` | `true` when this round's Haiku prompt recommended `search_more` (estimate below `JEV_SEARCH_HINT_BELOW` and `search_more` offered) |
-| `hintFollowed` | `true` if Haiku called `search_more` after the recommendation, `false` if it answered instead, `null` when no recommendation was shown |
+| `hintShown` | `true` when this round's Haiku prompt recommended `trussc_search` (estimate below `JEV_SEARCH_HINT_BELOW` and `trussc_search` offered) |
+| `hintFollowed` | `true` if Haiku called a documentation tool after the recommendation, `false` if it answered instead, `null` when no recommendation was shown |
 | `path` | `"jev"` or `"fallback"` |
 | `idOnlyCards` | Number of newly picked cards sent by id only because of the whole-request input budget (excludes already-shown references) |
 | `haiku` | `{ms,inputTokens,inputTokensTotal,outputTokens,estInputTokens}`: elapsed milliseconds; reported input tokens per call (array aligned with `estInputTokens`, `null` when unreported); round input total; round output total (includes thinking if enabled internally); and estimated input tokens per call (including recovery/correction) |
@@ -207,7 +244,7 @@ change and a server restart; requests cannot override it.
 | `JEV_PICK_MIN_P` | `0.4` | Threshold probability |
 | `JEV_PICK_MIN` | `4` | Threshold minimum, filled by descending p |
 | `JEV_PICK_MAX` | `16` | Threshold maximum (takes precedence if below minimum) |
-| `JEV_SEARCH_HINT_BELOW` | `0.7` | Haiku always sees the Jev coverage estimate as a percentage; below this value, in rounds that offer `search_more`, its prompt also asks it to search for the missing parts instead of answering now (Haiku still decides). Clamped to 0–1 |
+| `JEV_SEARCH_HINT_BELOW` | `0.7` | Haiku always sees the Jev coverage estimate as a percentage; below this value, in rounds that offer `trussc_search`, its prompt also asks it to search for the missing parts instead of answering now (Haiku still decides). Clamped to 0–1 |
 | `JEV_RATE_MAX` | `20` | Jev calls per IP per sliding window |
 | `JEV_RATE_WIN_MS` | `60000` | Sliding window duration |
 | `JEV_DAILY_TOKENS` | `20000000` | Per-process daily token budget, resetting at local midnight |

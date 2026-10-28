@@ -62,7 +62,7 @@ try {
         if (tool) {
             assert(req.tools);
             sse += frames({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'DISCARDED RESEARCH TEXT' } });
-            sse += frames({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'search_more', id: 'search1', input: { message: 'Looking', queries: ['PRIVATE_SEARCH_QUERY'] } } });
+            sse += frames({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'trussc_search', id: 'search1', input: { message: 'Looking', queries: ['PRIVATE_SEARCH_QUERY'] } } });
         } else {
             sse += frames({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Use [[drawCircle]].\n\n@@USED: symbol:drawCircle' } });
             inFlight.delete(req.messages[0].content.match(/SYNTHETIC_PRIVATE_\w+/)[0]); active = inFlight.size;

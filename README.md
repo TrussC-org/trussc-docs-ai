@@ -238,7 +238,7 @@ change and a server restart; requests cannot override it.
 | `JEV_POOL_TOKENS` | `28000` | Total estimated state budget, split evenly across query pools on re-search |
 | `JEV_TOKENS_PER_CHAR` | `0.4` | Conservative character-to-token estimate |
 | `JEV_CARD_CHARS` | `2000` | Card text cap for pool estimation and Jev requests |
-| `JEV_TIMEOUT_MS` | `3000` | Connect plus whole-body deadline |
+| `JEV_TIMEOUT_MS` | `1500` | Connect plus whole-body deadline |
 | `JEV_PICK` | `threshold` | `threshold` or `fixed` |
 | `JEV_PICK_K` | `8` | Fixed selection count |
 | `JEV_PICK_MIN_P` | `0.4` | Threshold probability |

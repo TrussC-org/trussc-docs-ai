@@ -154,7 +154,7 @@ export const JEV_MODEL = process.env.JEV_MODEL || 'jev-latest';
 export const JEV_POOL_TOKENS = numberEnv('JEV_POOL_TOKENS', 28000);
 export const JEV_TOKENS_PER_CHAR = numberEnv('JEV_TOKENS_PER_CHAR', 0.4);
 export const JEV_CARD_CHARS = numberEnv('JEV_CARD_CHARS', 2000, { integer: true });
-export const JEV_TIMEOUT_MS = numberEnv('JEV_TIMEOUT_MS', 3000);
+export const JEV_TIMEOUT_MS = numberEnv('JEV_TIMEOUT_MS', 1500);
 export const JEV_PICK = process.env.JEV_PICK === 'fixed' ? 'fixed' : 'threshold';
 export const JEV_PICK_K = numberEnv('JEV_PICK_K', 8, { integer: true });
 export const JEV_PICK_MIN_P = numberEnv('JEV_PICK_MIN_P', 0.4);

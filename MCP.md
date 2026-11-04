@@ -30,6 +30,10 @@ claude mcp add --transport http --scope user trussc-docs https://api.trussc.org/
 - Other MCP clients: point them at `https://api.trussc.org/mcp` (Streamable HTTP).
 - Non-MCP callers (e.g. Gemini function-calling): just `POST /search` directly.
 
+The remote gateway also offers `trussc_feedback` for reporting wrong, missing or
+misleading documentation at the end of a task. Chat and the stdio proxy expose
+only `trussc_search` and `trussc_get`.
+
 ## B) Stdio — run mcp.mjs locally
 
 For offline/localhost use, or clients that prefer stdio. Retrieval still goes over
@@ -161,6 +165,28 @@ output. Get retains string ids only, keeps the first 20, and strips one leading
   One leading `#` is accepted (for example `#symbol:drawCircle`); exactly one is
   removed before lookup. All other characters, including surrounding whitespace,
   are preserved. The same rule applies to `/get` and older stdio proxies.
+- **`trussc_feedback({kind, text, ids?, version?})`** — remote `/mcp` only. Use at
+  the end of a task when docs were wrong, misleading, or missing something you
+  had to read source for. `kind` is required: `"wrong"`, `"missing"` or `"other"`.
+  `text` is required: 1–2000 characters, with non-whitespace content. Optional
+  `ids` contains at most 10 corpus ids, each at most 200 characters. Optional
+  `version` is at most 100 characters: the TrussC version or commit you used,
+  such as `v0.7.7` or `git describe` output. Include ids and version when possible.
+  Limits use UTF-16 code units, as for the existing tools; invalid inputs are
+  rejected without truncation. Do not send private code or personal data.
+  This is not a support channel; nobody replies.
+
+Feedback receives a fixed acknowledgement without echoing the report. Reports
+are appended to `STATS_DIR/feedback-YYYY-MM-DD.jsonl` with `ts`, `kind`, `text`,
+`ids` (default `[]`), `version` (default `null`), normalized MCP `client`, and the
+same salted `ip` and `net` hashes as usage stats. No raw IP is stored. These files
+use the same six-month retention as stats (183 days by default, with cutoff-day
+files kept and pruning at startup/every six hours). The ordinary MCP usage row
+records `tool: "trussc_feedback"` and contains no report text, `q` or `a`.
+Feedback is limited to 10 reports per hashed IP per rolling hour and 500 globally
+per UTC day, in memory per server process. A limit or write failure returns a
+fixed error. With `STATS=0`, the response is `Feedback is not recorded on this
+server.` and no report is stored. See [STATS.md](STATS.md) for operator reading.
 
 The intended agent move: `trussc_search` to find the right chunks cheaply, then
 `trussc_get` (or `full:true`) for the one or two you actually need in full.

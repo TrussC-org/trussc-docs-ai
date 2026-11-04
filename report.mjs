@@ -123,6 +123,7 @@ async function read(file) {
 if (existsSync(archive)) {
   const directory = await opendir(archive);
   for await (const entry of directory) {
+    // Default matching admits usage files only, never feedback-*.jsonl.
     if (statsFileDate(entry.name) && entry.name.slice(0, 7) >= cutoffMonth) {
       await read(join(archive, entry.name));
     }

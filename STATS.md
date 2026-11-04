@@ -10,7 +10,7 @@ deleted with their stats file. The report runs outside the API sandbox.
 | --- | --- |
 | `ts` | UTC ISO timestamp when the row is appended. |
 | `ep` | `chat`, `ask`, `search`, `get`, or `mcp`. |
-| `tool` | `trussc_search` or `trussc_get` for MCP tool calls; otherwise `null`. |
+| `tool` | `trussc_search`, `trussc_get` or `trussc_feedback` for MCP tool calls; otherwise `null`. |
 | `client` | `widget`, `http`, or a normalized MCP User-Agent product; missing/empty UA is `unknown`, invalid product is `other`. |
 | `ms` | Request latency in milliseconds, including body reading. |
 | `path`, `fallbackReason` | Pipeline selection path and reason, unchanged from `pipelineStat`; `null` when unavailable. |
@@ -151,10 +151,11 @@ Failure on `/chat`:
 `new URL('../docs-ai-stats/', import.meta.url)`. In the deployed checkout this is
 `/home/toru/TrussC-dev/docs-ai-stats`. `STATS_LOG` is removed. The operator creates
 the directory before deployment; the API never creates directories. It holds
-stats only, and nothing in it is executed or sourced.
+usage stats and feedback only, and nothing in it is executed or sourced.
 
 Each row uses one timestamp for both `ts` and its UTC `YYYY-MM-DD.jsonl` filename.
-Only names matching `^\d{4}-\d{2}-\d{2}\.jsonl$` can be created. The writer opens with
+Usage names match `^\d{4}-\d{2}-\d{2}\.jsonl$`; feedback adds the `feedback-`
+prefix. Both are calendar-validated. The writer opens with
 `O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW`, mode `0600`, makes a single append
 write for the complete JSON line and closes the file. Symlinks at the daily
 filename are refused. Missing directories and open/write failures drop the line,
@@ -188,7 +189,8 @@ concurrent replacement comes from the systemd sandbox (`ProtectHome=tmpfs` with
 the stats directory bind-mounted), where the path is a mount point that cannot
 be renamed and its parent is visible only to the service in its mount namespace.
 Outside that sandbox, the operator must own the directory exclusively.
-Pruning admits only exact daily/monthly names with valid calendar dates, checks
+Pruning admits only exact daily/monthly usage names and `feedback-YYYY-MM-DD.jsonl`
+names with valid calendar dates, checks
 each eligible entry with `lstat`, and unlinks regular files only. Symlinks,
 directories, invalid dates and unrelated files are ignored; no child paths are
 traversed and no file contents are read. It needs only the existing read/write
@@ -200,6 +202,57 @@ never be printed to console or the journal: journald has no retention cap, so
 that would break the six-month deletion promise. Failures do not fail requests;
 other failures can be retried at the next run. The API still does not create a
 missing directory.
+
+## Documentation feedback
+
+Only the remote `/mcp` tool `trussc_feedback` accepts feedback; chat and the stdio
+proxy keep their two retrieval tools. Each admitted report appends one JSON line
+to `STATS_DIR/feedback-YYYY-MM-DD.jsonl`, using the UTC day of its `ts`:
+
+```json
+{"ts":"2026-10-28T12:00:00.000Z","kind":"wrong","text":"Synthetic example: the documented signature is outdated.","ids":["symbol:drawCircle"],"version":"v0.7.7","client":"claude","ip":"0123456789abcdef","net":"fedcba9876543210"}
+```
+
+`kind` is `wrong`, `missing` or `other`; `text` has 1–2000 UTF-16 code units and
+must contain non-whitespace text. `ids` holds up to 10 strings of up to 200 code
+units each (default `[]`); `version` is the supplied TrussC version or commit,
+up to 100 code units (default `null`). `client`, `ip` and `net` use exactly the
+same request metadata normalization and salted hashes as normal MCP usage rows.
+The normal `tools/call` stats row has `tool: "trussc_feedback"` and no `q`, `a`
+or feedback text. Reports are for later docs improvement batches, not support;
+nobody replies. Agents must not send private code or personal data.
+
+Feedback shares the append flags, `0600` creation mode, failure handling and
+retention described above. The same cutoff deletes old daily feedback files,
+keeps the cutoff day, ignores symlinks/non-files/invalid dates, and normally runs
+within six hours. Feedback text is never printed to the server journal.
+`STATS=0` disables recording and returns `Feedback is not recorded on this server.`
+
+Per process, in-memory limits admit at most **10 reports per hashed IP per rolling
+hour** and **500 reports globally per UTC day**. Invalid inputs and limit
+rejections store nothing and do not consume admissions; a failed write consumes
+its admission. Counters reset on process restart. Limit rejection returns the
+fixed tool error `error: feedback rate limited`. Write failure returns the fixed
+tool error `Feedback could not be recorded.`; success returns `Feedback recorded.
+Thank you.` without echoing the report. Existing general HTTP request limits
+also apply.
+
+Read feedback as the operator outside the API sandbox:
+
+```bash
+STATS_DIR=/path/to/stats node tools/feedback.mjs
+STATS_DIR=/path/to/stats node tools/feedback.mjs --days 7
+```
+
+The read-only script prints JSONL containing only `ts`, `kind`, `ids`, `version`
+and `text` to stdout, oldest first (newest last). `--days N` is a positive integer
+and filters by row timestamp over the last N days; the default reads all available
+feedback. Malformed rows and unrelated filenames are skipped. It never writes
+files or logs feedback anywhere else.
+
+**Dashboards and all usage stats readers must skip `feedback-*.jsonl`.**
+`report.mjs` and the monthly migration tool admit only their exact usage filename
+patterns, so feedback is neither counted as requests nor migrated.
 
 ## One-time monthly-to-daily migration
 

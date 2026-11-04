@@ -556,7 +556,8 @@ async function* anthropicStream(messages) {
     yield* anthropicRound(messages, false);
 }
 
-const CHAT_TOOLS = TOOLS.map(({ name, description, inputSchema }) => ({ name, description, input_schema: inputSchema }));
+const CHAT_TOOLS = TOOLS.filter(t => ['trussc_search', 'trussc_get'].includes(t.name))
+    .map(({ name, description, inputSchema }) => ({ name, description, input_schema: inputSchema }));
 // Bound (security): shared MCP validation rejects invalid search input. Overflow forces a tool-free answer and is not counted.
 export function validSearchInput(input) {
     try { searchInput(input); return true; } catch { return false; }

@@ -213,7 +213,9 @@ console.log('PASS 256 KiB packing preserves every id, accurate counts and later 
 for (const question of ['circle', '円を描く']) await fixture(async ({ answerStream, haiku, jev, generate }) => {
     generate((_, n) => n === 1 ? tool('search', 'trussc_search', { query: 'missing', lang: 'cpp', k: 1, full: true }) : text('Use [[drawCircle]].'));
     const events = []; for await (const ev of answerStream(question, [], 'sketch')) events.push(ev);
-    assert.deepEqual(haiku[0].tools, TOOLS.map(({ name, description, inputSchema }) => ({ name, description, input_schema: inputSchema })));
+    assert.deepEqual(haiku[0].tools.map(t => t.name), ['trussc_search', 'trussc_get']);
+    assert.deepEqual(haiku[0].tools, TOOLS.filter(t => ['trussc_search', 'trussc_get'].includes(t.name))
+        .map(({ name, description, inputSchema }) => ({ name, description, input_schema: inputSchema })));
     assert(haiku[0].messages[0].content.includes('Other possibly related:'));
     assert(haiku[0].system.includes('Fetch [#id]'));
     assert.equal(jev.length, 2); assert.equal(jev[1].state.question, question);

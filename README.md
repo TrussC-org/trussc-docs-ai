@@ -114,6 +114,14 @@ at deploy time (the corpus is not in git).
 
 ## Server (`server.mjs`)
 
+The remote `/mcp` tools are `trussc_search` (find docs), `trussc_get` (fetch full
+chunks) and `trussc_feedback` (report wrong, missing or misleading docs at the end
+of a task). Chat and the stdio proxy offer only `trussc_search` and `trussc_get`.
+Feedback takes `kind`, `text`, optional corpus `ids` and the TrussC `version`;
+it is stored beside usage stats for about six months. Do not send private code or
+personal data; this is not a support channel and nobody replies. See
+[MCP.md](MCP.md) for arguments and [STATS.md](STATS.md) for storage and limits.
+
 | endpoint | use |
 |---|---|
 | `GET /health` | `{ok,chunks}` — the widget's appearance gate |

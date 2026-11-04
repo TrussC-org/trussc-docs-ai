@@ -57,7 +57,38 @@ export const TOOLS = [{
         },
         required: ['ids'],
     },
+}, {
+    name: 'trussc_feedback',
+    description:
+        'Use at the end of a task when TrussC docs were wrong, misleading, or missing something ' +
+        'you had to read source for. Include the corpus ids and the TrussC version or commit used. ' +
+        'Do not send private code or personal data. This is not a support channel; nobody replies.',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            kind: { type: 'string', enum: ['wrong', 'missing', 'other'] },
+            // Bound (storage): reject empty/oversized text, over 10 ids, ids over 200 characters, and versions over 100; never truncate.
+            text: { type: 'string', minLength: 1, maxLength: 2000 },
+            ids: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 200 } },
+            version: { type: 'string', maxLength: 100, description: 'TrussC version or commit used, e.g. v0.7.7 or git describe output.' },
+        },
+        required: ['kind', 'text'],
+    },
 }];
+
+function feedbackInput(args) {
+    // Bound (storage): validate types and the schema's field limits before recording; reject rather than truncate.
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('arguments must be an object');
+    if (!['wrong', 'missing', 'other'].includes(args.kind)) throw new Error('kind must be wrong, missing, or other');
+    if (typeof args.text !== 'string' || args.text.length > 2000 || !args.text.trim())
+        throw new Error('text must be a nonempty string of at most 2000 characters');
+    if (Object.hasOwn(args, 'ids') && (!Array.isArray(args.ids) || args.ids.length > 10 ||
+        !args.ids.every(id => typeof id === 'string' && id.length <= 200)))
+        throw new Error('ids must contain at most 10 strings of at most 200 characters');
+    if (Object.hasOwn(args, 'version') && (typeof args.version !== 'string' || args.version.length > 100))
+        throw new Error('version must be a string of at most 100 characters');
+    return { kind: args.kind, text: args.text, ids: args.ids ?? [], version: args.version ?? null };
+}
 
 // Shared validation for MCP, HTTP (question aliases query), and native chat tools.
 // Bound (cost): reject both/neither inputs, invalid 1–3 queries of <=200 characters, or messages over 300 characters; never truncate. Legacy query coercion/length handling is retained.
@@ -420,7 +451,8 @@ export function formatGetResults(results, ids, packing) {
         (packing.fits && !packing.fits(text))) ? null : text;
 }
 
-// handlers: { search(query, k, full, lang, queries?) -> search response, get(ids) -> results[] }.
+// handlers: { search(query, k, full, lang, queries?) -> search response, get(ids) -> results[], feedback?(report) -> {text, isError} }.
+// Only the remote gateway supplies feedback; the stdio proxy cannot list or call it.
 export async function dispatch(msg, handlers) {
     const { id, method, params } = msg || {};
     if (id === undefined || id === null) return null;   // notification: no reply
@@ -433,7 +465,7 @@ export async function dispatch(msg, handlers) {
             capabilities: { tools: {} },
             serverInfo: { name: 'trussc-docs', version: '0.1.0' },
         });
-        if (method === 'tools/list') return ok({ tools: TOOLS });
+        if (method === 'tools/list') return ok({ tools: TOOLS.filter(t => t.name !== 'trussc_feedback' || handlers?.feedback) });
         if (method === 'ping') return ok({});
         if (method === 'tools/call') {
             const name = params && params.name;
@@ -452,6 +484,10 @@ export async function dispatch(msg, handlers) {
                     if (!ids.length) return toolText('error: no ids', true);
                     const results = await handlers.get(ids);
                     return toolText(formatGetResults(results, ids));
+                }
+                if (name === 'trussc_feedback' && handlers?.feedback) {
+                    const result = await handlers.feedback(feedbackInput(args));
+                    return toolText(result.text, result.isError);
                 }
                 return err(-32602, `unknown tool: ${name}`);
             } catch (e) {

@@ -6,7 +6,7 @@
 //   POST /chat     → SSE stream (events: sources, links, research, token, replace, debug, done, error)  (widget / CLI)
 //   POST /search   → JSON { results:[{id,title,source,score,rrf,link,text}] }  (agents: retrieval only; body.full for whole text)
 //   POST /get      → JSON { results:[...] } by body.ids (full text)            (fetch specific chunks)
-//   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; trussc_search/trussc_get)  (remote MCP gateway)
+//   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; trussc_search/trussc_get/trussc_feedback)  (remote MCP gateway)
 // POST bodies: { question, history?:[{role,content}], k? }.
 // CORS is restricted to ALLOW_ORIGIN (default '*'; set to https://trussc.org in prod).
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ import { answerStream, retrieve, retrieveQueries, chunks, refLink, leanText, get
 import { dispatch as mcpDispatch, searchResponse, searchInput } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES, STATS } from './config.mjs';
 import { publicDebug } from './debug.mjs';
-import { logStat, pruneStats, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
+import { logStat, pruneStats, createFeedbackRecorder, hashIp, hashNet, clientInfoValue, suggested, pipelineStat, requestClient, clientName, queryLanguage } from './stats.mjs';
 
 const PORT = process.env.PORT || 8788;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
@@ -34,6 +34,7 @@ if (STATS) {
 const RATE_MAX = Number(process.env.RATE_MAX || 30);
 const RATE_WIN = Number(process.env.RATE_WIN || 60000);
 const hits = new Map();
+const recordFeedback = createFeedbackRecorder();
 function rateLimited(ip) {
     const now = Date.now();
     const arr = (hits.get(ip) || []).filter((t) => now - t < RATE_WIN);
@@ -176,8 +177,10 @@ export const server = createServer(async (req, res) => {
                     return searchResponse(retrieved, retrieved.slice(0, k).map(c => toResult(c, full)));
                 }),
                 get: capture(getByIds),
+                feedback: report => recordFeedback({ ...report,
+                    client: requestClient('mcp', req.headers), ip: hashIp(ip), net: hashNet(ip) }),
             });
-            const tool = body.method === 'tools/call' && ['trussc_search', 'trussc_get'].includes(body.params?.name) ? body.params.name : null;
+            const tool = body.method === 'tools/call' && ['trussc_search', 'trussc_get', 'trussc_feedback'].includes(body.params?.name) ? body.params.name : null;
             // Stateless: initialize metadata belongs to this row only. Never
             // associate a later call with another request's clientInfo.
             const clientInfo = body.method === 'initialize' ? {

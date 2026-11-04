@@ -8,11 +8,11 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { STATS, STATS_DIR, STATS_SALT, STATS_RETENTION_DAYS } from './config.mjs';
 
-// Bound (maintenance destinations): only exact daily/monthly calendar filenames are eligible; ignore every other name.
-export function statsFileDate(name) {
-  const match = /^(\d{4}-(?:0[1-9]|1[0-2]))(?:-(\d{2}))?\.jsonl$/.exec(name);
-  if (!match || match[0] !== name) return null;
-  const month = match[1], day = match[2] ? `${month}-${match[2]}` : null;
+// Bound (maintenance destinations): only exact daily/monthly calendar filenames are eligible; feedback daily files require opt-in.
+export function statsFileDate(name, includeFeedback = false) {
+  const match = /^(feedback-)?(\d{4}-(?:0[1-9]|1[0-2]))(?:-(\d{2}))?\.jsonl$/.exec(name);
+  if (!match || match[0] !== name || (match[1] && (!includeFeedback || !match[3]))) return null;
+  const month = match[2], day = match[3] ? `${month}-${match[3]}` : null;
   const date = new Date(`${day || month + '-01'}T00:00:00.000Z`);
   if (!Number.isFinite(date.getTime()) || (day && date.toISOString().slice(0, 10) !== day)) return null;
   if (!day) { date.setUTCMonth(date.getUTCMonth() + 1); date.setUTCDate(0); }
@@ -65,7 +65,7 @@ export async function pruneStats({ dir = STATS_DIR, now = () => new Date(), io =
     try {
       const directory = await io.opendir(pinned.path);
       for await (const entry of directory) {
-        const date = statsFileDate(entry.name);
+        const date = statsFileDate(entry.name, true);
         if (!date || date.lastDay >= cutoff) continue;
         const file = join(pinned.path, entry.name);
         let info;
@@ -178,6 +178,60 @@ const tokenCount = n => Number.isFinite(n) && n >= 0 ? n : null;
 
 let warned = false;
 
+// Same append path for usage and feedback; no row contents or errors reach the journal.
+function appendRow(name, row) {
+  try {
+    // Bound (stats destination): only calendar-validated daily stats/feedback names; no separators or monthly writes.
+    if (!statsFileDate(name, true)?.day) throw new Error('invalid stats day');
+    const line = JSON.stringify(row) + '\n';
+    const fd = openSync(join(STATS_DIR, name),
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    try {
+      const bytes = Buffer.from(line);
+      // One append per row; never retry a partial write as a separate append.
+      if (writeSync(fd, bytes) !== bytes.length) throw new Error('short stats write');
+    } finally { closeSync(fd); }
+    return true;
+  } catch {
+    if (!warned) {
+      warned = true;
+      try { console.warn('Warning: stats append failed; dropping usage stats'); } catch {}
+    }
+    return false;
+  }
+}
+
+export function logFeedback({ ts, kind, text, ids, version, client, ip, net }) {
+  if (!STATS) return false;
+  return appendRow(`feedback-${ts.slice(0, 10)}.jsonl`, { ts, kind, text, ids, version, client, ip, net });
+}
+
+// Separate instances and an injected clock/writer keep limit tests offline and tiny.
+export function createFeedbackRecorder({ now = () => new Date(), write = logFeedback } = {}) {
+  const hits = new Map();
+  let day, daily = 0;
+  return report => {
+    if (!STATS) return { text: 'Feedback is not recorded on this server.' };
+    const ts = new Date(now()).toISOString(), time = Date.parse(ts), today = ts.slice(0, 10);
+    if (today !== day) { day = today; daily = 0; }
+    // Bound (abuse/storage): 10 admitted reports per hashed IP in a rolling hour,
+    // 500 globally per UTC day. Rejections never write or add limiter entries.
+    // Bound (memory): expire hourly entries on each call; at most two UTC days of
+    // admitted reports (1000 timestamps) remain. Failed writes consume admission too.
+    for (const [ip, times] of hits) {
+      const recent = times.filter(t => time - t < 3600000);
+      if (recent.length) hits.set(ip, recent); else hits.delete(ip);
+    }
+    const times = hits.get(report.ip) || [];
+    if (daily >= 500 || times.length >= 10) return { text: 'error: feedback rate limited', isError: true };
+    times.push(time); hits.set(report.ip, times); daily++;
+    try {
+      if (write({ ...report, ts })) return { text: 'Feedback recorded. Thank you.' };
+    } catch {} // A writer failure must never escape into the request or echo the report.
+    return { text: 'Feedback could not be recorded.', isError: true };
+  };
+}
+
 export function logStat(rec) {
   if (!STATS) return;
   try {
@@ -190,7 +244,7 @@ export function logStat(rec) {
     const name = ts.slice(0, 10) + '.jsonl';
     // Bound (stats destination): only a four-digit UTC year/month/day filename; invalid names drop the row.
     if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) throw new Error('invalid stats day');
-    const line = JSON.stringify({ ...fields,
+    appendRow(name, { ...fields,
       ts, ep: rec.ep, tool: rec.tool ?? null,
       client: rec.client ?? 'http', ms: rec.ms ?? null,
       path: rec.path ?? null, fallbackReason: rec.fallbackReason ?? null,
@@ -199,14 +253,7 @@ export function logStat(rec) {
       jevTokens: tokenCount(rec.jevTokens), qLen: typeof q === 'string' ? q.length : rec.qLen ?? null,
       qLang: typeof q === 'string' ? queryLanguage(q) : rec.qLang ?? null, ip: rec.ip ?? null, net: rec.net ?? null,
       errorReason: rec.errorReason ?? null, errorClass: rec.errorClass ?? null,
-      ...text }) + '\n';
-    const fd = openSync(join(STATS_DIR, name),
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
-    try {
-      const bytes = Buffer.from(line);
-      // One append per row; never retry a partial write as a separate append.
-      if (writeSync(fd, bytes) !== bytes.length) throw new Error('short stats write');
-    } finally { closeSync(fd); }
+      ...text });
   } catch {
     // A missing directory or any logging failure must never affect a response.
     if (!warned) {

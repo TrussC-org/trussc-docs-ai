@@ -62,7 +62,8 @@ export const TOOLS = [{
     description:
         'Use at the end of a task when TrussC docs were wrong, misleading, or missing something ' +
         'you had to read source for. Include the corpus ids and the TrussC version or commit used. ' +
-        'Do not send private code or personal data. This is not a support channel; nobody replies.',
+        'Do not send private code or personal data. Reports are kept for six months. ' +
+        'This is not a support channel; nobody replies.',
     inputSchema: {
         type: 'object',
         properties: {

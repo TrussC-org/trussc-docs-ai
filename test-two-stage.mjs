@@ -1,5 +1,6 @@
 // Entire pipeline uses injected fetch and synthetic vectors; no sockets or services.
 import assert from 'node:assert/strict';
+import { requestChat } from './test-support/chat.mjs';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -142,7 +143,7 @@ try {
         res = await request('/search', { question: 'circle' });
         assert(!('fallbackReason' in JSON.parse(res.data))); assert.equal(statRows().at(-1).fallbackReason, 'rate'); assert.equal(jevCalls, 2);
     }
-    res = await request('/ask', { question: 'circle', debug: true, rounds: mode === 'max1' ? 10 : 1 }); assert.equal(res.status, 200, res.data);
+    res = await requestChat(request, { question: 'circle', debug: true, rounds: mode === 'max1' ? 10 : 1 }); assert.equal(res.status, 200, res.data);
     const result = JSON.parse(res.data);
     const rounds = mode === 'max3' ? 3 : mode === 'default' ? 4 : mode === 'tool' ? 2 : 1;
     assert.equal(result.rounds, rounds);
@@ -205,7 +206,7 @@ try {
     }
     if (mode === 'rerank') assert.equal(jevCalls, 0);
     if (mode === 'request-rate' || mode === 'plain') {
-        res = await request('/ask', { question: 'circle', debug: 'true', rounds: 10 });
+        res = await requestChat(request, { question: 'circle', debug: 'true', rounds: 10 });
         assert.equal(res.status, 200); assert(!('debug' in JSON.parse(res.data)));
         assert(!('debug' in statRows().at(-1)));
         if (mode === 'plain') {
@@ -213,7 +214,7 @@ try {
             assert(!chat.data.includes('event: debug'));
         }
         if (mode === 'request-rate') {
-            res = await request('/ask', { question: 'circle', debug: true });
+            res = await requestChat(request, { question: 'circle', debug: true });
             assert.equal(res.status, 429);
         }
     }

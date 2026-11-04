@@ -13,6 +13,7 @@ import vm from 'node:vm';
 import { publicDebug } from './debug.mjs';
 import { pipelineStat, statsFileDate } from './stats.mjs';
 import { main } from './ask-cli.mjs';
+import { collectChatResponse } from './chat-response.mjs';
 
 // Future internal fields must not expand the public schema, at any nesting level.
 const privateFields = { ttftMs: 4, totalMs: 12, calls: [{ ttftMs: 4, totalMs: 12 }], thinking: 'off', reason: 'budget', remainingBudget: 123, rate: 20, prompt: 'system text', key: 'secret', ip: '192.0.2.1', pathOnDisk: '/private/file', thinkingTokens: 99, thinkingBudget: 1024, fillerTokens: 300, signature: 'private signature' };
@@ -59,17 +60,23 @@ try {
 
     // An in-memory HTTP stub server exercises the CLI's --json request/response
     // path without binding a socket (the sandbox may disallow loopback listeners).
-    const raw = JSON.stringify({ answer: 'Use drawCircle.', debug: expected });
+    const result = { answer: 'Use drawCircle. 円', links: [{ label: 'circle', url: 'https://example.invalid/circle' }], sources: [{ title: 'circle' }], corrected: true, usedIds: ['symbol:drawCircle'], rounds: 1, queries: ['circle'], debug: expected };
+    const event = (type, value) => `event: ${type}\ndata: ${JSON.stringify(value)}\n\n`;
+    const raw = ': heartbeat\n\n' + event('sources', [{ title: 'old' }]) + event('links', []) +
+        event('research', { round: 2, message: 'Look again', queries: ['circle'] }) +
+        event('token', 'draft') + event('replace', 'Use drawCircle.') + event('token', ' 円') +
+        event('sources', result.sources) + event('links', result.links) + event('debug', expected) +
+        event('done', { corrected: true, usedIds: result.usedIds, rounds: 1, queries: result.queries });
     let requests = 0;
     const stub = createServer(async (req, res) => {
         let body = ''; for await (const part of req) body += part;
-        assert.equal(req.method, 'POST'); assert.equal(req.url, '/ask');
+        assert.equal(req.method, 'POST'); assert.equal(req.url, '/chat');
         assert.deepEqual(JSON.parse(body), { question: 'circle', debug: true });
         requests++;
-        res.writeHead(200, { 'content-type': 'application/json' }); res.end(raw);
+        res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(raw);
     });
     const stubFetch = async (url, options) => {
-        assert.equal(url, 'http://stub.invalid/ask');
+        assert.equal(url, 'http://stub.invalid/chat');
         assert.equal(options.redirect, 'manual');
         return new Promise(resolve => {
             const req = new PassThrough(); req.method = options.method; req.url = new URL(url).pathname;
@@ -79,11 +86,12 @@ try {
         });
     };
     const output = [];
-    await main(['circle', '--json', '--url', 'http://stub.invalid/ask'], { fetchImpl: stubFetch, print: s => output.push(s) });
-    assert.deepEqual(output, [raw]);
-    assert.deepEqual(JSON.parse(output[0]), { answer: 'Use drawCircle.', debug: expected });
+    await main(['circle', '--json', '--url', 'http://stub.invalid/chat'], { fetchImpl: stubFetch, print: s => output.push(s) });
+    assert.equal(output.length, 1);
+    assert.deepEqual(JSON.parse(output[0]), result);
     output.length = 0;
-    await main(['circle', '--url', 'http://stub.invalid/ask'], { fetchImpl: stubFetch, print: s => output.push(s) });
+    await main(['circle', '--url', 'http://stub.invalid/chat'], { fetchImpl: stubFetch, print: s => output.push(s) });
+    assert(output.join('\n').includes('Use drawCircle. 円'));
     assert(output.join('\n').includes('Round 1: fallback'));
     assert(output.join('\n').includes('Pool: 12 cards'));
     assert(output.join('\n').includes('tokens in=101 out=17'));
@@ -91,12 +99,36 @@ try {
     const oldPort = process.env.PORT; process.env.PORT = '9999';
     try {
         await main(['circle', '--json'], { print() {}, fetchImpl: async (url, options) => {
-            assert.equal(url, 'http://127.0.0.1:9999/ask');
-            return stubFetch('http://stub.invalid/ask', options);
+            assert.equal(url, 'http://127.0.0.1:9999/chat');
+            return stubFetch('http://stub.invalid/chat', options);
         } });
     } finally { if (oldPort === undefined) delete process.env.PORT; else process.env.PORT = oldPort; }
     await assert.rejects(main(['circle', '--rounds', '10'], { fetchImpl: stubFetch }), /Usage:/);
-    await assert.rejects(main(['circle', '--json'], { fetchImpl: async () => new Response('', { status: 429 }) }), /ask HTTP 429/);
+    await assert.rejects(main(['circle', '--json'], { fetchImpl: async () => new Response('', { status: 429 }) }), { message: 'ask HTTP 429' });
     assert.equal(requests, 3);
+
+    // Fragment every UTF-8 byte and event delimiter; accept CRLF and multiline data.
+    const bytes = new TextEncoder().encode(raw.replace(/\n/g, '\r\n'));
+    let index = 0;
+    assert.deepEqual(await collectChatResponse(new Response(new ReadableStream({
+        pull(controller) { if (index < bytes.length) controller.enqueue(bytes.subarray(index, ++index)); else controller.close(); },
+    }))), result);
+    assert.equal((await collectChatResponse(new Response('event: done\ndata: {"corrected":false,\ndata: "usedIds":[],"rounds":1,"queries":[]}\n\n'))).corrected, false);
+    await assert.rejects(main(['circle'], { fetchImpl: async () => new Response(event('error', 'generation service error')) }), /generation service error/);
+    await assert.rejects(main(['circle'], { fetchImpl: async () => new Response(event('token', 'partial')) }), /ended before done/);
+    let cancelled = false;
+    await assert.rejects(main(['circle'], { fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1)); },
+        cancel() { cancelled = true; },
+    })) }), /response too large/);
+    assert(cancelled, 'oversize responses cancel the body');
+    const terminal = new TextEncoder().encode(event('done', { corrected: false, usedIds: [], rounds: 1, queries: [] }));
+    const limit = 4 * 1024 * 1024;
+    assert.equal((await collectChatResponse(new Response(':' + ' '.repeat(limit - terminal.length - 2) + '\n' + new TextDecoder().decode(terminal)))).rounds, 1);
+    cancelled = false;
+    assert.equal((await collectChatResponse(new Response(new ReadableStream({
+        start(controller) { controller.enqueue(terminal); }, cancel() { cancelled = true; },
+    })))).rounds, 1);
+    assert(cancelled, 'done cancels without waiting for EOF');
 } finally { rmSync(dir, { recursive: true, force: true }); }
 console.log('PASS debug allowlist, report exclusion/include flag, ask-cli --json/readable/default URL/stub HTTP server');

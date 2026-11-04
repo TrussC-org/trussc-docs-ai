@@ -1,5 +1,6 @@
 // Round-4 regressions: synthetic corpus and in-memory transports only.
 import assert from 'node:assert/strict';
+import { requestChat } from './test-support/chat.mjs';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, openSync, closeSync, symlinkSync, truncateSync } from 'node:fs';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -79,7 +80,7 @@ const test = (name, fn) => tests.push([name, fn]);
 for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial and search-result prompts: ${exists}`, async () => {
     await fixture({ exists, env: exists === null ? { TYPESAFE_API_KEY: '' } : {},
         generate: (_, __, n) => new Response((n === 1 ? tool('coverage') : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        const response = await requestChat(request); assert.equal(response.status, 200, response.data);
         const debug = JSON.parse(response.data).debug, stat = rows().at(-1);
         assert.equal(calls.length, 2);
         for (const [i, req] of calls.entries()) {
@@ -109,7 +110,7 @@ for (const exists of [.29, .88, .70, 0, null]) test(`coverage hint in initial an
 test('configured hint threshold is honoured', async () => {
     for (const [threshold, exists, hintShown] of [[.2, .29, false], [.9, .88, true], [.29, .29, false]]) {
         await fixture({ exists, env: { JEV_SEARCH_HINT_BELOW: String(threshold) } }, async ({ request, calls, rows }) => {
-            const response = await request('/ask'); assert.equal(response.status, 200);
+            const response = await requestChat(request); assert.equal(response.status, 200);
             const prompt = calls[0].messages.at(-1).content;
             assert(prompt.includes(`cover about ${Math.round(exists * 100)}% of what is needed`));
             assert.equal(prompt.includes('Instead of answering now, call trussc_search'), hintShown);
@@ -120,7 +121,7 @@ test('configured hint threshold is honoured', async () => {
 });
 test('off-topic answer can decline a low-coverage search recommendation', async () => {
     await fixture({ exists: .29, generate: () => new Response(text('Hello!') + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask', { question: 'Hello!', debug: true });
+        const response = await requestChat(request, { question: 'Hello!', debug: true });
         assert.equal(response.status, 200);
         const result = JSON.parse(response.data), stat = rows().at(-1);
         assert.equal(result.answer, 'Hello!'); assert.equal(calls.length, 1);
@@ -137,7 +138,7 @@ test('off-topic answer can decline a low-coverage search recommendation', async 
 test('each round uses its current coverage estimate and hint decision', async () => {
     await fixture({ exists: n => n === 0 ? .29 : n === 1 ? .88 : .1,
         generate: (_, __, n) => new Response((n < 3 ? tool(`coverage${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask'); assert.equal(response.status, 200);
+        const response = await requestChat(request); assert.equal(response.status, 200);
         const debug = JSON.parse(response.data).debug, stat = rows().at(-1);
         assert.equal(calls.length, 3);
         for (const [i, exists] of [.29, .88, .1].entries()) {
@@ -155,7 +156,7 @@ test('each round uses its current coverage estimate and hint decision', async ()
 });
 test('no recommendation when trussc_search is not offered (single round)', async () => {
     await fixture({ exists: .29, env: { MAX_SEARCH_ROUNDS: '1' }, generate: () => new Response(text('Use [[drawCircle]].') + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        const response = await requestChat(request); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 1); assert.equal(calls[0].tools, undefined);
         const prompt = calls[0].messages.at(-1).content;
         assert(prompt.includes('cover about 29% of what is needed'));
@@ -167,7 +168,7 @@ test('no recommendation when trussc_search is not offered (single round)', async
 });
 test('invalid-tool recovery stays out of the hint metric', async () => {
     await fixture({ exists: .29, generate: (req, _, n) => new Response((n === 1 ? tool('bad', { message: '', queries: [] }) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        const response = await requestChat(request); assert.equal(response.status, 200, response.data);
         assert.equal(calls.length, 2); assert(calls[0].tools); assert.equal(calls[1].tools, undefined);
         assert(calls[0].messages.at(-1).content.includes('Instead of answering now, call trussc_search'));
         for (const record of [JSON.parse(response.data).debug.rounds[0], rows().at(-1).retrievals[0]]) {
@@ -175,10 +176,9 @@ test('invalid-tool recovery stays out of the hint metric', async () => {
         }
     });
 });
-test('implicit used IDs in ask/chat, including correction', async () => {
+test('implicit used IDs in chat, including correction', async () => {
     for (const correction of [false, true]) await fixture({ corpus: [baseCard, { ...baseCard, id: 'symbol:Node', title: 'Node', meta: { kind: 'type' } }],
         generate: (_, __, n) => new Response(text(correction && n % 2 ? 'Node::invented' : 'Use [[drawCircle]].') + stop) }, async ({ request }) => {
-        const ask = await request('/ask'); assert(JSON.parse(ask.data).usedIds.includes(baseCard.id));
         const chat = await request('/chat'); const done = chat.data.match(/event: done\ndata: ([^\n]+)/);
         assert(done && JSON.parse(done[1]).usedIds.includes(baseCard.id));
     });
@@ -213,8 +213,8 @@ for (const kind of ['connect', 'abort-connect', 'forever', 'oversize', 'line', '
         let watchdog;
         const timeout = new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('missing transport bound')), 2000); });
         try {
-            const r = await Promise.race([request('/ask'), timeout]);
-            assert.equal(r.status, 500); assert.equal(JSON.parse(r.data).error, 'generation service error');
+            const r = await Promise.race([requestChat(request), timeout]);
+            assert.equal(r.status, 200); assert.equal(JSON.parse(r.data).error, 'generation service error');
             assert.equal(rows().at(-1).errorReason, ['connect', 'abort-connect', 'forever'].includes(kind) ? 'timeout' : kind === 'tool-json' ? 'tool-input' : kind === 'tool-map' ? 'tool-blocks' : 'oversize');
             assert(aborted || cancelled || !['connect', 'abort-connect', 'forever'].includes(kind));
         } finally { clearTimeout(watchdog); clearInterval(timer); }
@@ -235,10 +235,9 @@ for (const stage of ['headers', 'fetch', 'body']) test(`credential-safe keyed ex
         const buildError = await selectCards('circle', [badCard]);
         assert.equal(buildError.error, 'selection service error');
         assert.equal(buildError.errorClass, 'TypeError');
-        const ask = await request('/ask'), chat = await request('/chat');
-        const all = JSON.stringify([ask.data, chat.data, rows(), output, selected, buildError]);
+        const chat = await request('/chat');
+        const all = JSON.stringify([chat.data, rows(), output, selected, buildError]);
         for (const part of secret.split('\n')) assert(!all.includes(part), 'credential fragment escaped');
-        assert.equal(JSON.parse(ask.data).error, 'generation service error');
         assert(chat.data.includes('event: error\ndata: "generation service error"'));
         assert.equal(rows().at(-1).errorClass, 'TypeError');
         assert.equal(rows().at(-1).errorReason, 'transport');
@@ -305,7 +304,7 @@ test('correction input fits beside accumulated native context', async () => {
 test('id-only and per-call estimates reach request stats and public allowlist', async () => {
     const corpus = Array.from({ length: 16 }, (_, i) => ({ ...baseCard, id: `card:${i}`, title: `entry${i}`, text: 'payload line\n'.repeat(9000) }));
     await fixture({ corpus, generate: (req, _, n) => new Response((req.tools ? tool(`t${n}`) : text('Use [[drawCircle]].')) + stop) }, async ({ request, calls, rows }) => {
-        const response = await request('/ask'); assert.equal(response.status, 200, response.data);
+        const response = await requestChat(request); assert.equal(response.status, 200, response.data);
         const debug = JSON.parse(response.data).debug, stat = rows().at(-1);
         assert(stat.idOnlyCardsTotal > 0);
         assert.deepEqual(stat.idOnlyCards, debug.rounds.map(r => r.idOnlyCards));
@@ -324,7 +323,7 @@ test('id-only and per-call estimates reach request stats and public allowlist', 
 test('hard Haiku ceiling includes invalid-tool recovery and fabrication correction; numeric stats/debug', async () => {
     for (const maxRounds of [1, 3, 10]) for (const invalid of [false, true]) await fixture({ env: { MAX_SEARCH_ROUNDS: String(maxRounds) }, corpus: [baseCard, { ...baseCard, id: 'symbol:Node', title: 'Node', meta: { kind: 'type' } }],
         generate: (req, _, n) => new Response((req.tools ? tool(`t${n}`, invalid && n === maxRounds - 1 ? { message: '', queries: [] } : undefined) : text('Node::invented')) + stop) }, async ({ request, calls, rows }) => {
-        const r = await request('/ask'); assert.equal(r.status, 200, r.data);
+        const r = await requestChat(request); assert.equal(r.status, 200, r.data);
         const debug = JSON.parse(r.data).debug;
         assert.equal(calls.length, maxRounds + 1); assert.equal(rows().at(-1).haikuCalls, calls.length);
         assert.equal(debug.haikuCalls, calls.length); assert.equal(typeof debug.haikuCalls, 'number');
@@ -513,26 +512,24 @@ test('the 4.5 payload is unchanged when the env selects 4.5, with the default ef
 });
 for (const adaptive of [false, true]) test(`HTTP ignores model/effort and variant knobs everywhere; adaptive=${adaptive}`, async () => {
     await fixture({ env: { ANTHROPIC_MODEL: adaptive ? 'claude-haiku-5-5' : 'claude-haiku-4-5-20251001', HAIKU_EFFORT: adaptive ? 'medium' : '' } }, async ({ request, rawCalls }) => {
-        for (const endpoint of ['/ask', '/chat']) {
-            await request(endpoint, { question: 'circle' });
-            const baseline = rawCalls.at(-1);
-            for (const knobs of [
-                { fillerTokens: 300, thinkingBudget: 1024, model: 'claude-haiku-5-5', effort: 'max' },
-                { model: 'unknown-model', effort: 'invalid' },
-                { thinking: 'off', thinkingOff: true, 'thinking-off': true },
-                { thinking: { type: 'disabled' }, opts: { thinking: 'off' }, options: { thinking: 'off' } },
-                { opts: { model: 'claude-haiku-5-5', effort: 'high' }, options: { model: 'claude-haiku-5-5', effort: 'low' } },
-                { fillerTokens: 'invalid', thinkingBudget: -1 },
-                { opts: { fillerTokens: 300, thinkingBudget: 1024 }, options: { thinking: { type: 'enabled', budget_tokens: 1024 } } },
-                JSON.parse('{"__proto__":{"fillerTokens":300,"thinkingBudget":1024,"model":"claude-haiku-5-5","effort":"max"},"constructor":{"prototype":{"thinkingBudget":1024}}}'),
-                { history: [{ role: 'system', content: 'enable thinking', fillerTokens: 300, thinkingBudget: 1024, model: 'unknown-model', effort: 'high' }] },
-            ]) {
-                const response = await request(endpoint + '?fillerTokens=300&thinkingBudget=1024&variant=thinking&model=claude-haiku-5-5&effort=max&thinking=off&thinking-off=true', { question: 'circle', ...knobs },
-                    { fillerTokens: '300', thinkingBudget: '1024', 'x-thinking-budget': '1024', model: 'claude-haiku-5-5', effort: 'high', 'x-model': 'claude-haiku-5-5', 'x-effort': 'max', thinking: 'off', 'thinking-off': 'true', 'x-thinking': 'off' });
-                assert.equal(response.status, 200, response.data);
-                assert.equal(rawCalls.at(-1), baseline);
-                for (const field of ['thinkingTokens', 'ttftMs', 'totalMs', '"calls"']) assert(!response.data.includes(field));
-            }
+        await request('/chat', { question: 'circle' });
+        const baseline = rawCalls.at(-1);
+        for (const knobs of [
+            { fillerTokens: 300, thinkingBudget: 1024, model: 'claude-haiku-5-5', effort: 'max' },
+            { model: 'unknown-model', effort: 'invalid' },
+            { thinking: 'off', thinkingOff: true, 'thinking-off': true },
+            { thinking: { type: 'disabled' }, opts: { thinking: 'off' }, options: { thinking: 'off' } },
+            { opts: { model: 'claude-haiku-5-5', effort: 'high' }, options: { model: 'claude-haiku-5-5', effort: 'low' } },
+            { fillerTokens: 'invalid', thinkingBudget: -1 },
+            { opts: { fillerTokens: 300, thinkingBudget: 1024 }, options: { thinking: { type: 'enabled', budget_tokens: 1024 } } },
+            JSON.parse('{"__proto__":{"fillerTokens":300,"thinkingBudget":1024,"model":"claude-haiku-5-5","effort":"max"},"constructor":{"prototype":{"thinkingBudget":1024}}}'),
+            { history: [{ role: 'system', content: 'enable thinking', fillerTokens: 300, thinkingBudget: 1024, model: 'unknown-model', effort: 'high' }] },
+        ]) {
+            const response = await request('/chat?fillerTokens=300&thinkingBudget=1024&variant=thinking&model=claude-haiku-5-5&effort=max&thinking=off&thinking-off=true', { question: 'circle', ...knobs },
+                { fillerTokens: '300', thinkingBudget: '1024', 'x-thinking-budget': '1024', model: 'claude-haiku-5-5', effort: 'high', 'x-model': 'claude-haiku-5-5', 'x-effort': 'max', thinking: 'off', 'thinking-off': 'true', 'x-thinking': 'off' });
+            assert.equal(response.status, 200, response.data);
+            assert.equal(rawCalls.at(-1), baseline);
+            for (const field of ['thinkingTokens', 'ttftMs', 'totalMs', '"calls"']) assert(!response.data.includes(field));
         }
     });
 });
@@ -592,9 +589,8 @@ for (const rounds of [1, 3]) for (const partial of [false, true]) test(`adaptive
         + frame({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 8192, thinking_tokens: 8180 } }) + stop) },
     async ({ answer, request, rows }) => {
         await assert.rejects(answer('circle'), error => error.errorReason === 'max_tokens' && error.outputTokens === 8192 && error.thinkingTokens === 8180);
-        const ask = await request('/ask');
-        assert.equal(ask.status, 500); assert.match(ask.data, /generation service error/);
         const chat = await request('/chat');
+        assert.equal(chat.status, 200); assert.match(chat.data, /generation service error/);
         assert.match(chat.data, /event: error/); assert(!chat.data.includes('event: done'));
         assert.equal(rows().at(-1).errorReason, 'max_tokens');
         assert(!JSON.stringify(rows()).includes('PRIVATE reasoning'));
@@ -632,7 +628,7 @@ for (const adaptive of [false, true]) for (const separate of [true, false]) test
             assert(!JSON.stringify(events).includes('PRIVATE reasoning'));
             assert(!JSON.stringify(events).includes('signed+'));
             assert(!JSON.stringify(events).includes('opaque+'));
-            await request('/ask');
+            await requestChat(request);
             for (const privateText of ['PRIVATE reasoning', 'signed+', 'opaque+']) {
                 assert(!JSON.stringify(rows()).includes(privateText));
                 assert(!output.join('\n').includes(privateText));
@@ -1053,7 +1049,7 @@ for (const query of ['Vec2.fromAngle(0)', 'node.getGlobalPos()', 'node:getGlobal
                 assert.equal(JSON.parse(search.data).missingSymbols.length > 0, missing, 'HTTP search metadata');
                 const rpc = await request('/mcp', { id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: question } } });
                 assert.equal(JSON.parse(rpc.data).result.content[0].text.includes('No TrussC symbol named'), missing, 'MCP text');
-                const response = await request('/ask', { question, ...(query === 'TweenFloat' ? { page: 'sketch' } : {}) });
+                const response = await requestChat(request, { question, ...(query === 'TweenFloat' ? { page: 'sketch' } : {}) });
                 assert.equal(response.status, 200, response.data);
                 const prompt = JSON.stringify(calls.at(-1).messages);
                 assert.equal(prompt.includes('No TrussC symbol named'), missing, 'generation prompt');
@@ -1090,7 +1086,7 @@ async function assertNameSignals({ request, calls, dir, checkStdio }, query, nam
         assert(!stdio.isError);
         assert.equal(stdio.content[0].text, rpc.content[0].text, `stdio agrees with HTTP MCP: ${query}`);
     }
-    const chat = await request('/ask', { question: query, ...(lang === 'lua' ? { page: 'sketch' } : {}) });
+    const chat = await requestChat(request, { question: query, ...(lang === 'lua' ? { page: 'sketch' } : {}) });
     assert.equal(chat.status, 200, chat.data);
     const prompt = calls.at(-1).messages.at(-1).content;
     assert.equal(prompt.includes('Documentation name check:'), names.length > 0, query);
@@ -1367,7 +1363,7 @@ for (const [query, name] of [
         const fact = `No TrussC symbol named \`${name}\` appears in the documentation.`;
         assert(rpc.content[0].text.startsWith(fact));
         assert(rpc.content[0].text.includes('Closest matches:'));
-        const chat = await request('/ask', { question: query });
+        const chat = await requestChat(request, { question: query });
         assert.equal(chat.status, 200, chat.data);
         assert(calls.at(-1).messages.at(-1).content.includes(fact));
     });
@@ -1414,15 +1410,15 @@ for (const injected of [false, true]) test(`retrieval survives repeated requests
     const corpus = [...ownerCorpus, { ...baseCard, id: 'example:tcxProbe/basic', source: 'example',
         meta: { addon: 'tcxProbe' }, text: injected ? '// harmless' : '// ' + 'x.'.repeat(4 * 1024 * 1024) + 'x\n' }];
     await fixture({ corpus, exists: .9, checkerInitFailure: injected }, async ({ request, calls, output }) => {
-        for (const path of ['/search', '/ask', '/mcp', '/search', '/ask', '/mcp']) {
+        for (const path of ['/search', '/chat', '/mcp', '/search', '/chat', '/mcp']) {
             const body = path === '/mcp' ? { id: 1, method: 'tools/call',
                 params: { name: 'trussc_search', arguments: { query: 'tc::CudaGraph' } } } : { question: 'tc::CudaGraph' };
-            const response = await request(path, body);
+            const response = path === '/chat' ? await requestChat(request, body) : await request(path, body);
             assert.equal(response.status, 200, response.data);
             const value = JSON.parse(response.data);
             if (path === '/search') { assert(value.results.length > 0); assert.deepEqual(value.missingSymbols.map(c => c.name), injected ? [] : ['CudaGraph']); }
             if (path === '/mcp') { assert(!value.result.isError); assert.equal(value.result.content[0].text.includes('No TrussC symbol named'), !injected); }
-            if (path === '/ask') assert.equal(JSON.stringify(calls.at(-1).messages).includes('Documentation name check:'), !injected);
+            if (path === '/chat') assert.equal(JSON.stringify(calls.at(-1).messages).includes('Documentation name check:'), !injected);
         }
         assert.equal(output.filter(line => line === '[symbol-check] unavailable; documentation name checks disabled').length, injected ? 1 : 0);
         assert(!output.join('\n').includes('CORPUS_CONTENT_MUST_NOT_ESCAPE'));
@@ -1437,7 +1433,7 @@ test('missing symbol fact reaches search and chat through the same loaded ids', 
     const corpus = [baseCard, ...['Fbo', 'Fbo::begin', 'CudaGraphs'].map(name => ({ ...baseCard, id: `symbol:${name}`, title: name }))];
     await fixture({ corpus, exists: .9 }, async ({ request, calls }) => {
         for (const query of ['tc::CudaGraph', 'drawCircle', 'Fbo::begin', 'tc::Fbo', 'draw a circle']) {
-            const response = await request('/ask', { question: query });
+            const response = await requestChat(request, { question: query });
             assert.equal(response.status, 200, response.data);
             const prompt = JSON.stringify(calls.at(-1).messages);
             assert.equal(prompt.includes('No TrussC symbol named `CudaGraph` appears in the documentation.'), query === 'tc::CudaGraph');

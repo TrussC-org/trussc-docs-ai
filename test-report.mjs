@@ -43,10 +43,19 @@ try {
   assert.match(output, /latency ms: p50=100  p95=100  max=100/);
   assert.match(output, /conversations: 1  \(avg 2.0 msgs\/conv, max 2\)/);
   assert.match(output, /corrected\): 1\/2 \(50.0%\)/);
+  assert.match(output, /by endpoint:\n\s+2\s+ask(?:\n|$)/);
   assert.match(output, /drawCircle/); assert.match(output, /drawing/);
   assert(!output.includes('hidden')); assert(!output.includes('folded into other'));
   assert.match(report(['--include-debug'], { EXCLUDE_IP: 'excluded' }), /\(3 requests,/);
   console.log('PASS historical archive >55 MB streams under 32 MiB heap; month selection and early filters');
+
+  writeFileSync(monthly, row({ ep: 'ask', q: 'historical answer' }));
+  writeFileSync(live, row({ ep: 'chat', q: 'current answer' }));
+  output = report();
+  assert.match(output, /\(2 requests,/);
+  assert.match(output, /\n\s+1\s+ask(?:\n|$)/);
+  assert.match(output, /\n\s+1\s+chat(?:\n|$)/);
+  console.log('PASS historical and current answer endpoints both count');
 
   // A rotation files rows under the previous UTC day's month (a manual run on
   // the 1st): the report still reads that file for a 1-day window.

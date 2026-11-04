@@ -57,7 +57,7 @@ swap, restart, health check, rollback).
 ```bash
 cd /opt/trussc-docs-ai && node server.mjs &
 curl -s localhost:8788/health
-curl -s localhost:8788/ask -d '{"question":"serialの使い方は？"}' | jq
+curl -sN localhost:8788/chat -d '{"question":"serialの使い方は？"}'
 kill %1
 ```
 
@@ -115,7 +115,7 @@ sudo cloudflared service install     # installs + starts cloudflared as systemd
 ### 8. Verify end-to-end
 ```bash
 curl -s https://api.trussc.org/health
-curl -s https://api.trussc.org/ask -d '{"question":"drawRectの使い方は？"}' | jq
+curl -sN https://api.trussc.org/chat -d '{"question":"drawRectの使い方は？"}'
 ```
 
 ## Notes
@@ -132,7 +132,7 @@ curl -s https://api.trussc.org/ask -d '{"question":"drawRectの使い方は？"}
   corpus embedded with it, published together with the restart:
   `EMBED_MODEL=<new> ./update-corpus.sh --local` (the same model as the unit; the
   guards check the new corpus with it, and the swap restarts the service onto it).
-- **Endpoints for clients**: widget → `POST /chat` (SSE); CLI/`tchat` → `POST /ask`;
+- **Endpoints for clients**: widget and HTTP CLI → `POST /chat` (SSE);
   agents → `POST /search` (raw chunks).
 
 Jev retrieval is enabled by default. The owner must add `TYPESAFE_API_KEY` to the

@@ -1,5 +1,6 @@
 // PR4: synthetic corpus, in-memory HTTP/providers, and a stubbed stdio proxy only.
 import assert from 'node:assert/strict';
+import { requestChat } from './test-support/chat.mjs';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -259,7 +260,7 @@ await fixture(async ({ request, haiku, jev, generate }) => {
         tool(`rejected${index}`, 'trussc_search', {}, index) +
         frame({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } })
     ).join('') + tool('valid-get', 'trussc_get', { ids: ['symbol:servePage'] }, inputs.length) : text('Done.'));
-    const response = await request('/ask', { question: 'circle', debug: true });
+    const response = await requestChat(request, { question: 'circle', debug: true });
     assert.equal(response.status, 200, response.data);
     assert.equal(haiku.length, 2); assert.equal(jev.length, 1);
     const replay = haiku[1].messages.at(-2).content;

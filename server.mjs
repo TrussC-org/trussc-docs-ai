@@ -3,8 +3,7 @@
 // Endpoints:
 //   GET  /health   → { ok, chunks }                         (widget appearance gate)
 //   GET  /         → demo.html                              (dev harness only)
-//   POST /chat     → SSE stream (events: sources, links, research, token, replace, done, error)  (widget)
-//   POST /ask      → JSON { answer, links, sources }        (one-shot; CLI / tchat)
+//   POST /chat     → SSE stream (events: sources, links, research, token, replace, debug, done, error)  (widget / CLI)
 //   POST /search   → JSON { results:[{id,title,source,score,rrf,link,text}] }  (agents: retrieval only; body.full for whole text)
 //   POST /get      → JSON { results:[...] } by body.ids (full text)            (fetch specific chunks)
 //   POST /mcp      → JSON-RPC 2.0 (Streamable HTTP MCP; trussc_search/trussc_get)  (remote MCP gateway)
@@ -13,7 +12,7 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, realpathSync } from 'node:fs';
-import { answer, answerStream, retrieve, retrieveQueries, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
+import { answerStream, retrieve, retrieveQueries, chunks, refLink, leanText, getByIds, retrievalInfo } from './rag.mjs';
 import { dispatch as mcpDispatch, searchResponse, searchInput } from './mcp-core.mjs';
 import { WIDGET_FILE, MAX_BODY_BYTES, STATS } from './config.mjs';
 import { publicDebug } from './debug.mjs';
@@ -128,14 +127,14 @@ export const server = createServer(async (req, res) => {
         const ip = (req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '').toString();
         const t0 = Date.now();
         const endpoint = url.pathname.slice(1);
-        const tracked = ['chat', 'ask', 'search', 'get', 'mcp'].includes(endpoint);
+        const tracked = ['chat', 'search', 'get', 'mcp'].includes(endpoint);
         // The stdio proxy still hits /search and /get. Its product UA identifies
         // those tool requests without adding headers, destinations or server env.
         const proxy = ['search', 'get'].includes(endpoint) && clientName(req.headers['user-agent']) === 'trussc-mcp-stdio';
         let body = {};
         const record = (fields = {}) => {
             if (!tracked) return;
-            const query = ['chat', 'ask', 'search'].includes(endpoint) && typeof body.question === 'string' ? body.question.trim() : null;
+            const query = ['chat', 'search'].includes(endpoint) && typeof body.question === 'string' ? body.question.trim() : null;
             logStat({ ep: proxy ? 'mcp' : endpoint,
                 tool: proxy ? (endpoint === 'search' ? 'trussc_search' : 'trussc_get') : null,
                 client: requestClient(proxy ? 'mcp' : endpoint, req.headers, body),
@@ -244,14 +243,14 @@ export const server = createServer(async (req, res) => {
         }
 
         // Per-request stats context (pseudonymized IP + client hints + timer).
-        const debug = body.debug === true && (url.pathname === '/ask' || url.pathname === '/chat');
+        const debug = body.debug === true && url.pathname === '/chat';
         const stat = {
             ...(debug ? { debug: true } : {}),
             cid: (typeof body.convId === 'string' ? body.convId.slice(0, 64) : null), // groups rows into a thread
             turns: history.length / 2 | 0,
         };
 
-        // /search + /ask are awaited inline — wrap so an Ollama/LLM error returns
+        // /search is awaited inline — wrap so a retrieval error returns
         // 500 instead of an unhandled rejection that would kill the whole daemon.
         try {
         // Agents: raw retrieval, no generation (fast; let the caller reason). Examples
@@ -266,18 +265,6 @@ export const server = createServer(async (req, res) => {
             return json(200, { ...searchResponse(retrieved, results), rounds: 1, queries: searchQueries, jevMs: info.jevMs, haikuMs: 0, jevEstimatedTokens: info.jevEstimatedTokens });
         }
 
-        // Generation opts are allowlisted as { ip } here and in /chat below.
-        // Never spread body, history metadata, headers or query params into opts;
-        // fillerTokens/thinkingBudget belong only to in-process offline callers.
-        // One-shot answer (CLI / tchat). Includes the draft→verify→correct flow.
-        if (url.pathname === '/ask') {
-            const result = await answer(question, history, page, pinned, undefined, { ip });
-            const { retrieved, links, text, corrected, usedIds, rounds, queries } = result;
-            record({ ...pipelineStat(result), ...stat, q: question, a: text || '', corrected, n: retrieved.length, top: retrieved[0]?.score ?? null, links: links.map((l) => ({ label: l.label, source: l.source })), sym: suggested(retrieved) });
-            const response = { answer: text, links, sources: sources(retrieved), corrected, usedIds, rounds, queries };
-            if (debug) response.debug = publicDebug(result.traces);
-            return json(200, response);
-        }
         } catch (e) {
             record({ ...pipelineStat(e), ...stat, q: question, error: String((e && e.message) || e), errorReason: e?.errorReason || 'request', errorClass: e?.errorClass || 'Error' });
             return json(500, { error: String((e && e.message) || e) });
@@ -290,6 +277,8 @@ export const server = createServer(async (req, res) => {
             const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             try {
                 let retrieved = [], links = [], corrected = false, answerText = '', finalStats = {};
+                // Generation opts are allowlisted as { ip }; never forward request knobs.
+                // fillerTokens/thinkingBudget belong only to in-process offline callers.
                 for await (const ev of answerStream(question, history, page, pinned, undefined, { ip })) {
                     if (ev.type === 'meta') {
                         retrieved = ev.retrieved; links = ev.links;

@@ -1038,7 +1038,7 @@ function resolveProse(text, sketchMode) {
 // Retrieve → draft (think:false, ~1s) → deterministic check → corrective pass ONLY
 // when a fabricated API is detected (verifier is ground-truth membership, not an
 // LLM, so the common clean case stays single-pass). History enables follow-ups.
-// Returns { retrieved, links, text, corrected }. Buffered (used by /ask, CLI).
+// Returns { retrieved, links, text, corrected }. Buffered for in-process CLI and evaluation callers.
 export async function answer(question, history = [], page = null, pinned = [], k = TOP_K, opts = {}) {
     let retrieved = [], links = [], final;
     for await (const ev of answerStream(question, history, page, pinned, k, opts)) {
@@ -1281,7 +1281,7 @@ export async function* answerStream(question, history = [], page = null, pinned 
             yield { type: 'replace', text };
         } else {
             // Collect implicit [[...]] ids before deterministic link resolution, from
-            // the final draft or corrected answer (shared by /ask and /chat).
+            // the final draft or corrected answer (shared by buffered and streaming callers).
             usedIds = usedIdsOf(reported, text, retrieved);
             const resolved = resolveLinks(text, sketchMode);
             if (resolved !== shown.replace(/\s+$/, '')) { text = resolved; yield { type: 'replace', text }; }

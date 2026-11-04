@@ -1,5 +1,6 @@
 // Offline ingress/startup regressions: no sockets or provider calls.
 import assert from 'node:assert/strict';
+import { chatResponse } from './test-support/chat.mjs';
 import { mkdtempSync, readFileSync, writeFileSync, symlinkSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,13 +62,13 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         const req = new EventEmitter(); Object.assign(req, { method:'POST', url:path, headers:{}, socket:{remoteAddress:'offline'} });
         req.drained = false; req.resume = () => { req.drained = true; };
         const res = { status:200, data:'', setHeader() {}, writeHead(status) { this.status = status; }, write(s) { this.data += s; } };
-        const done = new Promise(resolve => { res.end = s => { if(s) res.data += s; resolve(res); }; });
+        const done = new Promise(resolve => { res.end = s => { if(s) res.data += s; resolve(res); }; }).then(res => path === '/chat' ? chatResponse(res) : res);
         server.emit('request', req, res); return { req, done };
     }
     const limit = 262144;
     const payload = n => Buffer.from(JSON.stringify({ question:'q', padding:'x'.repeat(n - 29) }));
     assert.equal(payload(limit).length, limit);
-    for (const path of ['/ask', '/chat', '/search', '/mcp', '/get']) {
+    for (const path of ['/chat', '/search', '/mcp', '/get']) {
         await test(`${path} just under byte cap`, async () => {
             const { req, done } = request(path); req.emit('data', payload(limit - 1)); req.emit('end');
             assert.equal((await done).status, path === '/mcp' ? 202 : 200);
@@ -89,7 +90,7 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         });
     }
     await test('exact byte boundary accepts split UTF-8 JSON', async () => {
-        const { req, done } = request('/ask');
+        const { req, done } = request('/chat');
         const prefix = Buffer.from('{"question":"あ","padding":"');
         const suffix = Buffer.from('"}');
         const body = Buffer.concat([prefix, Buffer.alloc(limit - prefix.length - suffix.length, 120), suffix]);
@@ -98,26 +99,26 @@ export async function* answerStream(...args) { calls.push(args); yield {type:'fi
         assert.equal((await done).status, 200); assert.equal(calls.at(-1)[0], 'あ');
     });
     await test('chunked trickle cuts off without EOF', async () => {
-        const { req, done } = request('/ask');
+        const { req, done } = request('/chat');
         req.emit('data', Buffer.alloc(limit - 2, 32));
         for (let i = 0; i < 3; i++) { await new Promise(r => setTimeout(r, 2)); req.emit('data', Buffer.from(' ')); }
         const res = await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(Error('trickle not cut')), 80))]);
         assert.equal(res.status, 413); assert.equal(req.listenerCount('data'), 0); assert(req.drained);
     });
-    for (const path of ['/ask', '/chat', '/search']) for (const field of ['question', 'history']) await test(`${path} ${field} character cap`, async () => {
+    for (const path of ['/chat', '/search']) for (const field of ['question', 'history']) await test(`${path} ${field} character cap`, async () => {
         const { req, done } = request(path);
         const body = field === 'question' ? {question:'q'.repeat(8001)} : {question:'q', history:[{role:'user', content:'h'.repeat(8001)}]};
         const before = calls.length; req.emit('data', Buffer.from(JSON.stringify(body))); req.emit('end');
         assert.equal((await done).status, 400); assert.equal(calls.length, before);
     });
     await test('character caps accept exact boundary and six recent turns', async () => {
-        const { req, done } = request('/ask');
+        const { req, done } = request('/chat');
         req.emit('data', Buffer.from(JSON.stringify({question:'q'.repeat(8000), history:Array.from({length:7}, () => ({role:'user', content:'h'.repeat(8000)}))}))); req.emit('end');
         assert.equal((await done).status, 200); assert.equal(calls.at(-1)[1].length, 6);
     });
     await test('body rejections keep the common schema without body text', () => {
         const rows = readFileSync(join(process.env.STATS_DIR, new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.errorReason === 'body');
-        assert.equal(rows.length, 6);
+        assert.equal(rows.length, 5);
         for (const row of rows) {
             assert.equal(row.errorClass, 'Error'); assert(row.ms >= 0);
             assert.equal(row.qLen, null); assert.equal(row.qLang, null);

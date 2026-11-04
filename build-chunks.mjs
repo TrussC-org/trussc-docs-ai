@@ -74,6 +74,7 @@ const DOC_FILES = [
     ['AI_AUTOMATION.md', 'AI Automation (MCP)'],
     ['INSTALLATION_WINDOWS.md', 'Installation (Windows)'],
     ['ROADMAP.md', 'Roadmap'],
+    ['MIGRATION_0_8.md', 'Migrating to v0.8'],
 ];
 function chunkDocs(docsDir) {
     const chunks = [];

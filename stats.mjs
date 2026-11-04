@@ -165,7 +165,7 @@ export function clientName(userAgent) {
 
 export function requestClient(ep, headers, body = {}) {
   if (ep === 'mcp') return clientName(headers['user-agent']);
-  if (ep === 'chat' || ep === 'ask') {
+  if (ep === 'chat') {
     // The canonical widget already supplies a page hint; same-site Origin is
     // also sufficient. Debug alone is not a widget signal (ask-cli sends it).
     if ((typeof body.page === 'string' && body.page.trim()) ||

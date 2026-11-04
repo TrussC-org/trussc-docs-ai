@@ -1,5 +1,6 @@
 // Offline stats/report regressions. In-memory HTTP and temp files only.
 import assert from 'node:assert/strict';
+import { chatResponse } from './test-support/chat.mjs';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync, openSync, closeSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -119,6 +120,7 @@ export async function* answerStream(query) {
                 write(data) { this.data += data; return true; }, end(data = '') { this.data += data; resolve(this); } });
             server.emit('request', req, res); req.end(JSON.stringify(body));
         });
+        if (path === '/chat') await chatResponse(response);
         if (!logged) return { response };
         const all = rows(); assert.equal(all.length, before + 1, path + ' writes exactly one line');
         const row = all.at(-1);
@@ -141,7 +143,20 @@ export async function* answerStream(query) {
         for (const field of ['ua','ref','headers','qlen']) assert(!Object.hasOwn(row, field));
         return {row, response};
     }
-    for (const ep of ['chat','ask','search']) {
+    // The removed endpoint follows the ordinary unknown-path handler and never logs.
+    const beforeUnknown = rows().length;
+    for (const body of [{ question: 'circle', debug: true }, {}, { question: 'x'.repeat(8001) }]) {
+        const { response: removed } = await request('/ask', body, {}, false);
+        const { response: unknown } = await request('/unknown', body, {}, false);
+        assert.equal(removed.status, unknown.status);
+        assert.equal(removed.data, unknown.data);
+        if (body.question === 'circle') {
+            assert.equal(removed.status, 404);
+            assert.deepEqual(JSON.parse(removed.data), { error: 'not found' });
+        }
+        assert.equal(rows().length, beforeUnknown, 'unknown paths write no stats rows');
+    }
+    for (const ep of ['chat','search']) {
         const { row } = await request('/' + ep, { question:'  円を描く 😀  ' }, {origin:'https://trussc.org', 'user-agent':'PRIVATE-RAW/1.2'});
         assert.equal(row.ep, ep); assert.equal(row.tool, null);
         assert.equal(row.client, ep === 'search' ? 'http' : 'widget');
@@ -155,9 +170,9 @@ export async function* answerStream(query) {
         }
         assert(!JSON.stringify(row).includes('PRIVATE-RAW'));
     }
-    assert.equal((await request('/ask', {question:'circle', debug:true})).row.client, 'http');
+    assert.equal((await request('/chat', {question:'circle', debug:true})).row.client, 'http');
     assert.equal((await request('/chat', {question:'circle', page:'drawCircle'})).row.client, 'widget');
-    assert.equal((await request('/ask', {question:'circle'}, {origin:'https://trussc.org.evil.invalid'})).row.client, 'http');
+    assert.equal((await request('/chat', {question:'circle'}, {origin:'https://trussc.org.evil.invalid'})).row.client, 'http');
     const {row: get} = await request('/get', {ids:['one']});
     assert.equal(get.ep, 'get'); assert.equal(get.client, 'http');
     assert.equal(get.qLen, null); assert.equal(get.qLang, null); assert(!Object.hasOwn(get, 'q'));
@@ -202,11 +217,11 @@ export async function* answerStream(query) {
         assert.equal(failure.qLen, tool === 'trussc_search' ? 4 : null);
         assert.equal(failure.qLang, tool === 'trussc_search' ? 'en' : null);
     }
-    for (const [ep, body] of [['chat',{question:'fail'}], ['ask',{question:'fail'}], ['search',{question:'fail'}], ['get',{ids:['fail']}]]) {
+    for (const [ep, body] of [['chat',{question:'fail'}], ['search',{question:'fail'}], ['get',{ids:['fail']}]]) {
         const {row} = await request('/' + ep, body);
         assert.equal(row.errorClass, 'StubFailure'); assert.equal(row.errorReason, 'generation'); assert.equal(row.ep, ep);
     }
-    for (const ep of ['ask','chat','search']) {
+    for (const ep of ['chat','search']) {
         assert.equal((await request('/'+ep, {question:''})).row.errorReason, 'input');
         const {row:oversize} = await request('/'+ep, {question:'x'.repeat(8001)});
         assert.equal(oversize.errorReason, 'input-fields'); assert.equal(oversize.qLen,8001); assert.equal(oversize.qLang,'en');
@@ -263,7 +278,7 @@ export async function* answerStream(query) {
     }
     try {
         // UTC midnight boundaries, including month/year and local-time offsets.
-        at('2025-12-31T23:59:59.999Z'); logStat({ ep: 'ask', q: 'December' });
+        at('2025-12-31T23:59:59.999Z'); logStat({ ep: 'chat', q: 'December' });
         at('2026-01-01T00:00:00Z'); logStat({ ep: 'mcp', tool: 'trussc_get', client: 'claude' });
         at('2026-01-01T09:00:00+09:00'); logStat({ ep: 'search', q: 'January' });
         at('2026-01-02T00:00:00Z'); logStat({ ep: 'search', q: 'Next day' });
@@ -309,7 +324,7 @@ export async function* answerStream(query) {
     }
     const reportOutput = report();
     assert.match(reportOutput, /\(4 requests,/);
-    for (const label of ['by endpoint:', 'by tool:', 'by client:', 'by day:', 'ask', 'search', 'mcp', 'trussc_get', 'claude', '2025-12-31', '2026-01-01']) assert(reportOutput.includes(label), label);
+    for (const label of ['by endpoint:', 'by tool:', 'by client:', 'by day:', 'chat', 'search', 'mcp', 'trussc_get', 'claude', '2025-12-31', '2026-01-01']) assert(reportOutput.includes(label), label);
     assert.match(report(['--archive-dir', archive], join(dir, 'absent')), /\(4 requests,/);
     assert.match(report(['--stats-dir', archive], join(dir, 'absent')), /\(4 requests,/);
     assert.match(report([], join(dir, 'absent')), /no requests/);

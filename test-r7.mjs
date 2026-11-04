@@ -68,7 +68,7 @@ export async function* answerStream() { yield {type:'final'}; }
         server.on('request', (req) => { req.socket.request = req; });
         function open() {
             const socket = new Wire(); sockets.push(socket); server.emit('connection', socket);
-            socket.push(Buffer.from('POST /ask HTTP/1.1\r\nHost: offline\r\nTransfer-Encoding: chunked\r\n\r\n'));
+            socket.push(Buffer.from('POST /chat HTTP/1.1\r\nHost: offline\r\nTransfer-Encoding: chunked\r\n\r\n'));
             return socket;
         }
         const count = 65536, concurrent = 8, limit = 262144;

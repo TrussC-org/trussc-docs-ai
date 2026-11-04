@@ -164,8 +164,7 @@ the selected variant; other variants' knobs have no effect.
 
 These internal options have no HTTP interface. The only new service environment
 variables are optional `HAIKU_EFFORT`, `HAIKU_THINKING` and `HAIKU_ADAPTIVE_MAX_TOKENS` (see the
-[configuration table](../../README.md)). `/ask` and
-`/chat` ignore model, effort, thinking and variant fields in bodies, nested options, history metadata, headers
+[configuration table](../../README.md)). `/chat` ignores model, effort, thinking and variant fields in bodies, nested options, history metadata, headers
 and query parameters. The public debug schema's existing `haiku.inputTokens` is
 now an array aligned with `estInputTokens`; `inputTokensTotal` retains the round
 sum. No variant configuration, thinking content or thinking-specific counts enter

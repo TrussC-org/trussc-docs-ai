@@ -1,7 +1,7 @@
 # Usage stats
 
 The API appends one JSON object per tracked POST request to
-`STATS_DIR/YYYY-MM-DD.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/ask`, `/search`,
+`STATS_DIR/YYYY-MM-DD.jsonl` via `logStat` in `stats.mjs`. `/chat`, `/search`,
 `/get`, and `/mcp` share these fields, on success and failure. The day is the UTC
 day of the row's `ts`. Queries and answers are kept for about six months, then
 deleted with their stats file. The report runs outside the API sandbox.
@@ -23,7 +23,7 @@ deleted with their stats file. The report runs outside the API sandbox.
 | `net` | Network grouping hash on every row, including MCP initialize and errors: SHA-256 with the existing `STATS_SALT` and `salt + '|' + key` construction, truncated to 16 lowercase hex characters. IPv4 uses the full address; IPv6 uses its normalized first /64; IPv4-mapped IPv6 uses the full IPv4 address. Missing/unparseable input is `null`. No raw address or prefix is logged. |
 | `errorReason`, `errorClass` | Existing pipeline error fields, with coarse request/validation defaults; `null` when absent. A successful fallback can still carry the existing pipeline `errorClass`. |
 | `q` | **Existing text field, retained by owner decision.** The full query as previously logged (existing whitespace trimming remains). Omitted on non-query requests and early validation failures, as before. |
-| `a` | **Existing text field, retained by owner decision.** Answer's first 4000 UTF-16 code units, only on successful `/ask` and `/chat`, as before. |
+| `a` | **Existing text field, retained by owner decision.** Answer's first 4000 UTF-16 code units, only on successful `/chat`, as before. |
 
 Rejected question/history-length requests retain query length/language metadata
 when a question is available, while omitting query text as before.
@@ -49,7 +49,7 @@ most 20). These fields describe individual retrieval rounds; the top-level
 `tool` still identifies an MCP tool request. MCP search and `/search` rows may
 contain 2–3 `queries`; then `q` is those validated queries joined with spaces.
 
-`/ask` and `/chat` identify the widget from its existing nonempty `page` hint or
+`/chat` identifies the widget from its existing nonempty `page` hint or
 canonical site Origin (`https://trussc.org`, including `www`). Debug alone is not
 sufficient: the CLI sends it too. Other HTTP requests use `http`. These are usage
 hints supplied by clients, not authenticated identities.
@@ -85,6 +85,8 @@ API or write a local stats file. HTTP initialize is logged on `/mcp`. MCP
 notifications and other protocol POSTs receive a common row too. Health checks,
 static assets, preflight requests and unrecognized routes are outside this log.
 
+Rows written before this change may carry `ep: "ask"` from `/ask`; the reporter still counts them.
+
 ## Example lines
 
 Illustrative common fields (optional pipeline detail fields are omitted here):
@@ -95,10 +97,10 @@ Illustrative common fields (optional pipeline detail fields are omitted here):
 {"ts":"2026-10-21T12:00:00.000Z","ep":"chat","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
 ```
 
-`/ask`:
+`/chat` (HTTP CLI):
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"widget","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"chat","tool":null,"client":"http","ms":800,"path":"jev","fallbackReason":null,"rounds":1,"haikuCalls":1,"haiku":{"in":1000,"out":70,"thinking":null},"jevTokens":500,"qLen":11,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null,"q":"draw circle","a":"Use drawCircle."}
 ```
 
 `/search`:
@@ -137,10 +139,10 @@ Stdio proxy `/get`:
 {"ts":"2026-10-21T12:00:00.000Z","ep":"mcp","tool":"trussc_get","client":"trussc-mcp-stdio","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":null,"qLang":null,"ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":null,"errorClass":null}
 ```
 
-Failure on `/ask`:
+Failure on `/chat`:
 
 ```json
-{"ts":"2026-10-21T12:00:00.000Z","ep":"ask","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":6,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":"transport","errorClass":"TypeError","q":"circle"}
+{"ts":"2026-10-21T12:00:00.000Z","ep":"chat","tool":null,"client":"http","ms":2,"path":null,"fallbackReason":null,"rounds":0,"haikuCalls":0,"haiku":{"in":null,"out":null,"thinking":null},"jevTokens":null,"qLen":6,"qLang":"en","ip":"0123456789abcdef","net":"fedcba9876543210","errorReason":"transport","errorClass":"TypeError","q":"circle"}
 ```
 
 ## Daily files and retention

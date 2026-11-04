@@ -1,8 +1,9 @@
 // HTTP client for the public, allowlisted per-round trace. No model credentials.
 import { pathToFileURL } from 'node:url';
+import { collectChatResponse } from './chat-response.mjs';
 
 export async function main(args = process.argv.slice(2), { fetchImpl = fetch, print = console.log } = {}) {
-    let question, json = false, url = `http://127.0.0.1:${process.env.PORT || 8788}/ask`;
+    let question, json = false, url = `http://127.0.0.1:${process.env.PORT || 8788}/chat`;
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
         if (arg === '--json') json = true;
@@ -16,9 +17,9 @@ export async function main(args = process.argv.slice(2), { fetchImpl = fetch, pr
         body: JSON.stringify({ question, debug: true }),
     });
     if (!response.ok) throw new Error(`ask HTTP ${response.status}`);
-    const raw = await response.text();
-    if (json) { print(raw); return; }
-    const result = JSON.parse(raw);
+    const result = await collectChatResponse(response);
+    if (result.error) throw new Error(result.error);
+    if (json) { print(JSON.stringify(result)); return; }
     if (typeof result.debug?.haikuCalls === 'number') print(`Haiku calls: ${result.debug.haikuCalls}`);
     for (const [i, round] of (result.debug?.rounds || []).entries()) {
         print(`Round ${i + 1}: ${round.path}, exists p=${round.exists ?? 'unknown'}`);

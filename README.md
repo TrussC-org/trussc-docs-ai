@@ -117,8 +117,7 @@ at deploy time (the corpus is not in git).
 | endpoint | use |
 |---|---|
 | `GET /health` | `{ok,chunks}` — the widget's appearance gate |
-| `POST /chat` | SSE stream (`sources`/`links`/`research`/`token`/`replace`/`done`/`error`) — the widget |
-| `POST /ask` | one-shot JSON `{answer,links,sources,corrected,usedIds,rounds,queries}` — CLI / agents |
+| `POST /chat` | SSE stream (`sources`/`links`/`research`/`token`/`replace`/`debug`/`done`/`error`) — widget and HTTP CLI |
 | `POST /search` | retrieval `{results,path,exists,...}` — agents (no generation) |
 
 `trussc_search` has one shared schema for chat and MCP: neither `query` nor
@@ -170,16 +169,16 @@ round (the first tool call leads to round 2). Missing search `message` uses a
 fixed Japanese line when the question contains Japanese, otherwise English.
 Get emits no `research` event: the demo renders an empty-query search label and
 the production widget would still add a filler message. Sources and links refresh after retrieval.
-`/ask` and `done` include the number of answer rounds and the raw question followed
+The `done` event includes the number of answer rounds and the raw question followed
 by additional search queries in execution order; get adds no query. Chat traces
 may additionally carry `tool` (`trussc_search` or `trussc_get`) and, for get,
 `ids` (the accepted string ids, at most 20).
 
 ## Public debug trace and CLI
 
-Any peer can send `{question: "...", debug: true}` to `/ask`. Its normal answer
-response gains `debug: {haikuCalls: number, idOnlyCardsTotal: number, rounds: [...]}`. `/chat` accepts the same flag and emits
-one SSE `debug` event containing that object immediately before `done`.
+Any peer can send `{question: "...", debug: true}` to `/chat`. It emits
+one SSE `debug` event containing `{haikuCalls: number, idOnlyCardsTotal: number, rounds: [...]}`
+immediately before `done`.
 `idOnlyCardsTotal` sums the per-round budget omissions. Dropped card text is not summarized or compacted.
 `haikuCalls` counts all Haiku attempts for the request (zero with Ollama).
 Only the boolean `true` enables it. Each round has exactly these fields:
@@ -212,12 +211,13 @@ stats. Debug requests share all normal request and Jev usage limits.
 ```bash
 node ask-cli.mjs "How do I draw a circle?"
 node ask-cli.mjs "How do I draw a circle?" --json
-node ask-cli.mjs "How do I draw a circle?" --url https://api.trussc.org/ask
+node ask-cli.mjs "How do I draw a circle?" --url https://api.trussc.org/chat
 ```
 
-The CLI POSTs `{question,debug:true}` to `http://127.0.0.1:$PORT/ask`
+The CLI POSTs `{question,debug:true}` to `http://127.0.0.1:$PORT/chat`
 (`PORT=8788` by default). It prints a readable per-round trace followed by the
-answer; `--json` prints the raw JSON response. `--url` specifies the full endpoint.
+answer; `--json` prints one JSON object assembled from the stream with
+`answer, links, sources, corrected, usedIds, rounds, queries, debug`. `--url` specifies the full endpoint.
 There is no rounds option. Changing `MAX_SEARCH_ROUNDS` requires an environment
 change and a server restart; requests cannot override it.
 
@@ -285,7 +285,7 @@ searches for that answer. If the minimal fixed request itself cannot fit, the
 answer fails with the same safe error. The estimate is a local input bound,
 not the provider's tokenizer.
 
-The per-IP Jev windows are shared across `/chat`, `/ask`, `/search`, and MCP search;
+The per-IP Jev windows are shared across `/chat`, `/search`, and MCP search;
 the existing `RATE_MAX` request limiter also stays in place. Expired IP entries are
 pruned and at most 10,000 IPs are tracked, evicting the oldest. Daily request tokens
 are reserved before sending; API-reported usage replaces the estimate when present.

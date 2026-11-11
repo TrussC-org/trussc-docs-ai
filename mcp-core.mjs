@@ -8,6 +8,19 @@
 
 import { RELATED_MIX } from './config.mjs';
 
+// Returned by initialize; clients that support it put this in the model's system
+// prompt even while the tools themselves are deferred. Wording comes from the
+// 11-06 Haiku trial: names guessed from oF mostly worked, behavior did not.
+export const INSTRUCTIONS =
+    'TrussC is a niche openFrameworks-like C++ framework (namespace tc, built on sokol). ' +
+    'Guessing names from openFrameworks usually works, but behavior often differs. ' +
+    'Before relying on redraw rules (EVENT_DRIVEN), event order, color interpolation, FBOs, ' +
+    'key codes or addon setup, check with trussc_search. ' +
+    'Ask it "how do I X?" or "why does X not work?": it returns how-to cards and the examples worth reading. ' +
+    'If you have the TrussC source, read those examples there; for exact signatures and overloads, ' +
+    'the headers under core/include/tc are the most reliable. ' +
+    'Pass up to 3 strings in queries per call (never both query and queries), and read a card in full with trussc_get.';
+
 export const TOOLS = [{
     name: 'trussc_search',
     description:
@@ -465,6 +478,7 @@ export async function dispatch(msg, handlers) {
             protocolVersion: (params && params.protocolVersion) || '2024-11-05',
             capabilities: { tools: {} },
             serverInfo: { name: 'trussc-docs', version: '0.1.0' },
+            instructions: INSTRUCTIONS,
         });
         if (method === 'tools/list') return ok({ tools: TOOLS.filter(t => t.name !== 'trussc_feedback' || handlers?.feedback) });
         if (method === 'ping') return ok({});

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TOOLS, formatResults, formatSearchResults, createSymbolChecker, relatedCandidates, dispatch } from './mcp-core.mjs';
+import { TOOLS, INSTRUCTIONS, formatResults, formatSearchResults, createSymbolChecker, relatedCandidates, dispatch } from './mcp-core.mjs';
 
 const search = TOOLS.find(tool => tool.name === 'trussc_search');
 for (const internal of ['BM25', 'RRF', 'bge-m3', 'cross-encoder', 'reranker', 'Jev',
@@ -66,6 +66,9 @@ assert(Buffer.byteLength(bounded) <= 262144);
 assert(bounded.includes('search output truncated'));
 assert(bounded.includes('Other possibly related:'));
 assert(!bounded.includes('�'));
+const init = await dispatch({ id: 1, method: 'initialize', params: {} }, {});
+assert.equal(init.result.instructions, INSTRUCTIONS);
+assert(INSTRUCTIONS.includes('trussc_search') && INSTRUCTIONS.length < 1000);
 const rpc = await dispatch({ id: 1, method: 'tools/call', params: { name: 'trussc_search', arguments: { query: 'tc::CudaGraph', k: 1 } } }, {
     search: async () => ({ results: [...cards, { id: 'extra', title: 'extra' }], ...info }),
 });

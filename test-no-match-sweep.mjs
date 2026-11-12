@@ -60,7 +60,7 @@ test('real builder corpus never reports a documented reference name absent', t =
         writeFileSync(join(dir, 'for-ai.md'), '');
         Object.assign(env, {
             TRUSSC_REPO: join(dir, 'empty'), FOR_AI: join(dir, 'for-ai.md'),
-            DOCS_DIR: join(dir, 'empty'), EXAMPLES_SRC: join(dir, 'empty'),
+            DOCS_DIR: join(dir, 'absent'), EXAMPLES_SRC: join(dir, 'empty'),
             ADDONS_DIR: join(dir, 'empty'), ADDON_CACHE_DIR: cache,
             ADDON_REGISTRY: join(here, 'addon-registry.json'),
             RELEASES_JSON: join(here, 'releases.json'), ISSUES_JSON: join(here, 'issues.json'),

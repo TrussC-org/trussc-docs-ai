@@ -6,6 +6,7 @@
 // standard sibling-checkout layout and are all env-overridable (see below). A
 // deployed server needs none of them — it reads the committed chunks.embedded.json.
 import { dirname, resolve, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -78,7 +79,8 @@ const TRUSSC_REPO = process.env.TRUSSC_REPO || resolve(HERE, '../TrussC');
 const SITE_REPO   = process.env.SITE_REPO   || resolve(HERE, '../trussc.org');
 
 // concept: the hand-written half of FOR_AI_ASSISTANT.md (task/how-to/idioms).
-export const FOR_AI = process.env.FOR_AI || join(TRUSSC_REPO, 'docs/FOR_AI_ASSISTANT.md');
+const forAiGuide = join(TRUSSC_REPO, 'docs/guides/FOR_AI_ASSISTANT.md');
+export const FOR_AI = process.env.FOR_AI || (existsSync(forAiGuide) ? forAiGuide : join(TRUSSC_REPO, 'docs/FOR_AI_ASSISTANT.md'));
 // symbols: the SAME merged data the website renders (emit-web output) — names match
 // the reference page exactly (deep-links resolve), and it carries enum values,
 // operators, properties, related, curated multilingual prose.

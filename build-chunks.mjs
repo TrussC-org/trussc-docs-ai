@@ -59,29 +59,31 @@ function chunkForAi(path) {
         ({ id: 'concept:' + slug(crumb), source: 'for-ai', lang: 'cpp', title: crumb, text: `# ${crumb}\n\n${text}` }));
 }
 
-// --- Source: hand-written TrussC docs (docs/*.md) --------------------------
+// --- Source: hand-written TrussC docs --------------------------------------
 // Curated list of high-value prose (how-to / design / migration). Vendored library
 // docs, license/security boilerplate, and internal design memos are NOT included.
 // FOR_AI_ASSISTANT.md is handled by chunkForAi (skip here to avoid duplicates).
 const DOC_FILES = [
-    ['README.md', 'TrussC'],                              // note: repo root, resolved below
-    ['ARCHITECTURE.md', 'Architecture'],
-    ['GET_STARTED.md', 'Get Started'],
-    ['GET_STARTED_CONSOLE_MODE.md', 'Get Started (console mode)'],
-    ['TrussC_vs_openFrameworks.md', 'TrussC vs openFrameworks'],
-    ['ADDONS.md', 'Addons'],
-    ['BUILD_SYSTEM.md', 'Build System'],
-    ['AI_AUTOMATION.md', 'AI Automation (MCP)'],
-    ['INSTALLATION_WINDOWS.md', 'Installation (Windows)'],
-    ['ROADMAP.md', 'Roadmap'],
-    ['MIGRATION_0_8.md', 'Migrating to v0.8'],
+    [['../README.md'], 'TrussC'],                         // repo root, relative to docs/
+    [['architecture/README.md', 'ARCHITECTURE.md'], 'Architecture'],
+    [['GET_STARTED.md'], 'Get Started'],
+    [['guides/HEADLESS_LINUX.md', 'GET_STARTED_CONSOLE_MODE.md'], 'Get Started (console mode)'],
+    [['guides/TrussC_vs_openFrameworks.md', 'TrussC_vs_openFrameworks.md'], 'TrussC vs openFrameworks'],
+    [['guides/ADDONS.md', 'ADDONS.md'], 'Addons'],
+    [['guides/BUILD_SYSTEM.md', 'BUILD_SYSTEM.md'], 'Build System'],
+    [['guides/AI_AUTOMATION.md', 'AI_AUTOMATION.md'], 'AI Automation (MCP)'],
+    [['guides/INSTALLATION_WINDOWS.md', 'INSTALLATION_WINDOWS.md'], 'Installation (Windows)'],
+    [['ROADMAP.md'], 'Roadmap'],
+    [['guides/MIGRATION_0_8.md', 'MIGRATION_0_8.md'], 'Migrating to v0.8'],
 ];
 function chunkDocs(docsDir) {
+    if (!existsSync(docsDir)) return [];
     const chunks = [];
-    for (const [rel, label] of DOC_FILES) {
-        // README lives at the repo root (one level up from docs/); the rest in docs/.
-        const path = rel === 'README.md' ? join(docsDir, '..', rel) : join(docsDir, rel);
-        if (!existsSync(path)) continue;
+    for (const [candidates, label] of DOC_FILES) {
+        // Prefer the new layout, with the old layout as a fallback.
+        const paths = candidates.map(rel => join(docsDir, rel));
+        const path = paths.find(path => existsSync(path));
+        if (!path) throw new Error(`Missing doc "${label}"; tried: ${paths.join(', ')}`);
         for (const { crumb, text } of splitHeadings(readFileSync(path, 'utf8'))) {
             const title = `${label} > ${crumb}`;
             chunks.push({ id: 'doc:' + slug(label + ' ' + crumb), source: 'for-ai', lang: 'common', title, text: `# ${title}\n\n${text}` });
@@ -910,7 +912,7 @@ if (dupIds.length) console.warn(`  ⚠ ${dupIds.length} duplicate chunk id(s): $
 writeFileSync(CHUNKS, chunks.map((c) => JSON.stringify(c)).join('\n') + '\n');
 console.log(`wrote ${chunks.length} chunks → ${CHUNKS}`);
 console.log(`  concept (for-ai):     ${concept.length}`);
-console.log(`  doc     (docs/*.md):  ${docs.length}`);
+console.log(`  doc     (docs):       ${docs.length}`);
 console.log(`  symbol  (trussc-api): ${symbols.length}  (of-mapping entries: ${ofIdx.size})`);
 console.log(`  API notes truncated: ${apiStats.truncatedNotes} card(s)`);
 console.log(`  example (examples):   ${examples.length}`);

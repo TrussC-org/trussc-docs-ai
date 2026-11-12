@@ -39,14 +39,17 @@ export const RERANK_TIMEOUT_MS = numberEnv('RERANK_TIMEOUT_MS', 5000);
 // turns actually fit (target ~10). Cap it rather than letting Ollama default to 32k.
 export const NUM_CTX = Number(process.env.NUM_CTX || 24000);
 export const EMBED_ON_CPU = process.env.EMBED_ON_CPU === '1'; // keep bge-m3 off the GPU to save VRAM
-// How long Ollama keeps a model resident in VRAM after a request. '-1' = forever
-// (no cold-start re-load; holds ~5.4GB for both models), '30m'/'8h' = unload after
-// idle. Passed per-request so no ollama.service change is needed.
+// How long Ollama keeps a model resident in VRAM after a request. Unset (the
+// default) sends no keep_alive, so the server's OLLAMA_KEEP_ALIVE decides (6h on
+// this box, shared with vault-search). Ollama applies the value of the LAST request
+// to a model, so a per-client value would override the server setting for everyone.
+// Set it only for a standalone setup: '-1' = forever, '30m'/'8h' = unload after idle.
 // NOTE: Ollama wants a NUMBER for second-counts / -1 (a bare "-1" string fails to
 // parse as a Go duration), but a duration STRING like "30m"/"8h". So coerce a
 // purely-numeric value to a Number and leave duration strings as-is.
-const _ka = process.env.KEEP_ALIVE || '30m';
-export const KEEP_ALIVE = /^-?\d+$/.test(_ka) ? Number(_ka) : _ka;
+// undefined drops out of JSON.stringify, so the request carries no keep_alive.
+const _ka = process.env.KEEP_ALIVE;
+export const KEEP_ALIVE = !_ka ? undefined : /^-?\d+$/.test(_ka) ? Number(_ka) : _ka;
 // Thinking mode OFF by default: it's accurate but ~40–80s/answer (verbose at every
 // level) — too slow for chat. We get accuracy instead from the deterministic
 // fabrication check in rag.mjs (draft is ~1s). Set THINK=1 to force it on.

@@ -232,7 +232,7 @@ change and a server restart; requests cannot override it.
 ## Config (`config.mjs`, all env-overridable)
 
 `OLLAMA_URL`, `GEN_MODEL` (qwen3.5:4b), `EMBED_MODEL` (bge-m3), `TOP_K`, `NUM_CTX`,
-`KEEP_ALIVE` (model VRAM residency; `-1`=forever), `THINK`, `REF_BASE`,
+`KEEP_ALIVE` (model VRAM residency; unset by default so Ollama's `OLLAMA_KEEP_ALIVE` decides; `-1`=forever), `THINK`, `REF_BASE`,
 `STATS`/`STATS_DIR`/`STATS_SALT` (usage logging), `EMBED_ON_CPU`,
 `EMBED_TOKEN_BUDGET` (default 1900: `embed.mjs` cuts each input to about this many bge-m3 tokens, under the model's 2,048-token context, and lists the cut inputs; if Ollama still rejects one, only that input is shortened and retried. Changing it re-embeds the inputs it affects).
 

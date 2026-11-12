@@ -59,12 +59,21 @@ ${mode === 'partial' ? "printf '1 total\\n'; echo vanished >&2; exit 1" : mode =
     fs.writeFileSync(runner, `import fs from 'node:fs'; import {runGit} from ${JSON.stringify(cacheURL)};
 try {await runGit(['clone'],{treeDir:${JSON.stringify(tree)},timeoutMs:${mode === 'full' ? 600 : 8000},recordGroup:g=>fs.writeFileSync(${JSON.stringify(groupFile)},JSON.stringify(g))});fs.writeFileSync(${JSON.stringify(output)},'ok');}
 catch(e){fs.writeFileSync(${JSON.stringify(output)},e.message);}`);
-    let parent, exited, group, writer;
+    let parent, exited, group, writer, stderr = '';
+    function read(file) {
+        const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+        assert.ok(text, `Empty runner file ${file} (exit status ${parent.exitCode}, signal ${parent.signalCode}); stderr: ${stderr || '(empty)'}`);
+        return text;
+    }
     try {
-        parent = spawn(process.execPath, [runner], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: 'ignore' });
-        exited = once(parent, 'exit');
-        await until(() => fs.existsSync(groupFile), 'supervisor identity recorded');
-        group = JSON.parse(fs.readFileSync(groupFile, 'utf8')).pgid;
+        parent = spawn(process.execPath, [runner], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ['ignore', 'ignore', 'pipe'] });
+        parent.stderr.on('data', b => { stderr += b; });
+        exited = once(parent, 'close');
+        // Only full needs the group while the runner is alive.
+        if (mode === 'full') await until(() => (fs.existsSync(groupFile) && fs.statSync(groupFile).size > 0) || parent.exitCode !== null || parent.signalCode !== null, 'supervisor identity recorded');
+        else await exited;
+        if (parent.exitCode !== null || parent.signalCode !== null) await exited;
+        group = JSON.parse(read(groupFile)).pgid;
         if (mode === 'full') {
             await until(() => fs.existsSync(ready), 'fixture writer ready');
             writer = Number(fs.readFileSync(ready, 'utf8'));
@@ -76,9 +85,10 @@ catch(e){fs.writeFileSync(${JSON.stringify(output)},e.message);}`);
             assert.equal(fs.statSync(join(tree, 'growth')).size, size);
             process.kill(parent.pid, 'SIGCONT');
         }
-        await exited;
+        const [code, signal] = await exited;
         await until(() => !alive(-group), 'entire group exited and was reaped');
-        const result = fs.readFileSync(output, 'utf8');
+        const result = read(output);
+        assert.equal(code, 0, `Runner exit status ${code}, signal ${signal}; stderr: ${stderr || '(empty)'}`);
         if (mode === 'entries') assert.match(result, /20,000 entries/);
         else if (mode === 'never') {
             assert.match(result, /cannot measure Git staging size/);

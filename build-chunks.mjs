@@ -75,6 +75,8 @@ const DOC_FILES = [
     [['guides/INSTALLATION_WINDOWS.md', 'INSTALLATION_WINDOWS.md'], 'Installation (Windows)'],
     [['ROADMAP.md'], 'Roadmap'],
     [['guides/MIGRATION_0_8.md', 'MIGRATION_0_8.md'], 'Migrating to v0.8'],
+    [['guides/DEBUGGING.md'], 'Debugging'],
+    [['RECIPES.md'], 'Recipes'],
 ];
 function chunkDocs(docsDir) {
     if (!existsSync(docsDir)) return [];
@@ -507,6 +509,7 @@ function chunkAddonExamples(reg, addonDirs, nameSet) {
     }
     return chunks;
 }
+const EXAMPLE_README_CAP = 4000;
 function chunkExamples(jsonPath, srcRoot, nameSet) {
     const j = JSON.parse(readFileSync(jsonPath, 'utf8'));
     const chunks = [];
@@ -528,7 +531,15 @@ function chunkExamples(jsonPath, srcRoot, nameSet) {
             const boilerplate = `A TrussC example${web ? ' (runs in the web player)' : ''}.`;
             const brief = exampleBrief(files, apis, boilerplate);
             const head = [`# ${it.name}  (example — ${group})`, boilerplate, apis.length ? `APIs used: ${apis.slice(0, 50).join(', ')}` : null].filter(Boolean).join('\n');
-            const block = (f) => `// ===== ${f.rel} =====\n\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``;
+            const readme = join(dir, '..', 'README.md');
+            if (existsSync(readme)) {
+                const body = readFileSync(readme, 'utf8').replace(/\r/g, '');
+                const src = body.length > EXAMPLE_README_CAP
+                    ? body.slice(0, EXAMPLE_README_CAP) + '\n\n… (README truncated)'
+                    : body;
+                files.unshift({ rel: 'README.md', src });
+            }
+            const block = (f) => `// ===== ${f.rel} =====\n` + (f.rel === 'README.md' ? f.src : `\`\`\`${lang(f.rel)}\n${f.src}\n\`\`\``);
             const text = `${head}\n\n${files.map(block).join('\n\n')}`;
             // Per-file embed vectors; the header line carries the example name/group so
             // a file vector also responds to "<name> example" / "<group>" queries.

@@ -26,6 +26,8 @@ const files = [
     ['INSTALLATION_WINDOWS.md', 'guides/INSTALLATION_WINDOWS.md', 'doc:installation-windows-usage'],
     ['ROADMAP.md', 'ROADMAP.md', 'doc:roadmap-usage'],
     ['MIGRATION_0_8.md', 'guides/MIGRATION_0_8.md', 'doc:migrating-to-v0-8-usage'],
+    ['guides/DEBUGGING.md', 'guides/DEBUGGING.md', 'doc:debugging-usage'],
+    ['RECIPES.md', 'RECIPES.md', 'doc:recipes-usage'],
 ];
 function write(path, text = '## Usage\nUse this doc.\n### Details\nMore details.\n') {
     mkdirSync(dirname(path), { recursive: true });
@@ -43,6 +45,8 @@ test('old and new layouts keep the same doc cards and stable ids', () => {
     assert.deepEqual(current, old);
     assert.deepEqual(old.map(c => c.id), files.flatMap(([, , id]) => [id, id + '-details']));
     assert.equal(old[6].title, 'Get Started (console mode) > Usage');
+    assert.equal(current.find(c => c.id === 'doc:debugging-usage').title, 'Debugging > Usage');
+    assert.equal(current.find(c => c.id === 'doc:recipes-usage').title, 'Recipes > Usage');
 });
 test('the first existing candidate wins when both layouts are present', () => {
     const dir = fixture(0);

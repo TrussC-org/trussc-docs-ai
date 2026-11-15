@@ -1,12 +1,57 @@
 // Run with node --test test-build-chunks.mjs; no corpus writes or embeddings.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import vm from 'node:vm';
 const source = readFileSync(new URL('./build-chunks.mjs', import.meta.url), 'utf8');
 const ctx = {};
 vm.runInNewContext(`const descBlock = o => (o.desc ? [o.desc] : []);\n${source.slice(source.indexOf('function chunkApi('), source.indexOf('// --- Source: examples'))}\nglobalThis.chunkApi = chunkApi;`, ctx);
 const cards = (api, stats) => JSON.parse(JSON.stringify(ctx.chunkApi({ categories: [], types: [], constants: [], ...api }, new Map(), stats)));
+const ex = { readFileSync, existsSync, join, process: { env: {} } };
+vm.runInNewContext(source.slice(source.indexOf('const LIFECYCLE ='), source.indexOf('// --- Source: Lua reference')) +
+    source.slice(source.indexOf('function briefText('), source.indexOf('function cutBrief(')) +
+    '\nglobalThis.examples = chunkExamples;', ex);
+function exampleFixture(t) {
+    const root = mkdtempSync(join(tmpdir(), 'docsai-example-readme-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const dir = join(root, 'graphics', 'sample');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(root, 'examples.json'), JSON.stringify({ examples: { graphics: { items: [{ name: 'sample' }] } } }));
+    writeFileSync(join(dir, 'src/tcApp.cpp'), '// Draw a circle.\nvoid draw() { drawCircle(); }\n');
+    writeFileSync(join(dir, 'src/tcApp.h'), '#pragma once\n');
+    return { dir, chunk: () => JSON.parse(JSON.stringify(ex.examples(join(root, 'examples.json'), root, new Set(['drawCircle', 'ReadmeOnly']))))[0] };
+}
+test('an example without a README retains its exact text, vectors and metadata', t => {
+    const { chunk } = exampleFixture(t);
+    const expected = {
+        id: 'example:sample', source: 'example', lang: 'cpp', title: 'sample (example)',
+        text: '# sample  (example — graphics)\nA TrussC example (runs in the web player).\nAPIs used: drawCircle\n\n' +
+            '// ===== tcApp.cpp =====\n```cpp\n// Draw a circle.\nvoid draw() { drawCircle(); }\n\n```\n\n' +
+            '// ===== tcApp.h =====\n```cpp\n#pragma once\n\n```',
+        embedTexts: [
+            'sample (example — graphics) — tcApp.cpp\n// Draw a circle.\nvoid draw() { drawCircle(); }\n',
+            'sample (example — graphics) — tcApp.h\n#pragma once\n',
+        ],
+        meta: { group: 'graphics', webSupported: true, apis: ['drawCircle'], files: ['tcApp.cpp', 'tcApp.h'], brief: 'Draw a circle.' },
+    };
+    assert.equal(JSON.stringify(chunk()), JSON.stringify(expected));
+});
+test('an example README precedes code and gets a capped per-file vector', t => {
+    const { dir, chunk } = exampleFixture(t);
+    const before = chunk();
+    const prefix = '# Sample\nReadmeOnly explains usage.\n';
+    for (const length of [prefix.length, 4000, 4001]) {
+        const body = prefix + 'x'.repeat(length - prefix.length);
+        writeFileSync(join(dir, 'README.md'), body.replace(/\n/g, '\r\n'));
+        const after = chunk();
+        const capped = length > 4000 ? body.slice(0, 4000) + '\n\n… (README truncated)' : body;
+        assert.equal(after.text, before.text.replace('// ===== tcApp.cpp =====', `// ===== README.md =====\n${capped}\n\n// ===== tcApp.cpp =====`));
+        assert.deepEqual(after.embedTexts, [`sample (example — graphics) — README.md\n${capped}`, ...before.embedTexts]);
+        assert.deepEqual(after.meta, { ...before.meta, files: ['README.md', ...before.meta.files] });
+    }
+});
 const fields = { details: 'English details', details_ja: '日本語の詳細', details_ko: '한국어 설명', related: ['Target'], keywords: ['lookup'], snippet: 'use("```");', platformNote: 'platform', platformNote_ja: '環境', platformNote_ko: '환경' };
 test('function, type, method, static, nested type and constant cards share all notes', () => {
     const api = {
